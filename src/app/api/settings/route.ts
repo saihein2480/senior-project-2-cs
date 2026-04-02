@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-// Proxy GET /api/settings -> http://localhost:3001/api/settings
+// Proxy GET /api/settings -> http://localhost:3000/api/settings
 export async function GET() {
   try {
     const upstreamUrl =

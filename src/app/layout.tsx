@@ -7,6 +7,8 @@ import Footer from "../components/Footer";
 import InstallPrompt from "../components/InstallPrompt";
 import ServiceWorkerRegistration from "../components/ServiceWorkerRegistration";
 import QueryProvider from "../providers/QueryProvider";
+import { CustomerAuthProvider } from "../contexts/CustomerAuthContext";
+import { CartProvider } from "../contexts/CartContext";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -64,11 +66,15 @@ export default function RootLayout({
       >
         <QueryProvider>
           <LanguageProvider>
-            <ServiceWorkerRegistration />
-            <NavBar />
-            <main className="flex-1">{children}</main>
-            <Footer />
-            <InstallPrompt />
+            <CustomerAuthProvider>
+              <CartProvider>
+                <ServiceWorkerRegistration />
+                <NavBar />
+                <main className="flex-1">{children}</main>
+                <Footer />
+                <InstallPrompt />
+              </CartProvider>
+            </CustomerAuthProvider>
           </LanguageProvider>
         </QueryProvider>
       </body>

@@ -4,6 +4,8 @@ import Link from "next/link";
 import React, { useState, useEffect, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useLanguage } from "../contexts/LanguageContext";
+import { useCustomerAuth } from "../contexts/CustomerAuthContext";
+import { useCart } from "../contexts/CartContext";
 
 export default function NavBar() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -14,6 +16,8 @@ export default function NavBar() {
   const router = useRouter();
   const pathname = usePathname();
   const { t } = useLanguage();
+  const { user, logout } = useCustomerAuth();
+  const { itemCount } = useCart();
 
   const isActive = (p: string) => {
     if (!pathname) return false;
@@ -347,7 +351,7 @@ export default function NavBar() {
           <button
             aria-label="Toggle search"
             onClick={() => setSearchOpen((s) => !s)}
-            className="p-2 rounded-full bg-white border border-gray-300 hover:bg-gray-50 md:hidden"
+            className="mr-2 p-2 rounded-full bg-white border border-gray-300 hover:bg-gray-50 md:hidden"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -364,6 +368,34 @@ export default function NavBar() {
               />
             </svg>
           </button>
+
+          <Link
+            href="/cart"
+            aria-label="Cart"
+            className="relative inline-flex items-center justify-center rounded-full border border-gray-300 bg-white p-2 hover:bg-gray-50"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              className="h-5 w-5 text-gray-700"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 4h2l2 12h10l2-8H7"
+              />
+              <circle cx="9" cy="20" r="1.5" />
+              <circle cx="17" cy="20" r="1.5" />
+            </svg>
+            {itemCount > 0 && (
+              <span className="absolute -right-1 -top-1 min-w-5 rounded-full bg-pink-500 px-1.5 text-center text-xs font-semibold text-white">
+                {itemCount > 99 ? "99+" : itemCount}
+              </span>
+            )}
+          </Link>
         </div>
       </div>
 
@@ -434,6 +466,30 @@ export default function NavBar() {
               {t("best_sellers")}
             </Link>
             <Link
+              href="/cart"
+              className={navLinkClass(
+                "/cart",
+                "block px-3 py-3 rounded-md text-lg font-pacifico",
+              )}
+            >
+              Cart {itemCount > 0 ? `(${itemCount})` : ""}
+            </Link>
+
+            {user && (
+              <>
+                <Link
+                  href="/account/profile"
+                  className="block px-3 py-3 rounded-md text-lg font-pacifico"
+                >
+                  My Account
+                </Link>
+                <Link
+                  href="/account/purchases"
+                  className="block px-3 py-3 rounded-md text-lg font-pacifico"
+                >
+                  Purchase History
+                </Link>
+            <Link
               href="/terms-and-conditions"
               className={navLinkClass(
                 "/terms-and-conditions",
@@ -442,6 +498,15 @@ export default function NavBar() {
             >
               {t("terms")}
             </Link>
+                <button
+                  onClick={() => logout()}
+                  className="block w-full px-3 py-3 text-left rounded-md text-lg font-pacifico text-red-700"
+                >
+                  Logout
+                </button>
+              </>
+            )}
+
             <div className="pt-3 border-t border-pink-400 mt-10">
               <div className="text-md text-gray-600 mb-4">{t("language")}</div>
               <div className="flex items-center gap-2">
@@ -459,6 +524,23 @@ export default function NavBar() {
                   {t("MM")}
                 </button>
               </div>
+
+              {!user && (
+                <div className="mt-4 space-y-1">
+                  <Link
+                    href="/auth/login"
+                    className="block px-3 py-2 rounded-md text-lg font-pacifico"
+                  >
+                    Login
+                  </Link>
+                  <Link
+                    href="/auth/register"
+                    className="block px-3 py-2 rounded-md text-lg font-pacifico"
+                  >
+                    Register
+                  </Link>
+                </div>
+              )}
             </div>
           </nav>
         </div>

@@ -7,6 +7,8 @@ import Link from "next/link";
 import { useProducts, type Product } from "../hooks/useProducts";
 import { useCurrencyRate } from "../hooks/useSettings";
 import { useShops } from "../hooks/useShops";
+import { useOnlinePromotions } from "../hooks/useOnlinePromotions";
+import { applyBestPromotionToLine } from "../lib/onlinePromotion";
 
 type SizeQuantity = {
   size?: string;
@@ -62,6 +64,7 @@ export default function ProductsList({
     error: queryError,
   } = useProducts();
   const { rate: mmkRate } = useCurrencyRate();
+  const { data: onlinePromotions = [] } = useOnlinePromotions();
   const { data: shopsData = [] } = useShops();
 
   const [error, setError] = useState<string | null>(null);
@@ -662,14 +665,36 @@ export default function ProductsList({
                   <div className="mb-5">
                     {p.price ? (
                       <div className="text-sm text-gray-900">
-                        <span className="font-medium">
-                          {Number.isInteger(p.price)
-                            ? `฿ ${p.price.toFixed(0)}`
-                            : `฿ ${p.price.toFixed(2)}`}
-                        </span>
-                        <span className="text-gray-500">{` / ${Math.round(
-                          p.price * mmkRate,
-                        ).toLocaleString()} Ks`}</span>
+                        {(() => {
+                          const basePrice = Number(p.price || 0);
+                          const promo = applyBestPromotionToLine({
+                            unitPriceTHB: basePrice,
+                            quantity: 1,
+                            productId: p.id,
+                            promotions: onlinePromotions,
+                          });
+                          const finalPrice = promo.finalSubtotalTHB;
+
+                          return (
+                            <>
+                              {promo.promotion ? (
+                                <span className="mr-2 text-xs text-gray-400 line-through">
+                                  {Number.isInteger(basePrice)
+                                    ? `฿ ${basePrice.toFixed(0)}`
+                                    : `฿ ${basePrice.toFixed(2)}`}
+                                </span>
+                              ) : null}
+                              <span className="font-medium">
+                                {Number.isInteger(finalPrice)
+                                  ? `฿ ${finalPrice.toFixed(0)}`
+                                  : `฿ ${finalPrice.toFixed(2)}`}
+                              </span>
+                              <span className="text-gray-500">{` / ${Math.round(
+                                finalPrice * mmkRate,
+                              ).toLocaleString()} Ks`}</span>
+                            </>
+                          );
+                        })()}
                       </div>
                     ) : (
                       <span className="text-sm text-gray-900">—</span>

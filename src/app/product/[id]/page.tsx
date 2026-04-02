@@ -2,10 +2,13 @@
 
 import React, { useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import Link from "next/link";
 import ProductsList from "../../../components/ProductsList";
 import { useProduct } from "../../../hooks/useProducts";
 import { useCurrencyRate } from "../../../hooks/useSettings";
+import { useCart } from "../../../contexts/CartContext";
+import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
+import { useOnlinePromotions } from "../../../hooks/useOnlinePromotions";
+import { applyBestPromotionToLine } from "../../../lib/onlinePromotion";
 
 type SizeQuantity = { size?: string; quantity?: number | string };
 type ColorVariant = {
@@ -27,7 +30,10 @@ export default function ProductDetailPage() {
     isLoading: loading,
     error: queryError,
   } = useProduct(id);
+  const { addItem } = useCart();
+  const { user } = useCustomerAuth();
   const { rate: mmkRate } = useCurrencyRate();
+  const { data: onlinePromotions = [] } = useOnlinePromotions();
 
   const error = queryError
     ? queryError instanceof Error
@@ -39,6 +45,9 @@ export default function ProductDetailPage() {
     null,
   );
   const [selectedSize, setSelectedSize] = useState<string>("");
+  const [selectedPurchaseQty, setSelectedPurchaseQty] = useState<number>(1);
+  const [selectedPurchaseQtyInput, setSelectedPurchaseQtyInput] =
+    useState<string>("1");
 
   const variants: ColorVariant[] = (product && product.colorVariants) || [];
   const stockFromVariants = variants.reduce(
@@ -98,8 +107,17 @@ export default function ProductDetailPage() {
       displayName || "Product",
     )}`;
 
+  const singleItemPromo = applyBestPromotionToLine({
+    unitPriceTHB: displayPrice || 0,
+    quantity: 1,
+    productId: id,
+    variantId: selectedVariantId || undefined,
+    promotions: onlinePromotions,
+  });
+  const displayFinalPrice =
+    displayPrice !== null ? singleItemPromo.finalSubtotalTHB : null;
   const mmkPrice =
-    displayPrice !== null ? Math.round(displayPrice * mmkRate) : null;
+    displayFinalPrice !== null ? Math.round(displayFinalPrice * mmkRate) : null;
 
   const selectedQty = (() => {
     if (!selectedVariant) return 0;
@@ -116,6 +134,31 @@ export default function ProductDetailPage() {
   })();
 
   const selectedItemLabel = `${displayName}${selectedVariant?.color ? ` • ${selectedVariant.color}` : ""}${selectedSize ? ` • ${selectedSize}` : ""}`;
+
+  const clampPurchaseQty = (value: number) => {
+    const upperBound = Math.max(1, selectedQty);
+    return Math.max(1, Math.min(Math.floor(value), upperBound));
+  };
+
+  const setPurchaseQty = (value: number) => {
+    const safe = clampPurchaseQty(value);
+    setSelectedPurchaseQty(safe);
+    setSelectedPurchaseQtyInput(String(safe));
+  };
+
+  React.useEffect(() => {
+    if (!selectedVariantId || !selectedSize || selectedQty <= 0) {
+      setSelectedPurchaseQty(1);
+      setSelectedPurchaseQtyInput("1");
+      return;
+    }
+
+    setSelectedPurchaseQty((prev) => {
+      const safe = Math.max(1, Math.min(prev, selectedQty));
+      setSelectedPurchaseQtyInput(String(safe));
+      return safe;
+    });
+  }, [selectedVariantId, selectedSize, selectedQty]);
 
   // Touch swipe support for mobile: swipe image to change selected color
   const touchStartX = useRef<number | null>(null);
@@ -328,14 +371,20 @@ export default function ProductDetailPage() {
               <div className="mt-1 text-2xl xl:text-3xl text-gray-900">
                 {displayPrice !== null ? (
                   <>
+                    {singleItemPromo.promotion ? (
+                      <span className="mr-3 text-base text-gray-400 line-through align-middle">
+                        {Number.isInteger(displayPrice)
+                          ? `฿ ${displayPrice.toFixed(0)}`
+                          : `฿ ${displayPrice.toFixed(2)}`}
+                      </span>
+                    ) : null}
                     <span className="font-semibold text-2xl md:text-3xl">
-                      {Number.isInteger(displayPrice)
-                        ? `฿ ${displayPrice.toFixed(0)}`
-                        : `฿ ${displayPrice.toFixed(2)}`}
+                      {Number.isInteger(displayFinalPrice || 0)
+                        ? `฿ ${(displayFinalPrice || 0).toFixed(0)}`
+                        : `฿ ${(displayFinalPrice || 0).toFixed(2)}`}
                     </span>
                     <span className="text-gray-500 ml-3">{` / ${Math.round(
-                      displayPrice *
-                        (Number(process?.env?.NEXT_PUBLIC_MMK_RATE) || 55),
+                      (displayFinalPrice || 0) * mmkRate,
                     ).toLocaleString()} Ks`}</span>
                   </>
                 ) : (
@@ -476,10 +525,17 @@ export default function ProductDetailPage() {
                       <div className="text-base font-medium text-right">
                         {displayPrice !== null ? (
                           <>
+                            {singleItemPromo.promotion ? (
+                              <span className="text-sm text-gray-400 line-through mr-2">
+                                {Number.isInteger(displayPrice)
+                                  ? `฿ ${displayPrice.toFixed(0)}`
+                                  : `฿ ${displayPrice.toFixed(2)}`}
+                              </span>
+                            ) : null}
                             <span className="font-semibold">
-                              {Number.isInteger(displayPrice)
-                                ? `฿ ${displayPrice.toFixed(0)}`
-                                : `฿ ${displayPrice.toFixed(2)}`}
+                              {Number.isInteger(displayFinalPrice || 0)
+                                ? `฿ ${(displayFinalPrice || 0).toFixed(0)}`
+                                : `฿ ${(displayFinalPrice || 0).toFixed(2)}`}
                             </span>
                             {mmkPrice !== null ? (
                               <span className="text-gray-500 text-sm ml-2">
@@ -499,6 +555,132 @@ export default function ProductDetailPage() {
                       </div>
                       <div className="text-base font-medium text-right">
                         {selectedQty}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-gray-500">
+                        Order Quantity
+                      </div>
+                      <div className="inline-flex items-center rounded-md border border-gray-300 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPurchaseQty(selectedPurchaseQty - 1)
+                          }
+                          disabled={
+                            selectedQty <= 0 || selectedPurchaseQty <= 1
+                          }
+                          className="px-3 py-1.5 text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          -
+                        </button>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          min={1}
+                          max={Math.max(1, selectedQty)}
+                          value={selectedPurchaseQtyInput}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (!/^\d*$/.test(raw)) return;
+
+                            setSelectedPurchaseQtyInput(raw);
+
+                            if (raw === "") return;
+
+                            const parsed = Number(raw);
+                            if (!Number.isFinite(parsed)) return;
+
+                            setSelectedPurchaseQty(clampPurchaseQty(parsed));
+                          }}
+                          onBlur={() => {
+                            const parsed = Number(selectedPurchaseQtyInput);
+                            if (!Number.isFinite(parsed)) {
+                              setPurchaseQty(selectedPurchaseQty);
+                              return;
+                            }
+
+                            setPurchaseQty(parsed);
+                          }}
+                          className="w-12 text-center text-sm font-medium text-gray-900 outline-none [appearance:textfield]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPurchaseQty(selectedPurchaseQty + 1)
+                          }
+                          disabled={
+                            selectedQty <= 0 ||
+                            selectedPurchaseQty >= selectedQty
+                          }
+                          className="px-3 py-1.5 text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="pt-3">
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <button
+                          onClick={() => {
+                            if (!user) {
+                              const redirectPath = `/product/${id}`;
+                              router.push(
+                                `/auth/login?redirect=${encodeURIComponent(redirectPath)}`,
+                              );
+                              return;
+                            }
+
+                            addItem({
+                              id: `${id}:${String(selectedVariantId)}:${selectedSize}`,
+                              productId: id,
+                              name: displayName || "Product",
+                              image:
+                                selectedVariant?.image ||
+                                product?.groupImage ||
+                                product?.image ||
+                                "",
+                              variantId: String(selectedVariantId),
+                              color: selectedVariant?.color || "",
+                              size: selectedSize,
+                              unitPriceTHB: Number(
+                                displayFinalPrice || displayPrice || 0,
+                              ),
+                              quantity: selectedPurchaseQty,
+                              maxQuantity: selectedQty,
+                            });
+                          }}
+                          disabled={selectedQty <= 0}
+                          className="w-full rounded-md border border-pink-300 bg-white px-4 py-2 text-pink-600 transition hover:bg-pink-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {user ? "Add to Cart" : "Login to Add to Cart"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (!user) {
+                              const redirectPath = `/product/${id}`;
+                              router.push(
+                                `/auth/login?redirect=${encodeURIComponent(redirectPath)}`,
+                              );
+                              return;
+                            }
+
+                            const query = new URLSearchParams({
+                              productId: id,
+                              variant: String(selectedVariantId),
+                              size: selectedSize,
+                              qty: String(selectedPurchaseQty),
+                            });
+                            router.push(`/checkout?${query.toString()}`);
+                          }}
+                          disabled={selectedQty <= 0}
+                          className="w-full rounded-md bg-pink-500 px-4 py-2 text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {user ? "Buy Now" : "Login to Buy"}
+                        </button>
                       </div>
                     </div>
                   </div>

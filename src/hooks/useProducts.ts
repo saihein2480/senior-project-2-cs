@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 import {
   collection,
   getDocs,
@@ -6,6 +7,7 @@ import {
   orderBy,
   doc,
   getDoc,
+  onSnapshot,
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
 
@@ -62,11 +64,90 @@ export type Product = {
   modelInfo?: string | number;
 };
 
+const NEW_DAYS = Number(process?.env?.NEXT_PUBLIC_NEW_ITEM_DAYS) || 7;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function getStockFromVariants(colorVariants: ColorVariant[] = []): number {
+  return Array.isArray(colorVariants)
+    ? colorVariants.reduce(
+        (total: number, v: ColorVariant) =>
+          total +
+          (v.sizeQuantities || []).reduce(
+            (t: number, s: SizeQuantity) => t + (Number(s.quantity) || 0),
+            0,
+          ),
+        0,
+      )
+    : 0;
+}
+
+function isNewItem(createdAt: FirestoreTimestampLike): boolean {
+  try {
+    let createdMs = Date.now();
+    if (createdAt) {
+      if (
+        typeof createdAt === "object" &&
+        createdAt !== null &&
+        "toMillis" in createdAt &&
+        typeof (createdAt as { toMillis?: unknown }).toMillis === "function"
+      ) {
+        createdMs = (createdAt as { toMillis: () => number }).toMillis();
+      } else if (typeof createdAt === "number") {
+        createdMs = createdAt;
+      } else {
+        createdMs = new Date(String(createdAt)).getTime();
+      }
+    }
+    return Date.now() - createdMs <= NEW_DAYS * MS_PER_DAY;
+  } catch {
+    return false;
+  }
+}
+
+function mapStockDocToProduct(id: string, data: FirestoreStockDoc): Product {
+  const colorVariants = (data.colorVariants as ColorVariant[]) || [];
+  const stockFromVariants = getStockFromVariants(colorVariants);
+
+  return {
+    id,
+    name: data.groupName || data.name,
+    price: typeof data.unitPrice === "number" ? data.unitPrice : data.price,
+    description: data.category || data.description,
+    image: data.colorVariants?.[0]?.image || data.image || data.groupImage,
+    groupImage: data.groupImage,
+    colorVariants,
+    stock: data.stock || stockFromVariants || 0,
+    shop:
+      data.shop?.toString() ||
+      data.shopId?.toString() ||
+      data.branch?.toString() ||
+      "",
+    createdAt: data.createdAt || null,
+    isNew: isNewItem(data.createdAt || null),
+  };
+}
+
 /**
  * Fetch all products from Firestore with caching
  * Cache duration: 3 minutes (product data should be relatively fresh)
  */
 export function useProducts() {
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    if (!db) return;
+
+    const q = query(collection(db, "stocks"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snap) => {
+      const items = snap.docs.map((d) =>
+        mapStockDocToProduct(d.id, d.data() as FirestoreStockDoc),
+      );
+      queryClient.setQueryData(["products"], items);
+    });
+
+    return () => unsubscribe();
+  }, [queryClient]);
+
   return useQuery({
     queryKey: ["products"],
     queryFn: async (): Promise<Product[]> => {
@@ -77,71 +158,9 @@ export function useProducts() {
       const q = query(collection(db, "stocks"), orderBy("createdAt", "desc"));
       const snap = await getDocs(q);
 
-      const NEW_DAYS = Number(process?.env?.NEXT_PUBLIC_NEW_ITEM_DAYS) || 7;
-      const MS_PER_DAY = 24 * 60 * 60 * 1000;
-
-      const items: Product[] = snap.docs.map((d) => {
-        const data = d.data() as FirestoreStockDoc;
-        const colorVariants = (data.colorVariants as ColorVariant[]) || [];
-
-        const stockFromVariants = Array.isArray(colorVariants)
-          ? colorVariants.reduce(
-              (total: number, v: ColorVariant) =>
-                total +
-                (v.sizeQuantities || []).reduce(
-                  (t: number, s: SizeQuantity) => t + (Number(s.quantity) || 0),
-                  0,
-                ),
-              0,
-            )
-          : 0;
-
-        // Determine if item is new
-        let isNew = false;
-        try {
-          const created = data.createdAt;
-          let createdMs = Date.now();
-          if (created) {
-            if (
-              typeof created === "object" &&
-              created !== null &&
-              "toMillis" in created &&
-              typeof (created as { toMillis?: unknown }).toMillis === "function"
-            ) {
-              createdMs = (created as { toMillis: () => number }).toMillis();
-            } else if (typeof created === "number") {
-              createdMs = created;
-            } else {
-              createdMs = new Date(String(created)).getTime();
-            }
-          }
-          isNew = Date.now() - createdMs <= NEW_DAYS * MS_PER_DAY;
-        } catch (e) {
-          isNew = false;
-        }
-
-        return {
-          id: d.id,
-          name: data.groupName || data.name,
-          price:
-            typeof data.unitPrice === "number" ? data.unitPrice : data.price,
-          description: data.category || data.description,
-          image:
-            data.colorVariants?.[0]?.image || data.image || data.groupImage,
-          groupImage: data.groupImage,
-          colorVariants: colorVariants,
-          stock: data.stock || stockFromVariants || 0,
-          shop:
-            data.shop?.toString() ||
-            data.shopId?.toString() ||
-            data.branch?.toString() ||
-            "",
-          createdAt: data.createdAt || null,
-          isNew,
-        };
-      });
-
-      return items;
+      return snap.docs.map((d) =>
+        mapStockDocToProduct(d.id, d.data() as FirestoreStockDoc),
+      );
     },
     staleTime: 3 * 60 * 1000, // 3 minutes
     gcTime: 10 * 60 * 1000, // 10 minutes
@@ -154,6 +173,28 @@ export function useProducts() {
  * Cache duration: 5 minutes
  */
 export function useProduct(id: string) {
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    if (!db || !id) return;
+
+    const docRef = doc(db, "stocks", id);
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (!docSnap.exists()) {
+        queryClient.setQueryData(["product", id], null);
+        return;
+      }
+
+      const product = mapStockDocToProduct(
+        docSnap.id,
+        docSnap.data() as FirestoreStockDoc,
+      );
+      queryClient.setQueryData(["product", id], product);
+    });
+
+    return () => unsubscribe();
+  }, [id, queryClient]);
+
   return useQuery({
     queryKey: ["product", id],
     queryFn: async (): Promise<Product | null> => {
@@ -168,37 +209,10 @@ export function useProduct(id: string) {
         return null;
       }
 
-      const data = docSnap.data() as FirestoreStockDoc;
-      const colorVariants = (data.colorVariants as ColorVariant[]) || [];
-
-      const stockFromVariants = Array.isArray(colorVariants)
-        ? colorVariants.reduce(
-            (total: number, v: ColorVariant) =>
-              total +
-              (v.sizeQuantities || []).reduce(
-                (t: number, s: SizeQuantity) => t + (Number(s.quantity) || 0),
-                0,
-              ),
-            0,
-          )
-        : 0;
-
-      return {
-        id: docSnap.id,
-        name: data.groupName || data.name,
-        price: typeof data.unitPrice === "number" ? data.unitPrice : data.price,
-        description: data.category || data.description,
-        image: data.colorVariants?.[0]?.image || data.image || data.groupImage,
-        groupImage: data.groupImage,
-        colorVariants: colorVariants,
-        stock: data.stock || stockFromVariants || 0,
-        shop:
-          data.shop?.toString() ||
-          data.shopId?.toString() ||
-          data.branch?.toString() ||
-          "",
-        createdAt: data.createdAt || null,
-      };
+      return mapStockDocToProduct(
+        docSnap.id,
+        docSnap.data() as FirestoreStockDoc,
+      );
     },
     staleTime: 5 * 60 * 1000, // 5 minutes
     gcTime: 15 * 60 * 1000, // 15 minutes
