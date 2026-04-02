@@ -45,32 +45,34 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   const sanitizeCartItems = (input: unknown): CartItem[] => {
     if (!Array.isArray(input)) return [];
-    return input
-      .map((item) => {
-        if (!item || typeof item !== "object") return null;
-        const record = item as Partial<CartItem>;
-        if (!record.id || !record.productId || !record.name) return null;
+    const sanitized: CartItem[] = [];
 
-        const quantity = Math.max(1, Math.floor(Number(record.quantity) || 1));
-        const maxQuantity =
-          typeof record.maxQuantity === "number"
-            ? Math.max(1, Math.floor(record.maxQuantity))
-            : undefined;
+    input.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const record = item as Partial<CartItem>;
+      if (!record.id || !record.productId || !record.name) return;
 
-        return {
-          id: String(record.id),
-          productId: String(record.productId),
-          name: String(record.name),
-          image: String(record.image || ""),
-          variantId: record.variantId ? String(record.variantId) : undefined,
-          color: record.color ? String(record.color) : undefined,
-          size: record.size ? String(record.size) : undefined,
-          unitPriceTHB: Number(record.unitPriceTHB) || 0,
-          quantity,
-          maxQuantity,
-        };
-      })
-      .filter((item): item is CartItem => item !== null);
+      const quantity = Math.max(1, Math.floor(Number(record.quantity) || 1));
+      const maxQuantity =
+        typeof record.maxQuantity === "number"
+          ? Math.max(1, Math.floor(record.maxQuantity))
+          : undefined;
+
+      sanitized.push({
+        id: String(record.id),
+        productId: String(record.productId),
+        name: String(record.name),
+        image: String(record.image || ""),
+        variantId: record.variantId ? String(record.variantId) : undefined,
+        color: record.color ? String(record.color) : undefined,
+        size: record.size ? String(record.size) : undefined,
+        unitPriceTHB: Number(record.unitPriceTHB) || 0,
+        quantity,
+        maxQuantity,
+      });
+    });
+
+    return sanitized;
   };
 
   useEffect(() => {
@@ -98,9 +100,12 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    const firestore = db;
+    const uid = user.uid;
+
     const loadRemoteCart = async () => {
       try {
-        const customerDocRef = doc(db, "customers", user.uid);
+        const customerDocRef = doc(firestore, "customers", uid);
         const customerDoc = await getDoc(customerDocRef);
         const remoteItems = sanitizeCartItems(customerDoc.data()?.cartItems);
 
@@ -131,9 +136,12 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     if (!hasLoadedStorage || authLoading || !hasLoadedRemoteCart) return;
     if (!user || !db || !isFirebaseConfigured) return;
 
+    const firestore = db;
+    const uid = user.uid;
+
     const syncRemoteCart = async () => {
       try {
-        const customerDocRef = doc(db, "customers", user.uid);
+        const customerDocRef = doc(firestore, "customers", uid);
         await setDoc(
           customerDocRef,
           {

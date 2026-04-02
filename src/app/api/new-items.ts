@@ -11,14 +11,22 @@ import app from "../../lib/firebase";
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse
+  res: NextApiResponse,
 ) {
   try {
+    if (!app) {
+      res.status(500).json({
+        items: [],
+        error: "Firebase is not configured",
+      });
+      return;
+    }
+
     const db = getFirestore(app);
     const q = query(
       collection(db, "products"),
       orderBy("createdAt", "desc"),
-      limit(4)
+      limit(4),
     );
     const snapshot = await getDocs(q);
     const items = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
