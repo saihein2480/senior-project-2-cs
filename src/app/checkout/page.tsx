@@ -48,23 +48,41 @@ export default function CheckoutPage() {
   const [paymentUrl, setPaymentUrl] = useState<string>("");
   const [onlineOrderId, setOnlineOrderId] = useState<string>("");
   const [completingTest, setCompletingTest] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<"scan" | "cod">("scan");
 
   const variant = useMemo(() => {
     const variants = ((product?.colorVariants || []) as ColorVariant[]).map(
       (v, idx) => ({ ...v, id: v.id || String(idx) }),
     );
+    
+    // If no variant selected but we have a size, try to find variant with that size
+    if (!selectedVariantId && selectedSize && variants.length > 0) {
+      const matchingVariant = variants.find((v) =>
+        ((v as any).sizeQuantities || []).some(
+          (sq: any) => sq.size?.toLowerCase() === selectedSize.toLowerCase(),
+        ),
+      );
+      if (matchingVariant) return matchingVariant;
+      // Default to first variant if size not found
+      return variants[0];
+    }
+    
     return variants.find((v) => String(v.id) === String(selectedVariantId));
-  }, [product, selectedVariantId]);
+  }, [product, selectedVariantId, selectedSize]);
 
   const directItem = useMemo<CheckoutItem | null>(() => {
     if (!productId || !product) return null;
 
+    // Use the resolved variant (which handles "Default" selection)
+    const effectiveVariantId = variant?.id || selectedVariantId || "0";
+    const effectiveColor = variant?.color || "Default";
+
     return {
-      key: `${productId}:${selectedVariantId}:${selectedSize}`,
+      key: `${productId}:${effectiveVariantId}:${selectedSize}`,
       productId,
-      variantId: selectedVariantId || undefined,
+      variantId: effectiveVariantId,
       name: product?.name || "Product",
-      color: variant?.color || "",
+      color: effectiveColor,
       size: selectedSize,
       image: variant?.image || product?.groupImage || product?.image || "",
       unitPriceTHB: Number(product?.price || 0),
@@ -111,7 +129,9 @@ export default function CheckoutPage() {
     (sum, row) => sum + row.discountTHB,
     0,
   );
-  const totalTHB = Math.max(0, baseTotalTHB - discountTHB);
+  const subtotalAfterDiscount = Math.max(0, baseTotalTHB - discountTHB);
+  const taxTHB = subtotalAfterDiscount * 0.07; // 7% tax
+  const totalTHB = subtotalAfterDiscount + taxTHB;
   const promotionTitle =
     lineResults.find((row) => row.promotion?.name)?.promotion?.name ||
     "Promotion";
@@ -150,6 +170,13 @@ export default function CheckoutPage() {
       return;
     }
 
+    // Handle COD checkout separately
+    if (paymentMethod === "cod") {
+      await createCODOrder();
+      return;
+    }
+
+    // Handle Scan/QR payment through MyanMyanPay
     setSubmitting(true);
     setError(null);
     setQrValue("");
@@ -263,7 +290,89 @@ export default function CheckoutPage() {
 
       throw new Error("Payment URL is missing from MyanMyanPay response");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Payment creation failed");
+      const errorMessage = e instanceof Error ? e.message : "Payment creation failed";
+      
+      // Make limit errors more user-friendly
+      if (errorMessage.toLowerCase().includes("limit")) {
+        setError(
+          "⚠️ Payment Gateway Limit Reached\n\n" +
+          "The sandbox testing account has reached its transaction limit. " +
+          "This is a temporary testing restriction.\n\n" +
+          "Solutions:\n" +
+          "• Contact MyanMyanPay support to increase sandbox limits\n" +
+          "• Complete merchant verification for production use\n" +
+          "• Try Cash on Delivery instead\n\n" +
+          "For now, please use Cash on Delivery payment method."
+        );
+      } else {
+        setError(errorMessage);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const createCODOrder = async () => {
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      // Create COD transaction directly in Firebase
+      const response = await fetch("/api/transactions/create-cod", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customer: {
+            uid: user!.uid,
+            email: user!.email || profile!.email,
+            displayName: profile!.displayName,
+            phone: profile!.phone,
+            address: profile!.address,
+          },
+          items: checkoutItems.map((item) => {
+            const line = applyBestPromotionToLine({
+              unitPriceTHB: item.unitPriceTHB,
+              quantity: item.quantity,
+              productId: item.productId,
+              variantId: item.variantId,
+              promotions: onlinePromotions,
+            });
+            return {
+              productId: item.productId,
+              productName: item.name,
+              variantId: item.variantId || "",
+              color: item.color || "",
+              size: item.size || "",
+              image: item.image || "",
+              quantity: item.quantity,
+              unitPriceTHB: item.unitPriceTHB,
+              discountedPriceTHB:
+                item.quantity > 0
+                  ? line.finalSubtotalTHB / item.quantity
+                  : item.unitPriceTHB,
+            };
+          }),
+          subtotalTHB: baseTotalTHB,
+          discountTHB: discountTHB,
+          taxTHB: taxTHB,
+          totalTHB: totalTHB,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to create COD order");
+      }
+
+      // Clear cart if checkout was from cart
+      if (!productId) {
+        clearCart();
+      }
+
+      // Redirect to orders page
+      router.push("/account/purchases");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "COD order creation failed");
     } finally {
       setSubmitting(false);
     }
@@ -372,8 +481,96 @@ export default function CheckoutPage() {
     <div className="mx-auto max-w-3xl px-4 py-12">
       <h1 className="text-3xl font-semibold text-gray-900">Online Checkout</h1>
       <p className="mt-2 text-sm text-gray-600">
-        Secure payment via MyanMyanPay gateway.
+        Choose your payment method and complete your order.
       </p>
+
+      {/* Payment Method Selection */}
+      <div className="mt-6 bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">
+          Payment Method
+        </h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* Scan/QR Payment */}
+          <button
+            onClick={() => setPaymentMethod("scan")}
+            className={`p-4 border-2 rounded-xl transition-all ${
+              paymentMethod === "scan"
+                ? "border-pink-500 bg-pink-50"
+                : "border-gray-200 hover:border-gray-300"
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              <div
+                className={`h-10 w-10 rounded-full flex items-center justify-center ${
+                  paymentMethod === "scan"
+                    ? "bg-pink-500 text-white"
+                    : "bg-gray-100 text-gray-600"
+                }`}
+              >
+                <svg
+                  className="h-6 w-6"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"
+                  />
+                </svg>
+              </div>
+              <div className="text-left">
+                <p className="font-medium text-gray-900">QR Code Payment</p>
+                <p className="text-sm text-gray-600">
+                  Pay via MyanMyanPay gateway
+                </p>
+              </div>
+            </div>
+          </button>
+
+          {/* COD Payment */}
+          <button
+            onClick={() => setPaymentMethod("cod")}
+            className={`p-4 border-2 rounded-xl transition-all ${
+              paymentMethod === "cod"
+                ? "border-pink-500 bg-pink-50"
+                : "border-gray-200 hover:border-gray-300"
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              <div
+                className={`h-10 w-10 rounded-full flex items-center justify-center ${
+                  paymentMethod === "cod"
+                    ? "bg-pink-500 text-white"
+                    : "bg-gray-100 text-gray-600"
+                }`}
+              >
+                <svg
+                  className="h-6 w-6"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
+                  />
+                </svg>
+              </div>
+              <div className="text-left">
+                <p className="font-medium text-gray-900">Cash on Delivery</p>
+                <p className="text-sm text-gray-600">
+                  Pay when you receive your order
+                </p>
+              </div>
+            </div>
+          </button>
+        </div>
+      </div>
 
       <div className="mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
         <div className="space-y-4">
@@ -424,12 +621,16 @@ export default function CheckoutPage() {
             </div>
           ) : null}
           <div className="flex items-center justify-between py-1">
-            <span>Total (THB)</span>
-            <span className="font-semibold">฿ {totalTHB.toFixed(2)}</span>
+            <span>Tax (7%)</span>
+            <span className="font-medium">฿ {taxTHB.toFixed(2)}</span>
+          </div>
+          <div className="flex items-center justify-between py-1 border-t border-gray-200 pt-2 mt-2">
+            <span className="font-semibold">Total (THB)</span>
+            <span className="font-semibold text-lg">฿ {totalTHB.toFixed(2)}</span>
           </div>
           <div className="flex items-center justify-between py-1">
-            <span>Total (MMK)</span>
-            <span className="font-medium">Ks {totalMMK.toLocaleString()}</span>
+            <span className="font-semibold">Total (MMK)</span>
+            <span className="font-semibold text-lg">Ks {totalMMK.toLocaleString()}</span>
           </div>
         </div>
 
@@ -505,12 +706,16 @@ export default function CheckoutPage() {
             className="rounded-md bg-pink-500 px-5 py-2 text-white hover:bg-pink-600 disabled:opacity-50"
           >
             {submitting
-              ? "Creating Payment..."
+              ? paymentMethod === "cod"
+                ? "Creating COD Order..."
+                : "Creating Payment..."
               : !user
                 ? "Login to Continue"
                 : !isProfileComplete
                   ? "Complete Profile to Continue"
-                  : "Pay with MyanMyanPay"}
+                  : paymentMethod === "cod"
+                    ? "Place COD Order"
+                    : "Pay with MyanMyanPay"}
           </button>
 
           <button

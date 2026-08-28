@@ -139,7 +139,7 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
     total: subtotal,
     amountPaid: subtotal,
     change: 0,
-    paymentMethod: "wallet",
+    paymentMethod: (order.paymentMethod as string | undefined) || "scan",
     timestamp: new Date().toISOString(),
     createdAt: new Date(),
     status: "completed",
@@ -147,6 +147,8 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
     ...(hasExchangeRate ? { exchangeRate: envExchangeRate } : {}),
     sellingTotal: Number(order.amountMmk || payload.amount || 0),
     paymentProvider: "MMPAY",
+    orderSource: "web_storefront",
+    customerUid: (order.customer as Record<string, unknown> | undefined)?.uid,
     paymentMeta: {
       method: payload.method,
       vendor: payload.vendor,

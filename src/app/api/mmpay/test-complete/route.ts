@@ -111,7 +111,7 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
     total: subtotal,
     amountPaid: subtotal,
     change: 0,
-    paymentMethod: "wallet",
+    paymentMethod: "scan",
     timestamp: new Date().toISOString(),
     createdAt: new Date(),
     status: "completed",

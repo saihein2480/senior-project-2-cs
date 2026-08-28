@@ -9,6 +9,7 @@ import { useCart } from "../../../contexts/CartContext";
 import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
 import { useOnlinePromotions } from "../../../hooks/useOnlinePromotions";
 import { applyBestPromotionToLine } from "../../../lib/onlinePromotion";
+import { useCurrency, formatPrice } from "../../../hooks/useCurrency";
 
 type SizeQuantity = { size?: string; quantity?: number | string };
 type ColorVariant = {
@@ -34,6 +35,7 @@ export default function ProductDetailPage() {
   const { user } = useCustomerAuth();
   const { rate: mmkRate } = useCurrencyRate();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
+  const displayCurrency = useCurrency();
 
   const error = queryError
     ? queryError instanceof Error
@@ -93,6 +95,25 @@ export default function ProductDetailPage() {
   const sizesToShow = selectedVariantId
     ? getSizesForVariant(selectedVariantId)
     : ([] as SizeQuantity[]);
+
+  // Automatically select first variant if user tries to select a size without choosing color
+  const handleSizeSelection = (size: string, qty: number) => {
+    if (!selectedVariantId && variants.length > 0) {
+      // Find variant that has this size
+      const matchingVariant = variants.find((v) =>
+        (v.sizeQuantities || []).some((sq) => String(sq.size) === size),
+      );
+      if (matchingVariant) {
+        const vid = matchingVariant.id ?? matchingVariant.color ?? "0";
+        setSelectedVariantId(vid);
+        setSelectedSize(size);
+        return;
+      }
+    }
+    if (qty > 0) {
+      setSelectedSize(size);
+    }
+  };
 
   const selectedVariant = variants.find(
     (v) => String(v.id ?? v.color ?? String(v)) === String(selectedVariantId),
@@ -373,19 +394,16 @@ export default function ProductDetailPage() {
                   <>
                     {singleItemPromo.promotion ? (
                       <span className="mr-3 text-base text-gray-400 line-through align-middle">
-                        {Number.isInteger(displayPrice)
-                          ? `฿ ${displayPrice.toFixed(0)}`
-                          : `฿ ${displayPrice.toFixed(2)}`}
+                        {formatPrice(displayPrice, displayCurrency, mmkRate)}
                       </span>
                     ) : null}
                     <span className="font-semibold text-2xl md:text-3xl">
-                      {Number.isInteger(displayFinalPrice || 0)
-                        ? `฿ ${(displayFinalPrice || 0).toFixed(0)}`
-                        : `฿ ${(displayFinalPrice || 0).toFixed(2)}`}
+                      {formatPrice(
+                        displayFinalPrice || 0,
+                        displayCurrency,
+                        mmkRate,
+                      )}
                     </span>
-                    <span className="text-gray-500 ml-3">{` / ${Math.round(
-                      (displayFinalPrice || 0) * mmkRate,
-                    ).toLocaleString()} Ks`}</span>
                   </>
                 ) : (
                   "—"
@@ -490,9 +508,7 @@ export default function ProductDetailPage() {
                     return (
                       <button
                         key={String(sq.size)}
-                        onClick={() =>
-                          qty > 0 && setSelectedSize(String(sq.size))
-                        }
+                        onClick={() => handleSizeSelection(String(sq.size), qty)}
                         disabled={qty === 0}
                         className={`px-4 py-3 border rounded text-base transition-colors inline-flex items-center justify-center ${
                           isSelected
@@ -634,8 +650,27 @@ export default function ProductDetailPage() {
                               return;
                             }
 
+                            // Find the actual variant that has the selected size
+                            let effectiveVariantId = selectedVariantId;
+                            let effectiveColor = selectedVariant?.color || "";
+                            
+                            if (!effectiveVariantId && selectedSize) {
+                              const matchingVariant = variants.find((v) =>
+                                (v.sizeQuantities || []).some(
+                                  (sq) => String(sq.size) === selectedSize,
+                                ),
+                              );
+                              if (matchingVariant) {
+                                effectiveVariantId = matchingVariant.id ?? matchingVariant.color ?? "0";
+                                effectiveColor = matchingVariant.color || "";
+                              } else if (variants.length > 0) {
+                                effectiveVariantId = variants[0].id ?? variants[0].color ?? "0";
+                                effectiveColor = variants[0].color || "";
+                              }
+                            }
+
                             addItem({
-                              id: `${id}:${String(selectedVariantId)}:${selectedSize}`,
+                              id: `${id}:${String(effectiveVariantId)}:${selectedSize}`,
                               productId: id,
                               name: displayName || "Product",
                               image:
@@ -643,8 +678,8 @@ export default function ProductDetailPage() {
                                 product?.groupImage ||
                                 product?.image ||
                                 "",
-                              variantId: String(selectedVariantId),
-                              color: selectedVariant?.color || "",
+                              variantId: String(effectiveVariantId || "0"),
+                              color: effectiveColor,
                               size: selectedSize,
                               unitPriceTHB: Number(
                                 displayFinalPrice || displayPrice || 0,
@@ -668,9 +703,24 @@ export default function ProductDetailPage() {
                               return;
                             }
 
+                            // Find the actual variant that has the selected size
+                            let effectiveVariantId = selectedVariantId;
+                            if (!effectiveVariantId && selectedSize) {
+                              const matchingVariant = variants.find((v) =>
+                                (v.sizeQuantities || []).some(
+                                  (sq) => String(sq.size) === selectedSize,
+                                ),
+                              );
+                              if (matchingVariant) {
+                                effectiveVariantId = matchingVariant.id ?? matchingVariant.color ?? "0";
+                              } else if (variants.length > 0) {
+                                effectiveVariantId = variants[0].id ?? variants[0].color ?? "0";
+                              }
+                            }
+
                             const query = new URLSearchParams({
                               productId: id,
-                              variant: String(selectedVariantId),
+                              variant: String(effectiveVariantId || "0"),
                               size: selectedSize,
                               qty: String(selectedPurchaseQty),
                             });
@@ -700,7 +750,7 @@ export default function ProductDetailPage() {
           <div className="flex-1 h-px bg-pink-300" />
         </div>
 
-        <div className="max-w-[1100px] mx-auto pb-12 pt-6">
+        <div className="w-full pb-12 pt-6">
           <ProductsList showOnlyNew itemsPerPageDefault={20} hideFilters />
         </div>
       </div>

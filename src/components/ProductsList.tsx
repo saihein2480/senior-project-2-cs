@@ -9,6 +9,7 @@ import { useCurrencyRate } from "../hooks/useSettings";
 import { useShops } from "../hooks/useShops";
 import { useOnlinePromotions } from "../hooks/useOnlinePromotions";
 import { applyBestPromotionToLine } from "../lib/onlinePromotion";
+import { useCurrency, formatPrice } from "../hooks/useCurrency";
 
 type SizeQuantity = {
   size?: string;
@@ -27,13 +28,24 @@ export default function ProductsList({
   showOnlyNew = false,
   itemsPerPageDefault = 40,
   hideFilters = false,
+  showLoadMoreButton = false,
+  loadMoreLink = "/view-all",
+  hideSortBy = false,
+  showPriceFilter = false,
 }: {
   showOnlyNew?: boolean;
   itemsPerPageDefault?: number;
   hideFilters?: boolean;
+  showLoadMoreButton?: boolean;
+  loadMoreLink?: string;
+  hideSortBy?: boolean;
+  showPriceFilter?: boolean;
 }) {
   const searchParams = useSearchParams();
   const urlQuery = (searchParams?.get("q") || "").trim();
+  const urlCategory = (searchParams?.get("category") || "all").trim();
+  const urlBranch = searchParams?.get("branch") || "";
+  const urlCurrency = (searchParams?.get("currency") || "THB") as "THB" | "MMK";
   const [localQuery, setLocalQuery] = useState(urlQuery);
 
   // sync localQuery with URL param changes
@@ -86,7 +98,8 @@ export default function ProductsList({
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [itemsPerPage] = useState<number>(itemsPerPageDefault);
   const [showFilter, setShowFilter] = useState(false);
-  const [filterBranch, setFilterBranch] = useState<string>("all");
+  const [showPriceDropdown, setShowPriceDropdown] = useState(false);
+  const [filterBranch, setFilterBranch] = useState<string>("");
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [filterMinPrice, setFilterMinPrice] = useState<string>("");
   const [filterMaxPrice, setFilterMaxPrice] = useState<string>("");
@@ -100,12 +113,42 @@ export default function ProductsList({
   >("newest");
   const { t } = useLanguage();
 
+  // Use currency hook for global currency state
+  const displayCurrency = useCurrency();
+
+  // Sync filterCategory with URL parameter
+  useEffect(() => {
+    if (urlCategory && urlCategory !== filterCategory) {
+      setFilterCategory(urlCategory);
+    }
+  }, [urlCategory]);
+
+  // Sync filterCurrency with URL parameter
+  useEffect(() => {
+    if (urlCurrency && urlCurrency !== filterCurrency) {
+      setFilterCurrency(urlCurrency);
+    }
+  }, [urlCurrency]);
+
+  // Sync filterBranch with URL parameter, or use first available branch as default
+  useEffect(() => {
+    if (urlBranch && urlBranch !== filterBranch) {
+      setFilterBranch(urlBranch);
+    } else if (!urlBranch && !filterBranch && shopsData.length > 0) {
+      // No branch in URL and no filterBranch set, default to first branch
+      const defaultBranch = shopsData[0]?.id;
+      if (defaultBranch) {
+        setFilterBranch(defaultBranch);
+      }
+    }
+  }, [urlBranch, shopsData, filterBranch]);
+
   // derive filter option lists from products
   const branches = shopsData;
   // derive available options scoped to the selected branch
   const branchFilteredProducts = (() => {
     if (!products) return [] as Product[];
-    if (filterBranch === "all") return products;
+    if (!filterBranch) return products;
     const selectedShop = shopsData.find((s) => s.id === filterBranch);
     const shopName = selectedShop?.name;
     return products.filter((p) => {
@@ -154,7 +197,7 @@ export default function ProductsList({
   // apply filters
   const filteredProducts = products
     ? products.filter((p) => {
-        if (filterBranch !== "all") {
+        if (filterBranch) {
           const selectedShop = shopsData.find((s) => s.id === filterBranch);
           const shopName = selectedShop?.name;
           const pShop = ((p as Product).shop || "").toString();
@@ -411,90 +454,74 @@ export default function ProductsList({
             {filteredProducts ? `${filteredProducts.length} ${t("items")}` : ""}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 mt-2 ml-3 md:mt-0">
-            {filterBranch !== "all" && (
-              <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
-                <span>
-                  {shopsData.find((s) => s.id === filterBranch)?.name ||
-                    filterBranch}
+          {!hideFilters && (
+            <div className="flex flex-wrap items-center gap-2 mt-2 ml-3 md:mt-0">
+              {filterCategory !== "all" && (
+                <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
+                  <span>{filterCategory}</span>
+                  <button
+                    onClick={() => setFilterCategory("all")}
+                    aria-label="Remove category filter"
+                    className="text-amber-700 hover:text-amber-900 ml-1"
+                  >
+                    ×
+                  </button>
                 </span>
-                <button
-                  onClick={() => setFilterBranch("all")}
-                  aria-label="Remove branch filter"
-                  className="text-amber-700 hover:text-amber-900 ml-1"
-                >
-                  ×
-                </button>
-              </span>
-            )}
+              )}
 
-            {filterCategory !== "all" && (
-              <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
-                <span>{filterCategory}</span>
-                <button
-                  onClick={() => setFilterCategory("all")}
-                  aria-label="Remove category filter"
-                  className="text-amber-700 hover:text-amber-900 ml-1"
-                >
-                  ×
-                </button>
-              </span>
-            )}
+              {/* color filter removed */}
 
-            {/* color filter removed */}
-
-            {filterSize && (
-              <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
-                <span>{filterSize}</span>
-                <button
-                  onClick={() => setFilterSize("")}
-                  aria-label="Remove size filter"
-                  className="text-amber-700 hover:text-amber-900 ml-1"
-                >
-                  ×
-                </button>
-              </span>
-            )}
-
-            {(filterMinPrice || filterMaxPrice) && (
-              <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
-                <span>
-                  {filterCurrency === "THB" ? "฿" : "Ks"}{" "}
-                  {filterMinPrice || "-"} - {filterMaxPrice || "-"}
+              {filterSize && (
+                <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
+                  <span>{filterSize}</span>
+                  <button
+                    onClick={() => setFilterSize("")}
+                    aria-label="Remove size filter"
+                    className="text-amber-700 hover:text-amber-900 ml-1"
+                  >
+                    ×
+                  </button>
                 </span>
+              )}
+
+              {(filterMinPrice || filterMaxPrice) && (
+                <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
+                  <span>
+                    {filterCurrency === "THB" ? "฿" : "Ks"}{" "}
+                    {filterMinPrice || "-"} - {filterMaxPrice || "-"}
+                  </span>
+                  <button
+                    onClick={() => {
+                      setFilterMinPrice("");
+                      setFilterMaxPrice("");
+                    }}
+                    aria-label="Remove price filter"
+                    className="text-amber-700 hover:text-amber-900 ml-1"
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+
+              {(filterCategory !== "all" ||
+                filterSize ||
+                filterMinPrice ||
+                filterMaxPrice) && (
                 <button
                   onClick={() => {
+                    setFilterCategory("all");
+                    setFilterSize("");
                     setFilterMinPrice("");
                     setFilterMaxPrice("");
+                    setFilterCurrency("THB");
                   }}
-                  aria-label="Remove price filter"
-                  className="text-amber-700 hover:text-amber-900 ml-1"
+                  className="text-md text-red-600 underline md:ml-2 ml-0"
                 >
-                  ×
+                  {t("clear_all")}
                 </button>
-              </span>
-            )}
-
-            {(filterBranch !== "all" ||
-              filterCategory !== "all" ||
-              filterSize ||
-              filterMinPrice ||
-              filterMaxPrice) && (
-              <button
-                onClick={() => {
-                  setFilterBranch("all");
-                  setFilterCategory("all");
-                  setFilterSize("");
-                  setFilterMinPrice("");
-                  setFilterMaxPrice("");
-                  setFilterCurrency("THB");
-                }}
-                className="text-md text-red-600 underline md:ml-2 ml-0"
-              >
-                {t("clear_all")}
-              </button>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-center space-x-2 mt-3 md:mt-0">
           <div>
@@ -526,50 +553,155 @@ export default function ProductsList({
           </div>
 
           {/* Sort control */}
-          <div className="text-sm">
-            <label className="sr-only">Sort by</label>
-            <div className="relative inline-flex items-center">
-              <select
-                title="sortBy"
-                value={sortBy}
-                onChange={(e) =>
-                  setSortBy(
-                    e.target.value as
-                      | "newest"
-                      | "price-asc"
-                      | "price-desc"
-                      | "name-asc"
-                      | "name-desc",
-                  )
-                }
-                className="peer border border-gray-200 rounded px-2 py-1 text-sm bg-white appearance-none pr-8"
-              >
-                <option value="newest">{t("sort_newest")}</option>
-                <option value="price-asc">{t("sort_price_asc")}</option>
-                <option value="price-desc">{t("sort_price_desc")}</option>
-                <option value="name-asc">{t("sort_name_asc")}</option>
-                <option value="name-desc">{t("sort_name_desc")}</option>
-              </select>
-              <svg
-                className="h-4 w-4 absolute right-2 transform transition-transform duration-200 peer-focus:rotate-180 pointer-events-none text-gray-600"
-                viewBox="0 0 20 20"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-                aria-hidden
-              >
-                <path
-                  d="M5 8.5L10 13.5L15 8.5"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
+          {!hideSortBy && (
+            <div className="text-sm">
+              <label className="sr-only">Sort by</label>
+              <div className="relative inline-flex items-center">
+                <select
+                  title="sortBy"
+                  value={sortBy}
+                  onChange={(e) =>
+                    setSortBy(
+                      e.target.value as
+                        | "newest"
+                        | "price-asc"
+                        | "price-desc"
+                        | "name-asc"
+                        | "name-desc",
+                    )
+                  }
+                  className="peer border border-gray-200 rounded px-2 py-1 text-sm bg-white appearance-none pr-8"
+                >
+                  <option value="newest">{t("sort_newest")}</option>
+                  <option value="price-asc">{t("sort_price_asc")}</option>
+                  <option value="price-desc">{t("sort_price_desc")}</option>
+                  <option value="name-asc">{t("sort_name_asc")}</option>
+                  <option value="name-desc">{t("sort_name_desc")}</option>
+                </select>
+                <svg
+                  className="h-4 w-4 absolute right-2 transform transition-transform duration-200 peer-focus:rotate-180 pointer-events-none text-gray-600"
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                  aria-hidden
+                >
+                  <path
+                    d="M5 8.5L10 13.5L15 8.5"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
             </div>
-          </div>
+          )}
+
+          {/* Price Range Dropdown - shown when showPriceFilter is true */}
+          {showPriceFilter && (
+            <div className="relative text-sm">
+              <button
+                onClick={() => setShowPriceDropdown(!showPriceDropdown)}
+                className="px-3 py-1 rounded border border-gray-300 bg-white text-sm hover:bg-gray-50 inline-flex items-center space-x-2"
+              >
+                <span>Price Range</span>
+                <svg
+                  className={`h-4 w-4 transform transition-transform duration-200 ${showPriceDropdown ? "rotate-180" : "rotate-0"}`}
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="M5 8.5L10 13.5L15 8.5"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+
+              {/* Price Dropdown Panel */}
+              {showPriceDropdown && (
+                <div className="absolute top-full right-0 mt-2 w-72 bg-white rounded-lg shadow-lg border border-gray-200 p-4 z-50">
+                  {/* Currency Selection */}
+                  <div className="mb-3">
+                    <label className="block text-xs font-medium text-gray-700 mb-2">
+                      Currency
+                    </label>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setFilterCurrency("THB")}
+                        className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                          filterCurrency === "THB"
+                            ? "bg-gradient-to-r from-pink-500 to-pink-400 text-white shadow-sm"
+                            : "border border-gray-300 text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        ฿ THB
+                      </button>
+                      <button
+                        onClick={() => setFilterCurrency("MMK")}
+                        className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                          filterCurrency === "MMK"
+                            ? "bg-gradient-to-r from-pink-500 to-pink-400 text-white shadow-sm"
+                            : "border border-gray-300 text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        Ks MMK
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Price Range Inputs */}
+                  <div className="mb-3">
+                    <label className="block text-xs font-medium text-gray-700 mb-2">
+                      Price Range
+                    </label>
+                    <div className="flex items-center rounded-lg border border-gray-300 bg-white overflow-hidden focus-within:outline-none focus-within:ring-2 focus-within:ring-pink-400">
+                      <input
+                        type="number"
+                        value={filterMinPrice}
+                        onChange={(e) => setFilterMinPrice(e.target.value)}
+                        placeholder="Min"
+                        className="w-1/2 min-w-0 px-3 py-1.5 text-sm focus:outline-none"
+                      />
+                      <span className="h-4 w-px bg-gray-200" />
+                      <input
+                        type="number"
+                        value={filterMaxPrice}
+                        onChange={(e) => setFilterMaxPrice(e.target.value)}
+                        placeholder="Max"
+                        className="w-1/2 min-w-0 px-3 py-1.5 text-sm focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        setFilterMinPrice("");
+                        setFilterMaxPrice("");
+                      }}
+                      className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      onClick={() => setShowPriceDropdown(false)}
+                      className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-gradient-to-r from-pink-500 to-pink-400 rounded-lg hover:shadow-md transition-all"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-2 px-2 py-4 sm:grid-cols-2 md:gap-4 md:px-6 md:py-6 md:grid-cols-2 lg:gap-6 lg:px-6 lg:grid-cols-3 xl:gap-8 xl:px-6 xl:grid-cols-4 2xl:grid-cols-5 bg-white md:max-w-[1000px] md:mx-auto lg:max-w-[1400px] lg:mx-auto xl:max-w-[1800px] xl:mx-auto">
+      <div className="grid grid-cols-2 gap-3 px-2 py-4 sm:grid-cols-2 md:gap-4 md:px-4 md:py-6 md:grid-cols-3 lg:gap-5 lg:px-6 lg:grid-cols-4 xl:gap-6 xl:px-6 xl:grid-cols-5 2xl:grid-cols-6 bg-white">
         {visibleProducts.map((p) => {
           const hasVariants =
             Array.isArray(p.colorVariants) && p.colorVariants.length > 0;
@@ -613,165 +745,100 @@ export default function ProductsList({
           return (
             <Link key={p.id} href={`/product/${p.id}`} className="block">
               <div
-                className={`group bg-white overflow-visible hover:shadow-lg transition-transform duration-200 ${
-                  isOutOfStock ? "opacity-80" : ""
+                className={`group h-full bg-white overflow-hidden rounded-lg hover:shadow-md transition-all duration-200 flex flex-col ${
+                  isOutOfStock ? "opacity-70" : ""
                 }`}
               >
-                <div className="relative bg-white overflow-hidden p-0">
+                {/* Image Container */}
+                <div className="relative bg-gray-50 overflow-hidden flex-shrink-0">
                   {p.isNew && !isOutOfStock && (
-                    <span className="absolute top-2 left-2 bg-green-500 text-white text-[10px] px-1 py-0.5 rounded z-10">
+                    <span className="absolute top-2 left-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-[10px] px-2 py-1 rounded-full z-10 font-semibold shadow-md">
                       {t("new_label")}
                     </span>
                   )}
                   {isOutOfStock && (
-                    <div className="absolute inset-0 bg-black/40 z-20 flex items-center justify-center">
-                      <span className="text-sm font-bold text-white">
+                    <div className="absolute inset-0 bg-black/50 z-20 flex items-center justify-center">
+                      <span className="text-xs font-bold text-white bg-black/60 px-2 py-1 rounded">
                         {t("out_of_stock")}
                       </span>
                     </div>
                   )}
 
-                  <div className="w-full aspect-[5/8] overflow-hidden bg-white transform transition-transform duration-300 group-hover:scale-105 group-hover:-translate-y-2">
+                  <div className="w-full aspect-[3/4] overflow-hidden bg-gray-50 flex items-center justify-center p-3">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={getCurrentImage(p)}
                       alt={p.name}
-                      className={`w-full h-full object-cover block ${
-                        isOutOfStock ? "opacity-60" : ""
+                      className={`w-full h-full object-contain block transition-transform duration-300 group-hover:scale-105 ${
+                        isOutOfStock ? "opacity-50" : ""
                       }`}
-                      style={{ width: "100%", height: "100%" }}
                     />
                   </div>
 
-                  {/* overlay category/shop if available */}
+                  {/* Category Badge */}
                   {p.description && (
-                    <div className="absolute bottom-2 right-2 flex flex-col items-end space-y-1 z-10">
-                      {p.description && (
-                        <span className="bg-white bg-opacity-60 text-xs text-gray-900 px-2 py-0.5 rounded">
-                          {p.description}
-                        </span>
-                      )}
+                    <div className="absolute bottom-1 right-1 z-10">
+                      <span className="inline-block bg-white/95 text-[10px] text-gray-700 px-2 py-0.5 rounded-full font-medium truncate max-w-[120px]">
+                        {p.description}
+                      </span>
                     </div>
                   )}
                 </div>
 
-                <div className="pt-3">
-                  <h4 className="font-semibold text-gray-900 text-base mb-1">
-                    {p.name && p.name.length > 24
-                      ? `${p.name.substring(0, 24)}...`
+                {/* Content Container */}
+                <div className="p-2.5 flex flex-col flex-grow">
+                  {/* Product Name */}
+                  <h4 className="font-semibold text-gray-900 text-sm leading-tight truncate mb-1.5">
+                    {p.name && p.name.length > 20
+                      ? `${p.name.substring(0, 20)}...`
                       : p.name}
                   </h4>
 
-                  <div className="mb-5">
-                    {p.price ? (
-                      <div className="text-sm text-gray-900">
-                        {(() => {
-                          const basePrice = Number(p.price || 0);
-                          const promo = applyBestPromotionToLine({
-                            unitPriceTHB: basePrice,
-                            quantity: 1,
-                            productId: p.id,
-                            promotions: onlinePromotions,
-                          });
-                          const finalPrice = promo.finalSubtotalTHB;
+                  {/* Price */}
+                  {p.price ? (
+                    <div className="text-xs text-gray-800 mb-2">
+                      {(() => {
+                        const basePrice = Number(p.price || 0);
+                        const promo = applyBestPromotionToLine({
+                          unitPriceTHB: basePrice,
+                          quantity: 1,
+                          productId: p.id,
+                          promotions: onlinePromotions,
+                        });
+                        const finalPriceTHB = promo.finalSubtotalTHB;
 
-                          return (
-                            <>
-                              {promo.promotion ? (
-                                <span className="mr-2 text-xs text-gray-400 line-through">
-                                  {Number.isInteger(basePrice)
-                                    ? `฿ ${basePrice.toFixed(0)}`
-                                    : `฿ ${basePrice.toFixed(2)}`}
-                                </span>
-                              ) : null}
-                              <span className="font-medium">
-                                {Number.isInteger(finalPrice)
-                                  ? `฿ ${finalPrice.toFixed(0)}`
-                                  : `฿ ${finalPrice.toFixed(2)}`}
+                        return (
+                          <>
+                            {promo.promotion ? (
+                              <span className="mr-1.5 text-[10px] text-gray-400 line-through">
+                                {formatPrice(
+                                  basePrice,
+                                  displayCurrency,
+                                  mmkRate,
+                                )}
                               </span>
-                              <span className="text-gray-500">{` / ${Math.round(
-                                finalPrice * mmkRate,
-                              ).toLocaleString()} Ks`}</span>
-                            </>
-                          );
-                        })()}
-                      </div>
-                    ) : (
-                      <span className="text-sm text-gray-900">—</span>
-                    )}
-                  </div>
-
-                  {/* Color selection */}
-                  {/* <div className="mb-3">
-                    <label className="text-xs font-medium text-gray-700 mb-1 block">
-                      Color:
-                    </label>
-                    <div className="flex items-center space-x-2">
-                      {hasVariants ? (
-                        p.colorVariants!.map(
-                          (variant: ColorVariant, index: number) => {
-                            const vid = variant.id ?? `${p.id}-v-${index}`;
-                            const isSelected = selectedColors[p.id] === vid;
-                            return (
-                              <button
-                                key={vid}
-                                onClick={() => handleColorSelect(p.id, vid)}
-                                className={`w-6 h-6 rounded-full border-2 transition-all ${
-                                  isSelected
-                                    ? "border-blue-500 ring-2 ring-blue-200"
-                                    : "border-gray-300 hover:border-gray-400"
-                                }`}
-                                style={{
-                                  backgroundColor: variant.colorCode || "#ddd",
-                                }}
-                                title={variant.color}
-                              />
-                            );
-                          }
-                        )
-                      ) : (
-                        <span className="text-xs text-gray-500">
-                          No color variants
-                        </span>
-                      )}
+                            ) : null}
+                            <span className="font-bold text-pink-600">
+                              {formatPrice(
+                                finalPriceTHB,
+                                displayCurrency,
+                                mmkRate,
+                              )}
+                            </span>
+                          </>
+                        );
+                      })()}
                     </div>
-                  </div> */}
+                  ) : (
+                    <span className="text-xs text-gray-700 mb-2">—</span>
+                  )}
 
-                  {/* Size selection */}
-                  {/* <div className="mb-3">
-                    <label className="text-xs font-medium text-gray-700 mb-1 block">
-                      Size:
-                    </label>
-                    <div className="grid grid-cols-3 gap-1">
-                      {availableSizes.length > 0 ? (
-                        availableSizes.map((s: SizeQuantity) => {
-                          const isSelected = selectedSizes[p.id] === s.size;
-                          const soldOut = Number(s.quantity) === 0;
-                          return (
-                            <button
-                              key={`${p.id}-${s.size}`}
-                              onClick={() =>
-                                !soldOut &&
-                                handleSizeSelect(p.id, s.size as string)
-                              }
-                              disabled={soldOut}
-                              className={`text-xs py-0.5 px-1  border border-gray-300 transition-all `}
-                            >
-                              <div className="flex flex-col items-center">
-                                <span>{s.size}</span>
-                              </div>
-                            </button>
-                          );
-                        })
-                      ) : (
-                        <span className="text-xs text-gray-500 col-span-3">
-                          {hasVariants ? "No sizes available" : "—"}
-                        </span>
-                      )}
+                  {/* Stock Indicator */}
+                  {displayStock <= 5 && !isOutOfStock && (
+                    <div className="text-[10px] text-orange-600 font-semibold mb-1.5">
+                      Only {displayStock} left
                     </div>
-                  </div> */}
-
-                  {/* Add to cart removed for storefront view */}
+                  )}
                 </div>
               </div>
             </Link>
@@ -1052,82 +1119,73 @@ export default function ProductsList({
         </>
       )}
 
-      {/* Pagination controls */}
-      <div className="mt-8 flex flex-col items-center gap-3">
-        <div className="flex w-full max-w-md items-center justify-between gap-2 rounded-full border border-gray-200 bg-gray-50 p-2 shadow-sm sm:hidden">
-          <button
-            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-            disabled={currentPage === 1}
-            className="h-9 rounded-full border border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+      {/* Pagination controls or Load More button */}
+      {showLoadMoreButton ? (
+        <div className="mt-4 mb-4 flex justify-center">
+          <Link
+            href={loadMoreLink}
+            className="px-6 py-2 bg-gradient-to-r from-pink-500 to-pink-400 text-white font-medium text-sm rounded-full hover:shadow-lg transition-all duration-300 hover:scale-105"
           >
-            {t("prev")}
-          </button>
-
-          <span className="px-2 text-xs font-medium text-gray-600">
-            {currentPage} / {totalPages}
-          </span>
-
-          <button
-            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-            disabled={currentPage === totalPages}
-            className="h-9 rounded-full border border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {t("next")}
-          </button>
+            Load More
+          </Link>
         </div>
+      ) : (
+        <div className="mt-4 mb-6 flex justify-center">
+          <div className="inline-flex items-center gap-1 bg-white rounded-lg border border-gray-200 p-1 shadow-sm">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage === 1}
+              className="h-7 w-7 rounded-md flex items-center justify-center text-sm font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+              aria-label="Previous page"
+            >
+              ‹
+            </button>
 
-        <div className="hidden items-center gap-2 rounded-full border border-gray-200 bg-gray-50 p-2 shadow-sm sm:inline-flex">
-          <button
-            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-            disabled={currentPage === 1}
-            className="h-9 rounded-full border border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {t("prev")}
-          </button>
+            <div className="hidden sm:flex items-center gap-0.5">
+              {paginationItems.map((item, idx) => {
+                if (item === "ellipsis") {
+                  return (
+                    <span
+                      key={`ellipsis-${idx}`}
+                      className="inline-flex h-7 w-7 items-center justify-center text-xs text-gray-400"
+                    >
+                      ···
+                    </span>
+                  );
+                }
 
-          <div className="flex items-center gap-1">
-            {paginationItems.map((item, idx) => {
-              if (item === "ellipsis") {
+                const page = item;
                 return (
-                  <span
-                    key={`ellipsis-${idx}`}
-                    className="inline-flex h-9 w-9 items-center justify-center text-sm text-gray-400"
+                  <button
+                    key={page}
+                    onClick={() => setCurrentPage(page)}
+                    className={`h-7 min-w-[1.75rem] px-2 rounded-md text-xs font-medium transition ${
+                      currentPage === page
+                        ? "bg-gradient-to-r from-pink-500 to-pink-400 text-white shadow-sm"
+                        : "text-gray-700 hover:bg-gray-50"
+                    }`}
                   >
-                    ...
-                  </span>
+                    {page}
+                  </button>
                 );
-              }
+              })}
+            </div>
 
-              const page = item;
-              return (
-                <button
-                  key={page}
-                  onClick={() => setCurrentPage(page)}
-                  className={`h-9 min-w-9 rounded-full px-3 text-sm font-semibold transition ${
-                    currentPage === page
-                      ? "bg-pink-500 text-white shadow"
-                      : "bg-white text-gray-700 hover:bg-gray-100"
-                  }`}
-                >
-                  {page}
-                </button>
-              );
-            })}
+            <span className="sm:hidden px-2 text-xs text-gray-600 font-medium">
+              {currentPage} / {totalPages}
+            </span>
+
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage === totalPages}
+              className="h-7 w-7 rounded-md flex items-center justify-center text-sm font-medium text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+              aria-label="Next page"
+            >
+              ›
+            </button>
           </div>
-
-          <button
-            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-            disabled={currentPage === totalPages}
-            className="h-9 rounded-full border border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {t("next")}
-          </button>
         </div>
-
-        <p className="text-xs text-gray-500">
-          Page {currentPage} of {totalPages}
-        </p>
-      </div>
+      )}
     </>
   );
 }

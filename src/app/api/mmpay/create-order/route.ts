@@ -220,7 +220,9 @@ export async function POST(req: Request) {
         amountMmk: body.amountMmk,
         status: "pending",
         paymentStatus: "PENDING",
+        paymentMethod: "scan", // QR scan payment method
         provider: "MMPAY",
+        orderSource: "web_storefront",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -245,15 +247,27 @@ export async function POST(req: Request) {
     if (!paymentUrl && !qr && sdkError) {
       const isUnauthorized =
         sdkError.includes("401") || /unauthorized/i.test(sdkError);
-      const hint = isUnauthorized
-        ? " Check MMPAY keys and mode. Use sandbox keys with sandbox mode (MMPAY_MODE=sandbox)."
-        : "";
+      const isLimitFilled =
+        sdkError.toLowerCase().includes("limit") || 
+        sdkError.toLowerCase().includes("quota") ||
+        sdkError.toLowerCase().includes("exceeded");
+      
+      let hint = "";
+      let userFriendlyMessage = sdkError;
+      
+      if (isUnauthorized) {
+        hint = " Check MMPAY keys and mode. Use sandbox keys with sandbox mode (MMPAY_MODE=sandbox).";
+      } else if (isLimitFilled) {
+        userFriendlyMessage = "Payment gateway limit reached";
+        hint = " Sandbox accounts have transaction limits. Please contact MyanMyanPay support to increase limits or complete merchant verification. For production use, upgrade to a verified merchant account.";
+      }
 
       return NextResponse.json(
         {
-          error: `MyanMyanPay error: ${sdkError}${hint}`,
+          error: `MyanMyanPay error: ${userFriendlyMessage}${hint}`,
           orderId,
           payResponse: safePayResponse,
+          details: sdkError, // Include original error for debugging
         },
         { status: 502 },
       );

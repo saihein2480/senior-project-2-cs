@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { collection, onSnapshot } from "firebase/firestore";
+import { collection, onSnapshot, query, where, orderBy } from "firebase/firestore";
 import { db } from "../../../lib/firebase";
 import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
 
@@ -156,6 +156,61 @@ function X({ size = 20, className = "" }: IconProps) {
   );
 }
 
+function XCircle({ size = 20, className = "" }: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className={className}
+      width={size}
+      height={size}
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="m15 9-6 6" />
+      <path d="m9 9 6 6" />
+    </svg>
+  );
+}
+
+function RotateCcw({ size = 20, className = "" }: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className={className}
+      width={size}
+      height={size}
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  );
+}
+
+function DollarSign({ size = 16, className = "" }: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className={className}
+      width={size}
+      height={size}
+    >
+      <line x1="12" y1="1" x2="12" y2="23" />
+      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+    </svg>
+  );
+}
+
 type TxnItem = {
   groupName?: string;
   quantity?: number;
@@ -170,11 +225,68 @@ type Txn = {
   onlineOrderId?: string;
   total?: number;
   sellingTotal?: number;
+  sellingCurrency?: string;
+  exchangeRate?: number;
+  amountMmk?: number;
   status?: string;
+  orderStatus?: string;
+  paymentStatus?: string;
   timestamp?: string;
   paymentProvider?: string;
   paymentMethod?: string;
   items?: TxnItem[];
+  deliveryStatus?: string;
+  cancellationRequest?: {
+    status: string;
+    reason?: string;
+    requestedAt?: string;
+    approvedAt?: string;
+    rejectedAt?: string;
+    rejectionReason?: string;
+  };
+  refundRequest?: {
+    status: string;
+    type?: string; // "return" or "refund"
+    reason?: string;
+    items?: Array<{ id: string; quantity: number; groupName?: string }>;
+    requestedAt?: string;
+    approvedAt?: string;
+    rejectedAt?: string;
+    rejectionReason?: string;
+    returnReceived?: boolean; // Added
+    inspectionCompleted?: boolean; // Added
+    itemInspectionResults?: Array<{ itemIndex: number; status: string }>; // Added
+  };
+  refunds?: Array<{
+    refundId: string;
+    status: string;
+    amount: number; // Added
+    totalAmount: number;
+    items?: Array<{
+      itemIndex: number;
+      quantity: number;
+    }>;
+    reason?: string;
+    notes?: string; // Added
+    createdAt?: { toDate: () => Date };
+    confirmedAt?: { toDate: () => Date }; // Added
+    refundMethod?: string;
+    refundedAt?: { toDate: () => Date };
+    refundedBy?: string;
+    processedBy?: string; // Added
+    refundNotes?: string;
+    refundProofUrl?: string;
+  }>;
+  cancellationRefund?: {
+    amount: number;
+    status: string;
+    method?: string;
+    confirmedAt?: { toDate: () => Date };
+    processedBy?: string; // Added
+    notes?: string;
+  };
+  cancelledAt?: { toDate: () => Date };
+  customerUid?: string;
 };
 
 type PurchaseOrderStatus =
@@ -183,7 +295,9 @@ type PurchaseOrderStatus =
   | "delivering"
   | "delivered"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "fully_returned"
+  | "partially_returned";
 
 type OnlineOrderLookup = {
   orderId?: string;
@@ -208,7 +322,13 @@ function normalizePurchaseOrderStatus(
   if (/(fail|failed|error|declined|stock_conflict)/.test(combined)) {
     return "failed";
   }
-  if (/(cancelled|canceled|void|refunded)/.test(combined)) {
+  if (/(fully_returned)/.test(combined)) {
+    return "fully_returned";
+  }
+  if (/(partially_returned)/.test(combined)) {
+    return "partially_returned";
+  }
+  if (/(cancelled|canceled|void)/.test(combined)) {
     return "cancelled";
   }
 
@@ -222,6 +342,8 @@ function getPurchaseOrderStatusLabel(status: PurchaseOrderStatus) {
   if (status === "delivering") return "Delivering";
   if (status === "delivered") return "Delivered";
   if (status === "failed") return "Failed";
+  if (status === "fully_returned") return "Fully Returned";
+  if (status === "partially_returned") return "Partially Returned";
   return "Cancelled";
 }
 
@@ -229,36 +351,74 @@ function resolvePurchaseOrderStatus(
   row: Txn,
   orderStatusByOrderRef: Record<string, PurchaseOrderStatus>,
 ): PurchaseOrderStatus {
+  // First, check if the transaction has an explicit orderStatus field
+  if ((row as any).orderStatus) {
+    const orderStatus = (row as any).orderStatus.toLowerCase();
+    if (orderStatus === "pending") return "pending";
+    if (orderStatus === "packaging") return "packaging";
+    if (orderStatus === "delivering") return "delivering";
+    if (orderStatus === "delivered") return "delivered";
+    if (orderStatus === "failed") return "failed";
+    if (orderStatus === "fully_returned") return "fully_returned";
+    if (orderStatus === "partially_returned") return "partially_returned";
+    if (orderStatus === "cancelled") return "cancelled";
+  }
+
+  // Second, check orderStatusByOrderRef (from onlineOrders collection)
   const byOrderRef = row.onlineOrderId
     ? orderStatusByOrderRef[row.onlineOrderId]
     : undefined;
 
   if (byOrderRef) return byOrderRef;
+  
+  // Finally, fall back to normalizing from payment status
   return normalizePurchaseOrderStatus(row.status);
 }
 
 function normalizePaymentStatus(
   status?: string,
-): "pending" | "paid" | "failed" | "cancelled" | "unknown" {
+  paymentStatus?: string,
+): "pending" | "paid" | "failed" | "cancelled" | "refunded" | "partially_refunded" | "pending_refund" | "refund_rejected" | "unknown" {
+  // First check paymentStatus field if available (for COD and online orders)
+  if (paymentStatus) {
+    const ps = paymentStatus.toLowerCase();
+    if (/(success|succeeded|paid|completed)/.test(ps)) return "paid";
+    if (/(pending_refund)/.test(ps)) return "pending_refund";
+    if (/(refund_rejected)/.test(ps)) return "refund_rejected";
+    if (/(pending|processing|created|initiated)/.test(ps)) return "pending";
+    if (/(fail|failed|error|declined|stock_conflict)/.test(ps)) return "failed";
+  }
+  
+  // Fallback to status field
   const raw = (status || "").toLowerCase();
 
   if (/(success|succeeded|paid|completed)/.test(raw)) return "paid";
+  if (/(pending_refund)/.test(raw)) return "pending_refund";
+  if (/(refund_rejected)/.test(raw)) return "refund_rejected";
   if (/(pending|processing|created|initiated)/.test(raw)) return "pending";
   if (/(fail|failed|error|declined|stock_conflict)/.test(raw)) {
     return "failed";
   }
-  if (/(cancelled|canceled|void|refunded)/.test(raw)) return "cancelled";
+  if (/(cancelled|canceled|void)/.test(raw)) return "cancelled";
+  // Check for partially_refunded BEFORE refunded to avoid false match
+  if (/(partially_refunded|partial)/.test(raw)) return "partially_refunded";
+  if (/(refunded)/.test(raw)) return "refunded";
   return "unknown";
 }
 
-function getPaymentStatusLabel(status?: string) {
-  const normalized = normalizePaymentStatus(status);
+function getPaymentStatusLabel(status?: string, paymentStatus?: string) {
+  // Prioritize paymentStatus field, then fall back to status
+  const normalized = normalizePaymentStatus(status, paymentStatus);
   if (normalized === "paid") return "Paid";
+  if (normalized === "pending_refund") return "Pending Refund";
+  if (normalized === "refund_rejected") return "Refund Rejected";
   if (normalized === "pending") return "Pending";
   if (normalized === "failed") return "Failed";
   if (normalized === "cancelled") return "Cancelled";
+  if (normalized === "refunded") return "Fully Refunded";
+  if (normalized === "partially_refunded") return "Partially Refunded";
 
-  const fallback = status || "-";
+  const fallback = paymentStatus || status || "-";
   return fallback.charAt(0).toUpperCase() + fallback.slice(1).toLowerCase();
 }
 
@@ -280,8 +440,17 @@ function getStatusBadgeClass(status?: string) {
   if (normalized === "failed") {
     return "bg-red-100 text-red-700 border-red-200";
   }
-  if (normalized === "cancelled" || normalized === "refunded") {
+  if (normalized === "cancelled") {
     return "bg-gray-100 text-gray-700 border-gray-200";
+  }
+  if (normalized === "fully_returned") {
+    return "bg-purple-100 text-purple-700 border-purple-200";
+  }
+  if (normalized === "partially_returned") {
+    return "bg-violet-100 text-violet-700 border-violet-200";
+  }
+  if (normalized === "refunded") {
+    return "bg-blue-100 text-blue-700 border-blue-200";
   }
 
   return "bg-slate-100 text-slate-700 border-slate-200";
@@ -293,6 +462,12 @@ function getPaymentBadgeClass(status?: string) {
   if (normalized === "paid") {
     return "bg-green-100 text-green-700 border-green-200";
   }
+  if (normalized === "pending_refund") {
+    return "bg-orange-100 text-orange-700 border-orange-200";
+  }
+  if (normalized === "refund_rejected") {
+    return "bg-red-100 text-red-700 border-red-200";
+  }
   if (normalized === "pending") {
     return "bg-amber-100 text-amber-700 border-amber-200";
   }
@@ -301,6 +476,12 @@ function getPaymentBadgeClass(status?: string) {
   }
   if (normalized === "cancelled") {
     return "bg-gray-100 text-gray-700 border-gray-200";
+  }
+  if (normalized === "refunded") {
+    return "bg-blue-100 text-blue-700 border-blue-200";
+  }
+  if (normalized === "partially_refunded") {
+    return "bg-orange-100 text-orange-700 border-orange-200";
   }
 
   return "bg-slate-100 text-slate-700 border-slate-200";
@@ -326,6 +507,8 @@ function PurchaseDetailsModal({
   onClose: () => void;
 }) {
   const items = row.items || [];
+  const cancelRequest = row.cancellationRequest;
+  const refundRequest = row.refundRequest;
 
   return (
     <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4 sm:p-0">
@@ -353,6 +536,396 @@ function PurchaseDetailsModal({
         </div>
 
         <div className="px-6 py-4 overflow-y-auto flex-1 space-y-4">
+          {/* Cancellation Request Status */}
+          {cancelRequest && (
+            <div className={`rounded-md border p-3 ${
+              cancelRequest.status === "pending"
+                ? "border-amber-200 bg-amber-50"
+                : cancelRequest.status === "approved"
+                ? "border-green-200 bg-green-50"
+                : "border-red-200 bg-red-50"
+            }`}>
+              <div className="flex items-start gap-2">
+                <div className="flex-1">
+                  <p className="font-medium text-sm">
+                    {cancelRequest.status === "pending"
+                      ? "⏳ Cancellation Request Pending"
+                      : cancelRequest.status === "approved"
+                      ? "✅ Cancellation Approved"
+                      : "❌ Cancellation Rejected"}
+                  </p>
+                  {cancelRequest.reason && (
+                    <p className="text-xs mt-1 text-gray-700">
+                      Your reason: {cancelRequest.reason}
+                    </p>
+                  )}
+                  {cancelRequest.rejectionReason && (
+                    <p className="text-xs mt-1 text-red-700">
+                      Rejection reason: {cancelRequest.rejectionReason}
+                    </p>
+                  )}
+                  <p className="text-xs mt-1 text-gray-600">
+                    Requested: {cancelRequest.requestedAt ? new Date(cancelRequest.requestedAt).toLocaleString() : "-"}
+                  </p>
+                  {(cancelRequest.approvedAt || cancelRequest.rejectedAt) && (
+                    <p className="text-xs text-gray-600">
+                      {cancelRequest.status === "approved" ? "Approved" : "Rejected"}: {
+                        (cancelRequest.approvedAt || cancelRequest.rejectedAt)
+                          ? new Date(cancelRequest.approvedAt || cancelRequest.rejectedAt || "").toLocaleString()
+                          : "-"
+                      }
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Refund/Return Request Status */}
+          {refundRequest && (
+            <div className={`rounded-md border p-3 ${
+              refundRequest.status === "pending"
+                ? "border-blue-200 bg-blue-50"
+                : refundRequest.status === "approved"
+                ? "border-green-200 bg-green-50"
+                : "border-red-200 bg-red-50"
+            }`}>
+              <div className="flex items-start gap-2">
+                <div className="flex-1">
+                  {/* Status Title */}
+                  <p className="font-medium text-sm">
+                    {refundRequest.status === "pending"
+                      ? (refundRequest.type === "return" ? "⏳ Return Request Pending" : "⏳ Refund Request Pending")
+                      : refundRequest.status === "approved"
+                      ? (refundRequest.type === "return" ? "✅ Return Approved" : "✅ Refund Approved")
+                      : (refundRequest.type === "return" ? "❌ Return Rejected" : "❌ Refund Rejected")}
+                  </p>
+                  
+                  {/* Return Journey Progress (only for return type) */}
+                  {refundRequest.type === "return" && refundRequest.status === "approved" && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-xs font-semibold text-gray-700 mb-2">Return Journey:</p>
+                      <div className="space-y-1.5">
+                        {/* Step 1: Approved */}
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="flex items-center justify-center w-5 h-5 rounded-full bg-green-500 text-white font-medium">✓</span>
+                          <span className="text-gray-700">Request Approved</span>
+                        </div>
+                        
+                        {/* Step 2: Return Items */}
+                        <div className="flex items-center gap-2 text-xs">
+                          {refundRequest.returnReceived ? (
+                            <>
+                              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-green-500 text-white font-medium">✓</span>
+                              <span className="text-gray-700">Items Returned to Store</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-blue-500 text-white font-medium">→</span>
+                              <span className="text-blue-700 font-medium">Please Return Items to Store</span>
+                            </>
+                          )}
+                        </div>
+                        
+                        {/* Step 3: Inspection */}
+                        {refundRequest.returnReceived && (
+                          <div className="flex items-center gap-2 text-xs">
+                            {refundRequest.inspectionCompleted ? (
+                              <>
+                                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-green-500 text-white font-medium">✓</span>
+                                <span className="text-gray-700">Items Inspected</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500 text-white font-medium">⏳</span>
+                                <span className="text-amber-700 font-medium">Inspection in Progress</span>
+                              </>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Step 4: Refund Processing */}
+                        {refundRequest.inspectionCompleted && (
+                          <div className="flex items-center gap-2 text-xs">
+                            {row.refunds && row.refunds.length > 0 ? (
+                              <>
+                                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-green-500 text-white font-medium">✓</span>
+                                <span className="text-gray-700">Refund Processed</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500 text-white font-medium">⏳</span>
+                                <span className="text-amber-700 font-medium">Processing Refund Payment</span>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Inspection Results Display */}
+                      {refundRequest.inspectionCompleted && refundRequest.itemInspectionResults && (
+                        <div className="mt-3 p-2 bg-white/50 rounded border border-green-200">
+                          <p className="text-xs font-semibold text-gray-700 mb-1">Inspection Results:</p>
+                          <div className="space-y-1">
+                            {refundRequest.itemInspectionResults.map((result: any, idx: number) => {
+                              const item = row.items?.[result.itemIndex];
+                              return (
+                                <div key={idx} className="flex items-center gap-2 text-xs">
+                                  {result.status === "accepted" ? (
+                                    <span className="text-green-600">✓ Accepted:</span>
+                                  ) : (
+                                    <span className="text-red-600">⚠ Damaged:</span>
+                                  )}
+                                  <span className="text-gray-700">{item?.groupName || "Item"}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Action Prompt */}
+                      {!refundRequest.returnReceived && (
+                        <div className="mt-3 p-2 bg-blue-100 rounded border border-blue-300">
+                          <p className="text-xs text-blue-900 font-medium">
+                            📍 Please visit our store to return the items for inspection and refund processing.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Cancellation Type Info */}
+                  {refundRequest.type === "cancellation" && refundRequest.status === "approved" && (
+                    <div className="mt-2 p-2 bg-amber-50 rounded border border-amber-200">
+                      <p className="text-xs text-amber-800">
+                        💰 Your cancellation refund is being processed. Check refund details below.
+                      </p>
+                    </div>
+                  )}
+                  
+                  {refundRequest.reason && (
+                    <p className="text-xs mt-1 text-gray-700">
+                      Your reason: {refundRequest.reason}
+                    </p>
+                  )}
+                  {refundRequest.items && refundRequest.items.length > 0 && (
+                    <p className="text-xs mt-1 text-gray-700">
+                      Items: {refundRequest.items.map((item: any) => 
+                        `${item.groupName || item.id} (${item.quantity})`
+                      ).join(", ")}
+                    </p>
+                  )}
+                  {refundRequest.rejectionReason && (
+                    <p className="text-xs mt-1 text-red-700">
+                      Rejection reason: {refundRequest.rejectionReason}
+                    </p>
+                  )}
+                  <p className="text-xs mt-1 text-gray-600">
+                    Requested: {refundRequest.requestedAt ? new Date(refundRequest.requestedAt).toLocaleString() : "-"}
+                  </p>
+                  {(refundRequest.approvedAt || refundRequest.rejectedAt) && (
+                    <p className="text-xs text-gray-600">
+                      {refundRequest.status === "approved" ? "Approved" : "Rejected"}: {
+                        (refundRequest.approvedAt || refundRequest.rejectedAt)
+                          ? new Date(refundRequest.approvedAt || refundRequest.rejectedAt || "").toLocaleString()
+                          : "-"
+                      }
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Show refund details from transaction.refunds array */}
+          {row.refunds && row.refunds.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold text-gray-900">Refund Details</h3>
+              {row.refunds.map((refund: any, index: number) => {
+                const isPaidOrder = row.paymentMethod === "cash" || row.paymentMethod === "scan";
+                const isRefundPending = refund.status === "pending";
+                const isRefundCompleted = refund.status === "completed";
+                
+                return (
+                  <div 
+                    key={index}
+                    className={`rounded-md border p-3 ${
+                      isRefundPending 
+                        ? "border-amber-200 bg-amber-50"
+                        : isRefundCompleted
+                        ? "border-green-200 bg-green-50"
+                        : "border-gray-200 bg-gray-50"
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1">
+                        <p className="font-medium text-sm mb-1">
+                          {isRefundPending && isPaidOrder && "💰 Refund Approved - Payment Pending"}
+                          {isRefundPending && !isPaidOrder && "⏳ Refund Processing"}
+                          {isRefundCompleted && "✅ Refund Completed"}
+                          {!isRefundPending && !isRefundCompleted && "❌ Refund Failed"}
+                        </p>
+                        
+                        <p className="text-xs text-gray-700">
+                          Refund ID: {refund.refundId}
+                        </p>
+                        
+                        <p className="text-xs text-gray-700 mt-1">
+                          Amount: {row.sellingTotal ? 
+                            `${row.sellingCurrency === "MMK" ? "Ks" : row.sellingCurrency || "THB"} ${(refund.totalAmount * (row.exchangeRate || 1)).toLocaleString()}` :
+                            `THB ${refund.totalAmount.toFixed(2)}`
+                          }
+                        </p>
+                        
+                        {refund.items && refund.items.length > 0 && (
+                          <div className="mt-2 text-xs text-gray-700">
+                            <p className="font-medium">Refunded Items:</p>
+                            <ul className="list-disc list-inside ml-2 mt-1">
+                              {refund.items.map((item: any, idx: number) => {
+                                const originalItem = row.items?.[item.itemIndex];
+                                return (
+                                  <li key={idx}>
+                                    {originalItem?.groupName || `Item ${item.itemIndex + 1}`} × {item.quantity}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        )}
+                        
+                        {refund.reason && (
+                          <p className="text-xs mt-2 text-gray-600">
+                            Reason: {refund.reason}
+                          </p>
+                        )}
+                        
+                        <p className="text-xs mt-1 text-gray-600">
+                          Processed: {refund.createdAt ? new Date(refund.createdAt.toDate()).toLocaleString() : "-"}
+                        </p>
+                        
+                        {/* Payment status for paid orders */}
+                        {isPaidOrder && isRefundCompleted && refund.refundedAt && (
+                          <div className="mt-2 pt-2 border-t border-green-200">
+                            <p className="text-xs font-medium text-green-800">Payment Completed</p>
+                            <p className="text-xs text-green-700 mt-1">
+                              Method: {
+                                refund.refundMethod === "cash" ? "💵 Cash" :
+                                refund.refundMethod === "original_payment" ? `💳 ${row.paymentMethod?.toUpperCase()}` :
+                                refund.refundMethod === "bank_transfer" ? "🏦 Bank Transfer" :
+                                "Payment Method"
+                              }
+                            </p>
+                            <p className="text-xs text-green-700">
+                              Confirmed: {new Date(refund.refundedAt.toDate()).toLocaleString()}
+                            </p>
+                            {refund.refundNotes && (
+                              <p className="text-xs text-green-700 mt-1">
+                                Note: {refund.refundNotes}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Pending payment notice for paid orders */}
+                        {isPaidOrder && isRefundPending && (
+                          <div className="mt-2 pt-2 border-t border-amber-200">
+                            <p className="text-xs font-medium text-amber-800">⚠️ Payment Pending</p>
+                            <p className="text-xs text-amber-700 mt-1">
+                              The store will process your refund payment soon.
+                            </p>
+                            {row.paymentMethod === "cash" && (
+                              <p className="text-xs text-amber-700 mt-1">
+                                💵 Please visit the store with your receipt to collect your refund.
+                              </p>
+                            )}
+                            {row.paymentMethod === "scan" && (
+                              <p className="text-xs text-amber-700 mt-1">
+                                💳 Refund will be processed back to your original payment method within 3-5 business days.
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Show cancellation refund status for cancelled paid orders */}
+          {row.status === "cancelled" && row.cancellationRefund && (
+            <div className={`rounded-md border p-3 ${
+              row.cancellationRefund.status === "pending"
+                ? "border-amber-200 bg-amber-50"
+                : row.cancellationRefund.status === "completed"
+                ? "border-green-200 bg-green-50"
+                : "border-gray-200 bg-gray-50"
+            }`}>
+              <div className="flex items-start gap-2">
+                <div className="flex-1">
+                  <p className="font-medium text-sm mb-1">
+                    {row.cancellationRefund.status === "pending" && "💰 Cancellation Refund - Payment Pending"}
+                    {row.cancellationRefund.status === "completed" && "✅ Cancellation Refund Completed"}
+                  </p>
+                  
+                  <p className="text-xs text-gray-700 mt-1">
+                    Refund Amount: {row.sellingTotal ? 
+                      `${row.sellingCurrency === "MMK" ? "Ks" : row.sellingCurrency || "THB"} ${(row.cancellationRefund.amount * (row.exchangeRate || 1)).toLocaleString()}` :
+                      `THB ${row.cancellationRefund.amount.toFixed(2)}`
+                    }
+                  </p>
+                  
+                  <p className="text-xs text-gray-600 mt-1">
+                    Cancelled: {row.cancelledAt ? new Date(row.cancelledAt.toDate()).toLocaleString() : "-"}
+                  </p>
+                  
+                  {row.cancellationRefund.status === "completed" && row.cancellationRefund.confirmedAt && (
+                    <div className="mt-2 pt-2 border-t border-green-200">
+                      <p className="text-xs font-medium text-green-800">Payment Completed</p>
+                      <p className="text-xs text-green-700 mt-1">
+                        Method: {
+                          row.cancellationRefund.method === "cash" ? "💵 Cash" :
+                          row.cancellationRefund.method === "original_payment" ? `💳 ${row.paymentMethod?.toUpperCase()}` :
+                          row.cancellationRefund.method === "bank_transfer" ? "🏦 Bank Transfer" :
+                          "Payment Method"
+                        }
+                      </p>
+                      <p className="text-xs text-green-700">
+                        Confirmed: {new Date(row.cancellationRefund.confirmedAt.toDate()).toLocaleString()}
+                      </p>
+                      {row.cancellationRefund.notes && (
+                        <p className="text-xs text-green-700 mt-1">
+                          Note: {row.cancellationRefund.notes}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  
+                  {row.cancellationRefund.status === "pending" && (
+                    <div className="mt-2 pt-2 border-t border-amber-200">
+                      <p className="text-xs font-medium text-amber-800">⚠️ Payment Pending</p>
+                      <p className="text-xs text-amber-700 mt-1">
+                        The store will process your refund payment soon.
+                      </p>
+                      {row.paymentMethod === "cash" && (
+                        <p className="text-xs text-amber-700 mt-1">
+                          💵 Please visit the store with your receipt to collect your refund.
+                        </p>
+                      )}
+                      {row.paymentMethod === "scan" && (
+                        <p className="text-xs text-amber-700 mt-1">
+                          💳 Refund will be processed back to your original payment method within 3-5 business days.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
             <div className="grid grid-cols-1 gap-1 text-sm text-gray-700">
               <div>
@@ -369,11 +942,21 @@ function PurchaseDetailsModal({
                 <span className="font-medium text-gray-900">
                   Payment Status:{" "}
                 </span>
-                {row.status || "-"}
+                <span
+                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getPaymentBadgeClass(
+                    row.status,
+                  )}`}
+                >
+                  {getPaymentStatusLabel(row.status, row.paymentStatus)}
+                </span>
               </div>
               <div>
-                <span className="font-medium text-gray-900">Payment: </span>
-                {row.paymentProvider || row.paymentMethod || "-"}
+                <span className="font-medium text-gray-900">Payment Method: </span>
+                {row.paymentMethod === "cash" ? "💵 Cash" : 
+                 row.paymentMethod === "scan" ? "📱 QR Scan" :
+                 row.paymentMethod === "wallet" ? "📱 QR Scan" :
+                 row.paymentMethod === "cod" ? "🚚 Cash on Delivery" :
+                 row.paymentProvider || row.paymentMethod || "-"}
               </div>
               <div>
                 <span className="font-medium text-gray-900">Date: </span>
@@ -441,14 +1024,872 @@ function PurchaseDetailsModal({
   );
 }
 
+function CancelRequestModal({
+  row,
+  onClose,
+  onSubmit,
+}: {
+  row: Txn;
+  onClose: () => void;
+  onSubmit: (reason: string, qrCodeImage?: string) => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [qrCodeImage, setQrCodeImage] = useState<string>("");
+  const [uploading, setUploading] = useState(false);
+
+  // Check if this is a paid order (Cash or Scan)
+  const isPaidOrder = row.paymentMethod === "cash" || row.paymentMethod === "scan";
+  const isScanPayment = row.paymentMethod === "scan";
+  const isCOD = row.paymentMethod === "cod";
+  
+  // Calculate refund amount - always use the original THB amount (row.total), not the converted selling amount
+  const refundAmount = row.total || 0;
+  const refundCurrency = "THB"; // Refunds are always in original currency (THB)
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.type.startsWith("image/")) {
+      alert("Please upload an image file");
+      return;
+    }
+
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert("Image size must be less than 5MB");
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      // Convert to base64
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setQrCodeImage(reader.result as string);
+        setUploading(false);
+      };
+      reader.onerror = () => {
+        alert("Failed to read image");
+        setUploading(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error("Error uploading image:", error);
+      alert("Failed to upload image");
+      setUploading(false);
+    }
+  };
+
+  const handleSubmit = async () => {
+    // Require QR code for Scan payments
+    if (isScanPayment && !qrCodeImage) {
+      alert("Please upload your payment QR code or account screenshot");
+      return;
+    }
+
+    setSubmitting(true);
+    await onSubmit(reason, qrCodeImage);
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4">
+      <div
+        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+        onClick={onClose}
+      />
+
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col z-10 overflow-hidden">
+        {/* Header */}
+        <div className="px-6 py-5 bg-gradient-to-r from-red-50 to-orange-50 border-b border-red-100 flex-shrink-0">
+          <div className="flex items-start justify-between">
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                <div className="p-2 bg-red-100 rounded-lg">
+                  <X className="w-5 h-5 text-red-600" />
+                </div>
+                <h2 className="text-xl font-bold text-gray-900">
+                  {isPaidOrder ? "Cancellation & Refund Request" : "Cancel Order"}
+                </h2>
+              </div>
+              <p className="text-sm text-gray-600 ml-11">
+                Order #{row.transactionId || row.id}
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-2 hover:bg-red-100 rounded-lg text-gray-500 hover:text-gray-700 transition-all ml-2"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        <div className="px-6 py-5 space-y-5 overflow-y-auto flex-1">
+          {/* QR Code Upload for Scan Payments */}
+          {isScanPayment && (
+            <div className="rounded-xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-blue-100/50 p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 bg-blue-500 rounded-xl">
+                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-blue-900 text-sm mb-1">
+                    Payment Account Required
+                  </h3>
+                  <p className="text-xs text-blue-700 leading-relaxed">
+                    Upload your payment QR code or account screenshot for refund processing
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                {!qrCodeImage ? (
+                  <div className="border-2 border-dashed border-blue-300 rounded-xl p-6 text-center bg-white/80 hover:bg-white hover:border-blue-400 transition-all cursor-pointer group">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageUpload}
+                      className="hidden"
+                      id="cancel-qr-upload"
+                      disabled={uploading}
+                    />
+                    <label
+                      htmlFor="cancel-qr-upload"
+                      className="cursor-pointer flex flex-col items-center"
+                    >
+                      <div className="p-3 bg-blue-100 rounded-full mb-3 group-hover:bg-blue-200 transition-colors">
+                        <svg
+                          className="w-8 h-8 text-blue-600"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                          />
+                        </svg>
+                      </div>
+                      <span className="text-sm text-blue-700 font-semibold mb-1">
+                        {uploading ? "Uploading..." : "Click to upload screenshot"}
+                      </span>
+                      <span className="text-xs text-blue-600">
+                        PNG or JPG • Max 5MB
+                      </span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="relative border-2 border-blue-200 rounded-xl p-3 bg-white">
+                    <img
+                      src={qrCodeImage}
+                      alt="Payment QR Code"
+                      className="w-full h-48 object-contain rounded-lg"
+                    />
+                    <button
+                      onClick={() => setQrCodeImage("")}
+                      className="absolute -top-2 -right-2 p-2 bg-red-500 hover:bg-red-600 text-white rounded-full shadow-lg transition-colors"
+                      type="button"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Refund Summary for Paid Orders */}
+          {isPaidOrder && (
+            <div className="rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 border-2 border-green-200 p-4">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="p-2 bg-green-500 rounded-lg">
+                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <h3 className="font-semibold text-green-900">Refund Summary</h3>
+              </div>
+              <div className="space-y-2 ml-11">
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-green-700">Payment Method</span>
+                  <span className="text-sm font-medium text-green-900 capitalize">
+                    {row.paymentMethod === "cash" ? "💵 Cash" : "📱 Scan"}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center pt-2 border-t border-green-200">
+                  <span className="text-sm font-medium text-green-700">Refund Amount</span>
+                  <span className="text-lg font-bold text-green-900">
+                    {refundCurrency} {refundAmount.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Important Information */}
+          <div className={`rounded-xl border-2 p-4 ${
+            isPaidOrder 
+              ? "border-amber-200 bg-gradient-to-br from-amber-50 to-yellow-50"
+              : "border-blue-200 bg-gradient-to-br from-blue-50 to-indigo-50"
+          }`}>
+            <div className="flex items-start gap-3">
+              <div className={`p-2 rounded-lg ${isPaidOrder ? "bg-amber-500" : "bg-blue-500"}`}>
+                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className={`font-semibold text-sm mb-2 ${isPaidOrder ? "text-amber-900" : "text-blue-900"}`}>
+                  What happens next?
+                </h3>
+                <ul className={`space-y-1.5 text-xs ${isPaidOrder ? "text-amber-800" : "text-blue-800"}`}>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">•</span>
+                    <span>Owner will review your cancellation request</span>
+                  </li>
+                  {isPaidOrder && (
+                    <>
+                      <li className="flex items-start gap-2">
+                        <span className="mt-0.5">•</span>
+                        <span>Full refund will be processed upon approval</span>
+                      </li>
+                      {row.paymentMethod === "cash" && (
+                        <li className="flex items-start gap-2">
+                          <span className="mt-0.5">•</span>
+                          <span>Visit store to collect cash refund</span>
+                        </li>
+                      )}
+                      {(row.paymentMethod === "scan") && (
+                        <li className="flex items-start gap-2">
+                          <span className="mt-0.5">•</span>
+                          <span>Refund processed to your account within 3-5 days</span>
+                        </li>
+                      )}
+                    </>
+                  )}
+                  {isCOD && (
+                    <li className="flex items-start gap-2">
+                      <span className="mt-0.5">•</span>
+                      <span>No refund needed (payment not collected)</span>
+                    </li>
+                  )}
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">•</span>
+                    <span>You'll receive notification once processed</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          {/* Cancellation Reason */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Reason for Cancellation <span className="text-gray-400 font-normal">(Optional)</span>
+            </label>
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Help us improve: Why are you cancelling this order?"
+              rows={3}
+              className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent transition-all resize-none"
+            />
+          </div>
+        </div>
+
+        {/* Footer Actions */}
+        <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex gap-3 flex-shrink-0">
+          <button
+            onClick={onClose}
+            disabled={submitting}
+            className="flex-1 py-3 px-4 border-2 border-gray-300 text-gray-700 rounded-xl font-semibold hover:bg-gray-100 hover:border-gray-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Go Back
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={submitting || (isScanPayment && !qrCodeImage)}
+            className="flex-1 py-3 px-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white rounded-xl font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-500/30"
+          >
+            {submitting ? (
+              <span className="flex items-center justify-center gap-2">
+                <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Processing...
+              </span>
+            ) : (
+              isPaidOrder ? "Submit Request" : "Cancel Order"
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RefundRequestModal({
+  row,
+  onClose,
+  onSubmit,
+}: {
+  row: Txn;
+  onClose: () => void;
+  onSubmit: (reason: string, items: Array<{ id: string; quantity: number }>, qrCodeImage?: string, itemPhotos?: string[]) => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [refundQuantities, setRefundQuantities] = useState<Record<string, number>>({});
+  const [qrCodeImage, setQrCodeImage] = useState<string>("");
+  const [itemPhotos, setItemPhotos] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadingItemPhoto, setUploadingItemPhoto] = useState(false);
+
+  const items = row.items || [];
+  const isScanPayment = row.paymentMethod === "scan";
+  const isReturnRequest = row.status?.toLowerCase() !== "cancelled";
+  
+  // Debug log
+  console.log("RefundRequestModal - Payment Method:", row.paymentMethod, "Is Scan?", isScanPayment, "Is Return?", isReturnRequest);
+  
+  // Calculate refund amount based on selected items
+  const totalItemQuantity = items.reduce((sum, item) => sum + (item.quantity || 0), 0);
+  const selectedItemQuantity = Object.values(refundQuantities).reduce((sum, qty) => sum + qty, 0);
+  const isFullReturn = selectedItemQuantity === totalItemQuantity && selectedItemQuantity > 0;
+  
+  // Calculate refund amount
+  const calculatedRefundAmount = isFullReturn
+    ? row.total || 0  // Full return: includes tax
+    : items.reduce((sum, item, idx) => {  // Partial return: excludes tax
+        const itemKey = `item-${idx}`;
+        const selectedQty = refundQuantities[itemKey] || 0;
+        return sum + (item.unitPrice || 0) * selectedQty;
+      }, 0);
+
+  const handleQuantityChange = (itemId: string, quantity: number) => {
+    setRefundQuantities((prev) => ({
+      ...prev,
+      [itemId]: Math.max(0, quantity),
+    }));
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.type.startsWith("image/")) {
+      alert("Please upload an image file");
+      return;
+    }
+
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert("Image size must be less than 5MB");
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      // Convert to base64
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setQrCodeImage(reader.result as string);
+        setUploading(false);
+      };
+      reader.onerror = () => {
+        alert("Failed to read image");
+        setUploading(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error("Error uploading image:", error);
+      alert("Failed to upload image");
+      setUploading(false);
+    }
+  };
+  
+  const handleItemPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    // Validate number of photos (max 5)
+    if (itemPhotos.length + files.length > 5) {
+      alert("You can upload maximum 5 photos");
+      return;
+    }
+
+    setUploadingItemPhoto(true);
+
+    try {
+      const newPhotos: string[] = [];
+      
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        // Validate file type
+        if (!file.type.startsWith("image/")) {
+          continue;
+        }
+
+        // Validate file size (max 5MB per image)
+        if (file.size > 5 * 1024 * 1024) {
+          alert(`Image ${file.name} is too large (max 5MB)`);
+          continue;
+        }
+
+        // Convert to base64
+        const reader = new FileReader();
+        const base64Promise = new Promise<string>((resolve, reject) => {
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        
+        const base64 = await base64Promise;
+        newPhotos.push(base64);
+      }
+      
+      setItemPhotos(prev => [...prev, ...newPhotos]);
+      setUploadingItemPhoto(false);
+    } catch (error) {
+      console.error("Error uploading photos:", error);
+      alert("Failed to upload photos");
+      setUploadingItemPhoto(false);
+    }
+  };
+  
+  const removeItemPhoto = (index: number) => {
+    setItemPhotos(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSubmit = async () => {
+    const refundItems = items
+      .map((item, idx) => ({
+        id: item.groupName || `item-${idx}`,
+        productId: (item as any).productId,
+        quantity: refundQuantities[`item-${idx}`] || 0,
+        unitPrice: item.unitPrice || 0,
+        groupName: item.groupName,
+      }))
+      .filter((item) => item.quantity > 0);
+
+    if (refundItems.length === 0) {
+      alert("Please select at least one item to refund");
+      return;
+    }
+
+    // Require reason
+    if (!reason || reason.trim() === "") {
+      alert("Please provide a reason for your refund/return request");
+      return;
+    }
+
+    // Require QR code for all return requests
+    if (isReturnRequest && !qrCodeImage) {
+      alert("Please upload your payment account or QR code screenshot");
+      return;
+    }
+    
+    // Require item photos for return requests
+    if (isReturnRequest && itemPhotos.length === 0) {
+      alert("Please upload at least one photo of the items you want to return");
+      return;
+    }
+
+    setSubmitting(true);
+    await onSubmit(reason, refundItems, qrCodeImage, itemPhotos);
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[99999] flex items-center justify-center p-3">
+      <div
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={onClose}
+      />
+
+      <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col z-10">
+        {/* Header */}
+        <div className="px-4 py-2.5 bg-gradient-to-r from-pink-600 to-rose-600 flex justify-between items-center">
+          <div>
+            <h2 className="text-sm font-bold text-white">
+              {row?.status?.toLowerCase() === "cancelled" 
+                ? "Request Refund" 
+                : "Request Return"}
+            </h2>
+            <p className="text-xs text-pink-100">
+              {row.transactionId || row.id}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 hover:bg-white/20 rounded transition-colors text-white"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="px-3 py-3 overflow-y-auto flex-1 space-y-2.5 bg-gray-50">
+          {/* QR Code Upload for All Return Requests (Including COD Delivered Orders) */}
+          {isReturnRequest && (
+            <div className="rounded-lg border border-pink-200 bg-pink-50 p-2.5">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="p-1 bg-pink-500 rounded">
+                  <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <p className="font-bold text-pink-900 text-xs">
+                    Payment Account Required *
+                  </p>
+                  <p className="text-xs text-pink-700 leading-tight">
+                    Upload payment QR code or bank account screenshot for refund transfer
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                {!qrCodeImage ? (
+                  <div className="border-2 border-dashed border-pink-300 rounded p-3 text-center bg-white">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageUpload}
+                      className="hidden"
+                      id="qr-upload"
+                      disabled={uploading}
+                    />
+                    <label
+                      htmlFor="qr-upload"
+                      className="cursor-pointer flex flex-col items-center"
+                    >
+                      <svg
+                        className="w-8 h-8 text-pink-400 mb-1"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                        />
+                      </svg>
+                      <span className="text-xs text-pink-600 font-semibold">
+                        {uploading ? "Uploading..." : "Click to upload"}
+                      </span>
+                      <span className="text-xs text-pink-500">
+                        PNG, JPG (5MB max)
+                      </span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="relative border border-pink-200 rounded p-1.5 bg-white">
+                    <img
+                      src={qrCodeImage}
+                      alt="Payment QR"
+                      className="w-full max-h-32 object-contain rounded"
+                    />
+                    <button
+                      onClick={() => setQrCodeImage("")}
+                      className="absolute top-0.5 right-0.5 p-1 bg-red-500 hover:bg-red-600 text-white rounded-full transition-colors"
+                      type="button"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Item Photos Upload for Return Requests */}
+          {isReturnRequest && (
+            <div className="rounded-lg border border-pink-200 bg-pink-50 p-2.5">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="p-1 bg-pink-500 rounded">
+                  <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <p className="font-bold text-pink-900 text-xs">
+                    Item Photos Required *
+                  </p>
+                  <p className="text-xs text-pink-700 leading-tight">
+                    Upload 1-5 photos for verification
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                {/* Upload button */}
+                {itemPhotos.length < 5 && (
+                  <div className="border-2 border-dashed border-pink-300 rounded p-3 text-center bg-white mb-2">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={handleItemPhotoUpload}
+                      className="hidden"
+                      id="item-photos-upload"
+                      disabled={uploadingItemPhoto}
+                    />
+                    <label
+                      htmlFor="item-photos-upload"
+                      className="cursor-pointer flex flex-col items-center"
+                    >
+                      <svg
+                        className="w-8 h-8 text-pink-400 mb-1"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                        />
+                      </svg>
+                      <span className="text-xs text-pink-600 font-semibold">
+                        {uploadingItemPhoto ? "Uploading..." : "Click to upload"}
+                      </span>
+                      <span className="text-xs text-pink-500">
+                        PNG, JPG (5MB max · Max 5)
+                      </span>
+                    </label>
+                  </div>
+                )}
+                
+                {/* Photos preview grid */}
+                {itemPhotos.length > 0 && (
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {itemPhotos.map((photo, index) => (
+                      <div key={index} className="relative border border-pink-200 rounded p-1 bg-white">
+                        <img
+                          src={photo}
+                          alt={`Item ${index + 1}`}
+                          className="w-full h-20 object-cover rounded"
+                        />
+                        <button
+                          onClick={() => removeItemPhoto(index)}
+                          className="absolute -top-1 -right-1 p-0.5 bg-red-500 hover:bg-red-600 text-white rounded-full transition-colors"
+                          type="button"
+                        >
+                          <X size={12} />
+                        </button>
+                        <div className="absolute bottom-0.5 left-0.5 px-1 py-0.5 bg-black/60 text-white text-xs rounded">
+                          {index + 1}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {itemPhotos.length > 0 && (
+                  <p className="text-xs text-pink-700 mt-1.5">
+                    {itemPhotos.length}/{5} photo{itemPhotos.length > 1 ? 's' : ''}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Cancelled Order Notice */}
+          {(row.status || "").toLowerCase() === "cancelled" && (
+            <div className="rounded-lg border border-orange-200 bg-orange-50 p-2 text-xs text-orange-900">
+              <p className="font-bold flex items-center gap-1.5">
+                <span>⚠️</span> Cancelled Order Refund
+              </p>
+              <p className="text-xs mt-0.5 text-orange-800 leading-tight">
+                Order paid but not received - eligible for full refund
+              </p>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+            <p className="font-bold mb-1">Important:</p>
+            <ul className="ml-3 list-disc space-y-0.5 text-xs leading-tight">
+              <li>Select items and quantities to {isReturnRequest ? 'return' : 'refund'}</li>
+              {isReturnRequest && (
+                <>
+                  <li>Upload payment account or QR code for refund</li>
+                  <li>Upload clear photos of items to return</li>
+                </>
+              )}
+              {!isReturnRequest && isScanPayment && <li>Upload payment QR code for refund</li>}
+              <li>Request will be reviewed by owner</li>
+            </ul>
+          </div>
+
+          <div className="bg-white rounded-lg border border-gray-200 p-2.5">
+            <label className="block text-xs font-bold text-gray-900 mb-2">
+              Select Items to {isReturnRequest ? 'Return' : 'Refund'}
+            </label>
+            <div className="space-y-1.5">
+              {items.map((item, idx) => {
+                const itemKey = `item-${idx}`;
+                const maxQty = item.quantity || 0;
+                const currentQty = refundQuantities[itemKey] || 0;
+
+                return (
+                  <div
+                    key={itemKey}
+                    className="border border-gray-200 rounded p-2 bg-gray-50"
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-semibold text-gray-900 text-xs truncate">
+                          {item.groupName || "Item"}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {[item.selectedColor, item.selectedSize]
+                            .filter(Boolean)
+                            .join(", ")}
+                        </div>
+                        <div className="text-xs text-gray-600 mt-0.5">
+                          ฿{Number(item.unitPrice || 0).toFixed(2)} × {maxQty}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        <button
+                          onClick={() =>
+                            handleQuantityChange(itemKey, currentQty - 1)
+                          }
+                          disabled={currentQty <= 0}
+                          className="w-6 h-6 border border-gray-300 rounded text-gray-700 hover:bg-gray-100 disabled:opacity-40 text-sm font-semibold"
+                        >
+                          -
+                        </button>
+                        <span className="w-6 text-center font-bold text-sm">
+                          {currentQty}
+                        </span>
+                        <button
+                          onClick={() =>
+                            handleQuantityChange(itemKey, currentQty + 1)
+                          }
+                          disabled={currentQty >= maxQty}
+                          className="w-6 h-6 border border-gray-300 rounded text-gray-700 hover:bg-gray-100 disabled:opacity-40 text-sm font-semibold"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Refund Amount Summary */}
+          {selectedItemQuantity > 0 && (
+            <div className={`rounded-lg border p-2.5 ${
+              isFullReturn 
+                ? "border-green-200 bg-green-50" 
+                : "border-blue-200 bg-blue-50"
+            }`}>
+              <div className="flex items-center gap-2 mb-2">
+                <div className={`p-1 rounded ${isFullReturn ? "bg-green-500" : "bg-blue-500"}`}>
+                  <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <p className={`font-bold text-xs ${isFullReturn ? "text-green-900" : "text-blue-900"}`}>
+                    {isFullReturn ? "Full Return - Total Refund" : "Partial Return - Item Refund"}
+                  </p>
+                  <p className={`text-xs leading-tight ${isFullReturn ? "text-green-700" : "text-blue-700"}`}>
+                    {isFullReturn 
+                      ? "All items selected - includes tax" 
+                      : "Selected items only - excludes tax"}
+                  </p>
+                </div>
+              </div>
+              
+              <div className="bg-white/60 rounded-lg p-2 border border-current/20">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-medium text-gray-700">Refund Amount (THB)</span>
+                  <span className="text-base font-bold text-gray-900">
+                    ฿{calculatedRefundAmount.toFixed(2)}
+                  </span>
+                </div>
+                {row.sellingTotal && (
+                  <div className="flex justify-between items-center mt-1">
+                    <span className="text-xs font-medium text-gray-700">Refund Amount (MMK)</span>
+                    <span className="text-sm font-bold text-gray-900">
+                      Ks {(calculatedRefundAmount * (row.exchangeRate || 43)).toLocaleString()}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white rounded-lg border border-gray-200 p-2.5">
+            <label className="block text-xs font-bold text-gray-900 mb-1.5">
+              Reason *
+            </label>
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Tell us why you want a refund... *"
+              rows={2}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:outline-none focus:ring-2 focus:ring-pink-500"
+              required
+            />
+          </div>
+        </div>
+
+        <div className="px-3 py-2 bg-white border-t border-gray-200 flex gap-2">
+          <button
+            onClick={onClose}
+            disabled={submitting}
+            className="flex-1 py-2 border border-gray-300 text-gray-700 rounded font-semibold hover:bg-gray-50 transition-colors disabled:opacity-50 text-xs"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={submitting}
+            className="flex-1 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-700 hover:to-rose-700 text-white rounded font-semibold transition-colors disabled:opacity-50 text-xs"
+          >
+            {submitting ? "Submitting..." : (row?.status?.toLowerCase() === "cancelled" ? "Request Refund" : "Request Return")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PurchaseRow({
   row,
   displayStatus,
   onViewDetails,
+  onRequestCancel,
+  onRequestRefund,
+  onViewRefundDetails,
 }: {
   row: Txn;
   displayStatus: PurchaseOrderStatus;
   onViewDetails: (row: Txn) => void;
+  onRequestCancel: (row: Txn) => void;
+  onRequestRefund: (row: Txn) => void;
+  onViewRefundDetails: (row: Txn) => void;
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{
@@ -467,8 +1908,8 @@ function PurchaseRow({
     if (!button) return;
 
     const rect = button.getBoundingClientRect();
-    const menuWidth = 176;
-    const menuHeight = 56;
+    const menuWidth = 200;
+    const menuHeight = 150;
     const gap = 6;
 
     let left = rect.right - menuWidth;
@@ -487,25 +1928,96 @@ function PurchaseRow({
     setDropdownOpen(true);
   };
 
+  // Check if order can be cancelled (pending/packaging, not cancelled, no pending request)
+  const canCancel =
+    (displayStatus === "pending" || displayStatus === "packaging") &&
+    row.status !== "cancelled" &&
+    row.cancellationRequest?.status !== "pending";
+
+  // Check if order can be refunded
+  // 1. Delivered orders (not refunded, no pending request) - includes COD orders that have been delivered and paid
+  // 2. Cancelled paid orders (cash/scan/wallet) without cancellationRefund (no pending request)
+  const isPaidOrder = row.paymentMethod === "cash" || row.paymentMethod === "scan";
+  const isCODDelivered = row.paymentMethod === "cod" && displayStatus === "delivered";
+  const hasCancellationRefund = row.cancellationRefund !== undefined;
+  const canRefund =
+    // Regular delivered orders (cash/scan/wallet/cod all can request return after delivery)
+    (displayStatus === "delivered" && row.status !== "refunded" && row.refundRequest?.status !== "pending") ||
+    // Cancelled paid orders without cancellation refund
+    (displayStatus === "cancelled" && isPaidOrder && !hasCancellationRefund && row.refundRequest?.status !== "pending");
+
+  // Show request status
+  const hasPendingCancellation = row.cancellationRequest?.status === "pending";
+  const hasPendingRefund = row.refundRequest?.status === "pending";
+  const hasApprovedCancellation = row.cancellationRequest?.status === "approved";
+  const hasRejectedCancellation = row.cancellationRequest?.status === "rejected";
+  const hasApprovedRefund = row.refundRequest?.status === "approved";
+  const hasRejectedRefund = row.refundRequest?.status === "rejected";
+
+  // Check if order has completed refunds
+  const hasCompletedRefunds = row.refunds && row.refunds.some(r => r.status === "completed");
+  const hasCompletedCancellationRefund = row.cancellationRefund?.status === "completed";
+  const hasAnyCompletedRefund = hasCompletedRefunds || hasCompletedCancellationRefund;
+
   return (
     <tr className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
       <td className="px-4 py-3 font-medium text-gray-900">
-        {row.transactionId || row.id}
+        {row.onlineOrderId || row.transactionId || row.id}
+        {hasPendingCancellation && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+            Cancellation Pending
+          </span>
+        )}
+        {hasApprovedCancellation && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
+            ✓ Cancellation Approved
+          </span>
+        )}
+        {hasRejectedCancellation && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
+            ✗ Cancellation Rejected
+          </span>
+        )}
+        {hasPendingRefund && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+            {displayStatus === "delivered" ? "Return Pending" : "Refund Pending"}
+          </span>
+        )}
+        {hasApprovedRefund && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
+            ✓ {displayStatus === "delivered" ? "Return Approved" : "Refund Approved"}
+          </span>
+        )}
+        {hasRejectedRefund && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
+            ✗ {displayStatus === "delivered" ? "Return Rejected" : "Refund Rejected"}
+          </span>
+        )}
       </td>
-      <td className="px-4 py-3 text-gray-700">{row.onlineOrderId || "-"}</td>
       <td className="px-4 py-3 text-gray-700">
-        {Number(row.total || 0).toFixed(2)}
+        <div className="flex flex-col gap-0.5">
+          <span className="font-medium">฿ {Number(row.total || 0).toFixed(2)}</span>
+          {(row.amountMmk || row.sellingTotal) && (
+            <span className="text-xs text-gray-500">
+              Ks {Number(row.amountMmk || row.sellingTotal || 0).toLocaleString()}
+            </span>
+          )}
+        </div>
       </td>
       <td className="px-4 py-3 text-gray-700">
-        {Number(row.sellingTotal || 0).toLocaleString()}
+        {row.paymentMethod === "cash" ? "💵 Cash" :
+         row.paymentMethod === "scan" ? "📱 QR Scan" :
+         row.paymentMethod === "wallet" ? "👛 Wallet" :
+         row.paymentMethod === "cod" ? "🚚 COD" :
+         row.paymentProvider || row.paymentMethod || "-"}
       </td>
       <td className="px-4 py-3">
         <span
           className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getPaymentBadgeClass(
-            row.status,
+            normalizePaymentStatus(row.status, row.paymentStatus),
           )}`}
         >
-          {getPaymentStatusLabel(row.status)}
+          {getPaymentStatusLabel(row.status, row.paymentStatus)}
         </span>
       </td>
       <td className="px-4 py-3">
@@ -519,6 +2031,20 @@ function PurchaseRow({
       </td>
       <td className="px-4 py-3 text-gray-600">
         {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
+      </td>
+      <td className="px-4 py-3 text-gray-700">
+        {(() => {
+          const isCOD = row.paymentMethod === "cod";
+          const isPaid = normalizePaymentStatus(row.status, row.paymentStatus) === "paid";
+          
+          // For COD orders, only show Transaction ID if payment status is paid
+          if (isCOD && !isPaid) {
+            return "-";
+          }
+          
+          // For non-COD orders or paid COD orders, show Transaction ID
+          return row.transactionId || row.id || "-";
+        })()}
       </td>
       <td className="px-4 py-3 text-right relative">
         <button
@@ -536,7 +2062,7 @@ function PurchaseRow({
               onClick={() => setDropdownOpen(false)}
             />
             <div
-              className="fixed w-44 bg-white border border-gray-200 shadow-lg rounded-md z-50 overflow-hidden"
+              className="fixed w-52 bg-white border border-gray-200 shadow-lg rounded-md z-50 overflow-hidden"
               style={{
                 top: menuPosition?.top ?? 8,
                 left: menuPosition?.left ?? 8,
@@ -551,6 +2077,41 @@ function PurchaseRow({
               >
                 <Eye size={16} /> View Details
               </button>
+              {hasAnyCompletedRefund && (
+                <button
+                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-emerald-50 flex items-center gap-2 text-emerald-600 transition-colors border-t border-gray-100"
+                  onClick={() => {
+                    setDropdownOpen(false);
+                    onViewRefundDetails(row);
+                  }}
+                >
+                  <DollarSign size={16} /> View Refund
+                </button>
+              )}
+              {canCancel && (
+                <button
+                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-red-50 flex items-center gap-2 text-red-600 transition-colors border-t border-gray-100"
+                  onClick={() => {
+                    setDropdownOpen(false);
+                    onRequestCancel(row);
+                  }}
+                >
+                  <XCircle size={16} /> Request Cancellation
+                </button>
+              )}
+              {canRefund && (
+                <button
+                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2 text-blue-600 transition-colors border-t border-gray-100"
+                  onClick={() => {
+                    setDropdownOpen(false);
+                    onRequestRefund(row);
+                  }}
+                  title={displayStatus === "cancelled" ? "Request refund for cancelled paid order" : "Request return for delivered order"}
+                >
+                  <RotateCcw size={16} /> 
+                  {displayStatus === "cancelled" ? "Request Refund" : "Request Return"}
+                </button>
+              )}
             </div>
           </>
         )}
@@ -563,19 +2124,88 @@ function PurchaseCard({
   row,
   displayStatus,
   onViewDetails,
+  onRequestCancel,
+  onRequestRefund,
+  onViewRefundDetails,
 }: {
   row: Txn;
   displayStatus: PurchaseOrderStatus;
   onViewDetails: (row: Txn) => void;
+  onRequestCancel: (row: Txn) => void;
+  onRequestRefund: (row: Txn) => void;
+  onViewRefundDetails: (row: Txn) => void;
 }) {
+  // Check if order can be cancelled (pending/packaging, not cancelled, no pending request)
+  const canCancel =
+    (displayStatus === "pending" || displayStatus === "packaging") &&
+    row.status !== "cancelled" &&
+    row.cancellationRequest?.status !== "pending";
+
+  // Check if order can be refunded
+  // 1. Delivered orders (not refunded, no pending request) - includes COD orders that have been delivered and paid
+  // 2. Cancelled paid orders (cash/scan/wallet) without cancellationRefund (no pending request)
+  const isPaidOrder = row.paymentMethod === "cash" || row.paymentMethod === "scan";
+  const isCODDelivered = row.paymentMethod === "cod" && displayStatus === "delivered";
+  const hasCancellationRefund = row.cancellationRefund !== undefined;
+  const canRefund =
+    // Regular delivered orders (cash/scan/wallet/cod all can request return after delivery)
+    (displayStatus === "delivered" && row.status !== "refunded" && row.refundRequest?.status !== "pending") ||
+    // Cancelled paid orders without cancellation refund
+    (displayStatus === "cancelled" && isPaidOrder && !hasCancellationRefund && row.refundRequest?.status !== "pending");
+
+  // Show request status
+  const hasPendingCancellation = row.cancellationRequest?.status === "pending";
+  const hasPendingRefund = row.refundRequest?.status === "pending";
+  const hasApprovedCancellation = row.cancellationRequest?.status === "approved";
+  const hasRejectedCancellation = row.cancellationRequest?.status === "rejected";
+  const hasApprovedRefund = row.refundRequest?.status === "approved";
+  const hasRejectedRefund = row.refundRequest?.status === "rejected";
+
+  // Check if order has completed refunds
+  const hasCompletedRefunds = row.refunds && row.refunds.some(r => r.status === "completed");
+  const hasCompletedCancellationRefund = row.cancellationRefund?.status === "completed";
+  const hasAnyCompletedRefund = hasCompletedRefunds || hasCompletedCancellationRefund;
+
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs text-gray-500">Transaction ID</p>
+          <p className="text-xs text-gray-500">Order ID</p>
           <p className="truncate text-sm font-semibold text-gray-900">
             {row.transactionId || row.id}
           </p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {hasPendingCancellation && (
+              <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                Cancellation Pending
+              </span>
+            )}
+            {hasApprovedCancellation && (
+              <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
+                ✓ Cancellation Approved
+              </span>
+            )}
+            {hasRejectedCancellation && (
+              <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
+                ✗ Cancellation Rejected
+              </span>
+            )}
+            {hasPendingRefund && (
+              <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+                {displayStatus === "delivered" ? "Return Pending" : "Refund Pending"}
+              </span>
+            )}
+            {hasApprovedRefund && (
+              <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
+                ✓ {displayStatus === "delivered" ? "Return Approved" : "Refund Approved"}
+              </span>
+            )}
+            {hasRejectedRefund && (
+              <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
+                ✗ {displayStatus === "delivered" ? "Return Rejected" : "Refund Rejected"}
+              </span>
+            )}
+          </div>
         </div>
         <span
           className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize ${getStatusBadgeClass(
@@ -598,14 +2228,36 @@ function PurchaseCard({
           </p>
         </div>
         <div>
+          <p className="text-xs text-gray-500">Amount (THB)</p>
+          <p className="font-medium text-gray-900">
+            ฿ {Number(row.total || 0).toFixed(2)}
+          </p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Amount (MMK)</p>
+          <p className="font-medium text-gray-900">
+            Ks {Number(row.amountMmk || row.sellingTotal || 0).toLocaleString()}
+          </p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Payment Method</p>
+          <p className="text-gray-800">
+            {row.paymentMethod === "cash" ? "💵 Cash" :
+             row.paymentMethod === "scan" ? "📱 QR Scan" :
+             row.paymentMethod === "wallet" ? "📱 QR Scan" :
+             row.paymentMethod === "cod" ? "🚚 COD" :
+             row.paymentProvider || row.paymentMethod || "-"}
+          </p>
+        </div>
+        <div>
           <p className="text-xs text-gray-500">Payment Status</p>
           <p>
             <span
               className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getPaymentBadgeClass(
-                row.status,
+                normalizePaymentStatus(row.status, row.paymentStatus),
               )}`}
             >
-              {getPaymentStatusLabel(row.status)}
+              {getPaymentStatusLabel(row.status, row.paymentStatus)}
             </span>
           </p>
         </div>
@@ -621,26 +2273,304 @@ function PurchaseCard({
             </span>
           </p>
         </div>
-        <div>
-          <p className="text-xs text-gray-500">Total (THB)</p>
-          <p className="font-medium text-gray-900">
-            ฿ {Number(row.total || 0).toFixed(2)}
-          </p>
-        </div>
-        <div>
-          <p className="text-xs text-gray-500">Total (MMK)</p>
-          <p className="font-medium text-gray-900">
-            {Number(row.sellingTotal || 0).toLocaleString()}
-          </p>
-        </div>
       </div>
 
-      <button
-        onClick={() => onViewDetails(row)}
-        className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-      >
-        <Eye size={16} /> View Details
-      </button>
+      <div className="mt-4 flex gap-2">
+        <button
+          onClick={() => onViewDetails(row)}
+          className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          <Eye size={16} /> View Details
+        </button>
+        {hasAnyCompletedRefund && (
+          <button
+            onClick={() => onViewRefundDetails(row)}
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-emerald-300 bg-white px-3 py-2 text-sm font-medium text-emerald-600 hover:bg-emerald-50"
+          >
+            <DollarSign size={16} /> Refund
+          </button>
+        )}
+        {canCancel && (
+          <button
+            onClick={() => onRequestCancel(row)}
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
+          >
+            <XCircle size={16} /> Cancel
+          </button>
+        )}
+        {canRefund && (
+          <button
+            onClick={() => onRequestRefund(row)}
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-blue-300 bg-white px-3 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50"
+            title={displayStatus === "cancelled" ? "Request refund for cancelled paid order" : "Request return for delivered order"}
+          >
+            <RotateCcw size={16} /> {displayStatus === "cancelled" ? "Refund" : "Return"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RefundDetailsModal({
+  row,
+  onClose,
+}: {
+  row: Txn;
+  onClose: () => void;
+}) {
+  if (!row) return null;
+
+  const isReturnType = row.orderStatus === "fully_returned" || row.orderStatus === "partially_returned";
+  const completedRefunds = row.refunds?.filter(r => r.status === "completed") || [];
+  const cancellationRefund = row.cancellationRefund;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="relative w-full max-w-lg max-h-[90vh] overflow-hidden rounded-2xl bg-gradient-to-br from-white to-pink-50/30 shadow-2xl">
+        {/* Header with gradient */}
+        <div className="sticky top-0 z-10 bg-gradient-to-r from-pink-500 to-rose-500 px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg bg-white/20 p-2 backdrop-blur-sm">
+                <DollarSign size={24} className="text-white" />
+              </div>
+              <h2 className="text-xl font-bold text-white">
+                {isReturnType ? "Return & Refund" : "Refund Details"}
+              </h2>
+            </div>
+            <button
+              onClick={onClose}
+              className="rounded-full p-1.5 text-white/80 hover:bg-white/20 hover:text-white transition-colors"
+            >
+              <XCircle size={22} />
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-y-auto max-h-[calc(90vh-180px)] px-6 py-5 space-y-4">
+          {/* Order Information - Compact Card */}
+          <div className="rounded-xl border border-pink-100 bg-white/80 backdrop-blur-sm p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-pink-900 mb-3 flex items-center gap-2">
+              <span className="text-pink-500">📋</span> Order Information
+            </h3>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-xs">
+              <div>
+                <p className="text-gray-500 mb-0.5">Order ID</p>
+                <p className="font-semibold text-gray-900 truncate">{row.transactionId || row.id}</p>
+              </div>
+              <div>
+                <p className="text-gray-500 mb-0.5">Order Reference</p>
+                <p className="font-semibold text-gray-900">{row.onlineOrderId || "-"}</p>
+              </div>
+              <div>
+                <p className="text-gray-500 mb-0.5">Order Total</p>
+                <p className="font-semibold text-gray-900">
+                  THB {Number(row.total || 0).toFixed(2)}
+                  {row.sellingTotal && (
+                    <span className="block text-[10px] text-gray-600">Ks {Number(row.sellingTotal).toLocaleString()}</span>
+                  )}
+                </p>
+              </div>
+              <div>
+                <p className="text-gray-500 mb-0.5">Payment Method</p>
+                <p className="font-semibold text-gray-900 capitalize">
+                  {row.paymentMethod === "scan" || row.paymentMethod === "wallet" ? "QR Scan" : row.paymentMethod === "cash" ? "Cash" : row.paymentMethod || "N/A"}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Return Refunds - Pink Theme */}
+          {isReturnType && completedRefunds.length > 0 && (
+            <div className="rounded-xl border border-pink-200 bg-gradient-to-br from-pink-50 to-rose-50 p-4 shadow-sm">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="rounded-lg bg-pink-500 p-1.5">
+                  <DollarSign size={16} className="text-white" />
+                </div>
+                <h3 className="font-semibold text-pink-900">
+                  {row.orderStatus === "fully_returned" ? "Full Return Refund" : "Partial Return Refund"}
+                </h3>
+              </div>
+              
+              {completedRefunds.map((refund, idx) => {
+                const refundAmount = refund.amount || refund.totalAmount || 0;
+                return (
+                <div key={idx} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-pink-200' : ''}`}>
+                  {/* Refund Amount - Highlighted */}
+                  <div className="bg-white/60 rounded-lg p-3 mb-3 border border-pink-200/50">
+                    <div className="flex justify-between items-center mb-1.5">
+                      <span className="text-xs font-medium text-pink-700">Refund Amount (THB)</span>
+                      <span className="text-lg font-bold text-pink-600">THB {refundAmount.toFixed(2)}</span>
+                    </div>
+                    {row.sellingTotal && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-medium text-pink-700">Refund Amount (MMK)</span>
+                        <span className="text-base font-bold text-pink-600">
+                          Ks {(refundAmount * (row.exchangeRate || 1)).toLocaleString()}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Additional Info */}
+                  <div className="space-y-1.5 text-xs">
+                    {refund.confirmedAt && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-pink-700/80">Refund Date</span>
+                        <span className="font-medium text-pink-900">
+                          {new Date(refund.confirmedAt.toDate()).toLocaleDateString('en-US', { 
+                            month: 'short', day: 'numeric', year: 'numeric', 
+                            hour: '2-digit', minute: '2-digit' 
+                          })}
+                        </span>
+                      </div>
+                    )}
+                    {refund.processedBy && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-pink-700/80">Processed By</span>
+                        <span className="font-medium text-pink-900">{refund.processedBy}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Notes */}
+                  {refund.notes && (
+                    <div className="mt-2.5 p-2.5 bg-pink-100/50 rounded-lg border border-pink-200">
+                      <p className="text-xs font-medium text-pink-800 mb-1">Notes:</p>
+                      <p className="text-xs text-pink-900">{refund.notes}</p>
+                    </div>
+                  )}
+
+                  {/* Payment Method Notice */}
+                  <div className="mt-3 p-2.5 bg-white/60 rounded-lg border border-pink-200/50">
+                    {row.paymentMethod === "cash" && (
+                      <p className="text-xs text-pink-800 flex items-start gap-2">
+                        <span className="text-base">💵</span>
+                        <span>Cash refund. Please visit the store with your receipt to collect your refund.</span>
+                      </p>
+                    )}
+                    {(row.paymentMethod === "scan" || row.paymentMethod === "wallet") && (
+                      <p className="text-xs text-pink-800 flex items-start gap-2">
+                        <span className="text-base">📱</span>
+                        <span>Refund has been processed back to your QR payment method within 3-5 business days.</span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )})}
+            </div>
+          )}
+
+          {/* Cancellation Refund - Rose Theme */}
+          {cancellationRefund && cancellationRefund.status === "completed" && (
+            <div className="rounded-xl border border-rose-200 bg-gradient-to-br from-rose-50 to-pink-50 p-4 shadow-sm">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="rounded-lg bg-rose-500 p-1.5">
+                  <DollarSign size={16} className="text-white" />
+                </div>
+                <h3 className="font-semibold text-rose-900">Cancellation Refund</h3>
+              </div>
+              
+              {/* Refund Amount - Highlighted */}
+              <div className="bg-white/60 rounded-lg p-3 mb-3 border border-rose-200/50">
+                <div className="flex justify-between items-center mb-1.5">
+                  <span className="text-xs font-medium text-rose-700">Refund Amount (THB)</span>
+                  <span className="text-lg font-bold text-rose-600">THB {cancellationRefund.amount.toFixed(2)}</span>
+                </div>
+                {row.sellingTotal && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-medium text-rose-700">Refund Amount (MMK)</span>
+                    <span className="text-base font-bold text-rose-600">
+                      Ks {(cancellationRefund.amount * (row.exchangeRate || 1)).toLocaleString()}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Additional Info */}
+              <div className="space-y-1.5 text-xs">
+                {cancellationRefund.confirmedAt && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-rose-700/80">Refund Date</span>
+                    <span className="font-medium text-rose-900">
+                      {new Date(cancellationRefund.confirmedAt.toDate()).toLocaleDateString('en-US', { 
+                        month: 'short', day: 'numeric', year: 'numeric', 
+                        hour: '2-digit', minute: '2-digit' 
+                      })}
+                    </span>
+                  </div>
+                )}
+                {cancellationRefund.processedBy && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-rose-700/80">Processed By</span>
+                    <span className="font-medium text-rose-900">{cancellationRefund.processedBy}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Notes */}
+              {cancellationRefund.notes && (
+                <div className="mt-2.5 p-2.5 bg-rose-100/50 rounded-lg border border-rose-200">
+                  <p className="text-xs font-medium text-rose-800 mb-1">Notes:</p>
+                  <p className="text-xs text-rose-900">{cancellationRefund.notes}</p>
+                </div>
+              )}
+
+              {/* Payment Method Notice */}
+              <div className="mt-3 p-2.5 bg-white/60 rounded-lg border border-rose-200/50">
+                {row.paymentMethod === "cash" && (
+                  <p className="text-xs text-rose-800 flex items-start gap-2">
+                    <span className="text-base">💵</span>
+                    <span>Cash refund. Please visit the store with your receipt to collect your refund.</span>
+                  </p>
+                )}
+                {(row.paymentMethod === "scan" || row.paymentMethod === "wallet") && (
+                  <p className="text-xs text-rose-800 flex items-start gap-2">
+                    <span className="text-base">📱</span>
+                    <span>Refund has been processed back to your QR payment method within 3-5 business days.</span>
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Status Information - Compact */}
+          <div className="rounded-xl border border-pink-100 bg-white/80 backdrop-blur-sm p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-pink-900 mb-3 flex items-center gap-2">
+              <span className="text-pink-500">📊</span> Status Information
+            </h3>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div>
+                <p className="text-gray-500 mb-1">Payment Status</p>
+                <span className="inline-block px-2.5 py-1 rounded-full bg-pink-100 text-pink-700 font-semibold capitalize text-[11px]">
+                  {row.status === "refunded" ? "Fully Refunded" : 
+                   row.status === "partially_refunded" ? "Partially Refunded" :
+                   row.status?.replace(/_/g, " ") || "N/A"}
+                </span>
+              </div>
+              <div>
+                <p className="text-gray-500 mb-1">Order Status</p>
+                <span className="inline-block px-2.5 py-1 rounded-full bg-rose-100 text-rose-700 font-semibold capitalize text-[11px]">
+                  {row.orderStatus === "fully_returned" ? "Fully Returned" : 
+                   row.orderStatus === "partially_returned" ? "Partially Returned" :
+                   row.orderStatus?.replace(/_/g, " ") || "N/A"}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="sticky bottom-0 border-t border-pink-100 bg-white/90 backdrop-blur-sm px-6 py-4">
+          <button
+            onClick={onClose}
+            className="w-full rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 px-4 py-2.5 text-sm font-semibold text-white hover:from-pink-600 hover:to-rose-600 transition-all duration-200 shadow-lg shadow-pink-500/30"
+          >
+            Close
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -659,7 +2589,7 @@ export default function PurchaseHistoryPage() {
     "all",
   );
   const [filterPaymentStatus, setFilterPaymentStatus] = useState<
-    "all" | "paid" | "pending" | "failed" | "cancelled"
+    "all" | "paid" | "pending" | "failed" | "cancelled" | "refunded" | "partially_refunded"
   >("all");
   const [dateRange, setDateRange] = useState<
     "today" | "7d" | "30d" | "90d" | "all" | "custom"
@@ -669,6 +2599,12 @@ export default function PurchaseHistoryPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const [selectedRow, setSelectedRow] = useState<Txn | null>(null);
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [showRefundModal, setShowRefundModal] = useState(false);
+  const [showRefundDetailsModal, setShowRefundDetailsModal] = useState(false);
+  const [cancelRow, setCancelRow] = useState<Txn | null>(null);
+  const [refundRow, setRefundRow] = useState<Txn | null>(null);
+  const [refundDetailsRow, setRefundDetailsRow] = useState<Txn | null>(null);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -683,26 +2619,20 @@ export default function PurchaseHistoryPage() {
       return;
     }
 
-    // Use full collection listener to avoid composite index requirements in dev.
-    const unsubscribe = onSnapshot(
+    // Query only transactions for this user (much faster than fetching all)
+    const txnQuery = query(
       collection(db, "transactions"),
+      where("customer.uid", "==", user.uid),
+      orderBy("timestamp", "desc")
+    );
+    
+    const unsubscribe = onSnapshot(
+      txnQuery,
       (snap) => {
-        const items = snap.docs
-          .map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<Txn, "id">),
-          }))
-          .filter((row) => {
-            const customer = (row as unknown as { customer?: { uid?: string } })
-              .customer;
-            return customer?.uid === user.uid;
-          })
-          .sort((a, b) => {
-            const aMs = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-            const bMs = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-            return bMs - aMs;
-          });
-
+        const items = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<Txn, "id">),
+        }));
         setRows(items);
         setPageLoading(false);
       },
@@ -710,19 +2640,24 @@ export default function PurchaseHistoryPage() {
         setPageLoading(false);
       },
     );
-
+    
     return () => unsubscribe();
   }, [user]);
 
   useEffect(() => {
     if (!db || !user) return;
 
-    const unsubscribe = onSnapshot(collection(db, "onlineOrders"), (snap) => {
+    // Query only online orders for this user (much faster than fetching all)
+    const ordersQuery = query(
+      collection(db, "onlineOrders"),
+      where("customer.uid", "==", user.uid)
+    );
+
+    const unsubscribe = onSnapshot(ordersQuery, (snap) => {
       const next: Record<string, PurchaseOrderStatus> = {};
 
       snap.docs.forEach((docSnap) => {
         const order = docSnap.data() as OnlineOrderLookup;
-        if (order.customer?.uid !== user.uid) return;
 
         const normalizedStatus = normalizePurchaseOrderStatus(
           order.status,
@@ -841,6 +2776,122 @@ export default function PurchaseHistoryPage() {
     startIndex + rowsPerPage,
   );
 
+  const handleRequestCancel = (row: Txn) => {
+    setCancelRow(row);
+    setShowCancelModal(true);
+  };
+
+  const handleRequestRefund = (row: Txn) => {
+    setRefundRow(row);
+    setShowRefundModal(true);
+  };
+
+  const handleViewRefundDetails = (row: Txn) => {
+    setRefundDetailsRow(row);
+    setShowRefundDetailsModal(true);
+  };
+
+  const handleSubmitCancellation = async (reason: string, qrCodeImage?: string) => {
+    if (!cancelRow || !user) return;
+
+    try {
+      const response = await fetch("/api/transactions/request-cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transactionId: cancelRow.transactionId || cancelRow.id,
+          customerUid: user.uid,
+          reason,
+          qrCodeImage,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        alert(data.error || "Failed to submit cancellation request");
+        return;
+      }
+
+      alert(data.message || "Cancellation request submitted successfully");
+      setShowCancelModal(false);
+      setCancelRow(null);
+    } catch (error) {
+      console.error("Error submitting cancellation:", error);
+      alert("Failed to submit cancellation request");
+    }
+  };
+
+  const handleSubmitRefund = async (
+    reason: string,
+    items: Array<{ id: string; quantity: number }>,
+    qrCodeImage?: string,
+    itemPhotos?: string[]
+  ) => {
+    if (!refundRow || !user) return;
+
+    // Determine if this is a return request (delivered) or refund request (cancelled)
+    const isReturnRequest = refundRow.orderStatus === "delivered";
+    const requestType = isReturnRequest ? "return" : "refund";
+
+    // Calculate refund amount based on return type
+    const allItems = refundRow.items || [];
+    const totalItemQuantity = allItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+    const selectedItemQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+    
+    // Check if all items are being returned (full return)
+    const isFullReturn = selectedItemQuantity === totalItemQuantity;
+    
+    let refundAmount: number;
+    
+    if (isFullReturn) {
+      // Full return: refund the total paid amount (includes tax)
+      refundAmount = refundRow.total || 0;
+    } else {
+      // Partial return: calculate sum of selected items (excludes tax)
+      refundAmount = items.reduce((sum, selectedItem) => {
+        const originalItem = allItems.find((item, idx) => 
+          selectedItem.id === (item.groupName || `item-${idx}`)
+        );
+        if (originalItem) {
+          return sum + (originalItem.unitPrice || 0) * selectedItem.quantity;
+        }
+        return sum;
+      }, 0);
+    }
+
+    try {
+      const response = await fetch("/api/transactions/request-refund", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transactionId: refundRow.transactionId || refundRow.id,
+          customerUid: user.uid,
+          reason,
+          items,
+          qrCodeImage, // Include QR code image
+          itemPhotos, // Include item photos
+          refundAmount, // Include calculated refund amount
+          isFullReturn, // Indicate if this is a full or partial return
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        alert(data.error || `Failed to submit ${requestType} request`);
+        return;
+      }
+
+      alert(data.message || `${isReturnRequest ? 'Return' : 'Refund'} request submitted successfully. Please wait for owner approval.`);
+      setShowRefundModal(false);
+      setRefundRow(null);
+    } catch (error) {
+      console.error(`Error submitting ${requestType}:`, error);
+      alert(`Failed to submit ${requestType} request`);
+    }
+  };
+
   if (loading || pageLoading) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-12 text-gray-600">
@@ -896,7 +2947,9 @@ export default function PurchaseHistoryPage() {
                     | "delivering"
                     | "delivered"
                     | "failed"
-                    | "cancelled",
+                    | "cancelled"
+                    | "fully_returned"
+                    | "partially_returned",
                 )
               }
               className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none"
@@ -908,6 +2961,8 @@ export default function PurchaseHistoryPage() {
               <option value="delivered">Delivered</option>
               <option value="failed">Failed</option>
               <option value="cancelled">Cancelled</option>
+              <option value="fully_returned">Fully Returned</option>
+              <option value="partially_returned">Partially Returned</option>
             </select>
           </div>
 
@@ -925,7 +2980,9 @@ export default function PurchaseHistoryPage() {
                     | "paid"
                     | "pending"
                     | "failed"
-                    | "cancelled",
+                    | "cancelled"
+                    | "refunded"
+                    | "partially_refunded",
                 )
               }
               className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none"
@@ -935,6 +2992,8 @@ export default function PurchaseHistoryPage() {
               <option value="pending">Pending</option>
               <option value="failed">Failed</option>
               <option value="cancelled">Cancelled</option>
+              <option value="refunded">Refunded</option>
+              <option value="partially_refunded">Partially Refunded</option>
             </select>
           </div>
 
@@ -1001,6 +3060,9 @@ export default function PurchaseHistoryPage() {
                 orderStatusByOrderRef,
               )}
               onViewDetails={setSelectedRow}
+              onRequestCancel={handleRequestCancel}
+              onRequestRefund={handleRequestRefund}
+              onViewRefundDetails={handleViewRefundDetails}
             />
           ))
         )}
@@ -1010,13 +3072,13 @@ export default function PurchaseHistoryPage() {
         <table className="min-w-full text-sm">
           <thead className="bg-gray-50 text-left text-gray-600">
             <tr>
-              <th className="px-4 py-3">Transaction ID</th>
-              <th className="px-4 py-3">Order Ref</th>
-              <th className="px-4 py-3">Total (THB)</th>
-              <th className="px-4 py-3">Total (MMK)</th>
+              <th className="px-4 py-3">Order ID</th>
+              <th className="px-4 py-3">Amount (THB / MMK)</th>
+              <th className="px-4 py-3">Payment Method</th>
               <th className="px-4 py-3">Payment Status</th>
               <th className="px-4 py-3">Order Status</th>
               <th className="px-4 py-3">Date</th>
+              <th className="px-4 py-3">Transaction ID</th>
               <th className="px-4 py-3 text-right">Actions</th>
             </tr>
           </thead>
@@ -1037,6 +3099,9 @@ export default function PurchaseHistoryPage() {
                     orderStatusByOrderRef,
                   )}
                   onViewDetails={setSelectedRow}
+                  onRequestCancel={handleRequestCancel}
+                  onRequestRefund={handleRequestRefund}
+                  onViewRefundDetails={handleViewRefundDetails}
                 />
               ))
             )}
@@ -1112,6 +3177,40 @@ export default function PurchaseHistoryPage() {
           onClose={() => setSelectedRow(null)}
         />
       )}
+
+      {showCancelModal && cancelRow && (
+        <CancelRequestModal
+          row={cancelRow}
+          onClose={() => {
+            setShowCancelModal(false);
+            setCancelRow(null);
+          }}
+          onSubmit={handleSubmitCancellation}
+        />
+      )}
+
+      {showRefundModal && refundRow && (
+        <RefundRequestModal
+          row={refundRow}
+          onClose={() => {
+            setShowRefundModal(false);
+            setRefundRow(null);
+          }}
+          onSubmit={handleSubmitRefund}
+        />
+      )}
+
+      {showRefundDetailsModal && refundDetailsRow && (
+        <RefundDetailsModal
+          row={refundDetailsRow}
+          onClose={() => {
+            setShowRefundDetailsModal(false);
+            setRefundDetailsRow(null);
+          }}
+        />
+      )}
     </div>
   );
 }
+
+

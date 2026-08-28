@@ -6,17 +6,17 @@ import { useLanguage } from "../contexts/LanguageContext";
 export default function Footer() {
   const { t } = useLanguage();
   return (
-    <footer className="w-full bg-[#111827] mt-8 text-white">
+    <footer className="w-full bg-pink-600 mt-8 text-white">
       <div className="max-w-6xl mx-auto px-4 py-10">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
           <div>
             <h4 className="font-semibold text-white text-lg mb-2">
               {t("contact_shan_yoma")}
             </h4>
-            <p className="text-md flex items-start gap-2 text-gray-200">
+            <p className="text-md flex items-start gap-2 text-gray-100">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
-                className="h-4 w-4 text-pink-400 flex-shrink-0"
+                className="h-4 w-4 text-cyan-300 flex-shrink-0"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -28,18 +28,18 @@ export default function Footer() {
                   d="M21 10c0 6-9 13-9 13S3 16 3 10a9 9 0 1118 0z"
                 />
               </svg>
-              <span className="text-gray-200">{t("address_shan")}</span>
+              <span className="text-gray-100">{t("address_shan")}</span>
             </p>
-            <p className="mt-3 text-md space-y-2 text-gray-200">
+            <p className="mt-3 text-md space-y-2 text-gray-100">
               <a
                 href={`tel:${t("phone1")}`}
-                className="text-pink-400 flex items-center gap-2 block"
+                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
               >
                 {t("phone1")}
               </a>
               <a
                 href={`tel:${t("phone2")}`}
-                className="text-pink-400 flex items-center gap-2 block"
+                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
               >
                 {t("phone2")}
               </a>
@@ -50,10 +50,10 @@ export default function Footer() {
             <h4 className="font-semibold text-white text-lg mb-2">
               {t("contact_nitchin")}
             </h4>
-            <p className="text-md flex items-start gap-2 text-gray-200">
+            <p className="text-md flex items-start gap-2 text-gray-100">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
-                className="h-4 w-4 text-pink-400 flex-shrink-0"
+                className="h-4 w-4 text-cyan-300 flex-shrink-0"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -65,18 +65,18 @@ export default function Footer() {
                   d="M21 10c0 6-9 13-9 13S3 16 3 10a9 9 0 1118 0z"
                 />
               </svg>
-              <span className="text-gray-200">{t("address_nitchin")}</span>
+              <span className="text-gray-100">{t("address_nitchin")}</span>
             </p>
-            <p className="mt-3 text-md space-y-2 text-gray-200">
+            <p className="mt-3 text-md space-y-2 text-gray-100">
               <a
                 href={`tel:${t("phone1")}`}
-                className="text-pink-400 flex items-center gap-2 block"
+                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
               >
                 {t("phone1")}
               </a>
               <a
                 href={`tel:${t("phone2")}`}
-                className="text-pink-400 flex items-center gap-2 block"
+                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
               >
                 {t("phone2")}
               </a>
@@ -88,7 +88,7 @@ export default function Footer() {
               {t("legal")}
             </h4>
             <p className="text-md mb-2">
-              <a href="/terms-and-conditions" className="text-pink-400">
+              <a href="/terms-and-conditions" className="text-cyan-300 hover:text-cyan-200 transition-colors">
                 {t("terms")}
               </a>
             </p>
@@ -96,7 +96,7 @@ export default function Footer() {
               <a
                 href="#"
                 aria-label="Instagram"
-                className="text-white hover:text-pink-400"
+                className="text-white hover:text-cyan-300 transition-colors"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -113,7 +113,7 @@ export default function Footer() {
               <a
                 href="#"
                 aria-label="Facebook"
-                className="text-white hover:text-pink-400"
+                className="text-white hover:text-cyan-300 transition-colors"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -127,7 +127,7 @@ export default function Footer() {
               <a
                 href="#"
                 aria-label="TikTok"
-                className="text-white hover:text-pink-400"
+                className="text-white hover:text-cyan-300 transition-colors"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -142,8 +142,8 @@ export default function Footer() {
           </div>
         </div>
 
-        <div className="mt-8 border-t border-gray-700 pt-6">
-          <div className="text-center text-md text-gray-400">
+        <div className="mt-8 border-t border-teal-500 pt-6">
+          <div className="text-center text-md text-gray-200">
             {t("copyright")}
           </div>
         </div>

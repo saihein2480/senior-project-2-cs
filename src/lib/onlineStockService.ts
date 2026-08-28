@@ -99,16 +99,38 @@ function resolveVariantIndex(
   const colorHint = normalize(line.color);
   const sizeHint = normalize(line.size);
 
+  // Try matching by variant ID first (could be index like "0", "1", etc.)
   if (variantHint) {
+    // Try exact ID match
     const idx = variants.findIndex((v) => normalize(v.id) === variantHint);
     if (idx >= 0) return idx;
+    
+    // Try matching variant ID as array index
+    const asIndex = parseInt(variantHint, 10);
+    if (!isNaN(asIndex) && asIndex >= 0 && asIndex < variants.length) {
+      return asIndex;
+    }
   }
 
+  // Try matching by color
   if (colorHint) {
     const idx = variants.findIndex((v) => normalize(v.color) === colorHint);
     if (idx >= 0) return idx;
   }
 
+  // Try matching by color AND size combination for better accuracy
+  if (colorHint && sizeHint) {
+    const idx = variants.findIndex((v) => {
+      const colorMatch = normalize(v.color) === colorHint;
+      const hasSize = (v.sizeQuantities || []).some(
+        (sq) => normalize(sq.size) === sizeHint,
+      );
+      return colorMatch && hasSize;
+    });
+    if (idx >= 0) return idx;
+  }
+
+  // Try matching by size only (if only one variant has this size)
   if (sizeHint) {
     const matching = variants
       .map((v, idx) => ({
@@ -120,8 +142,21 @@ function resolveVariantIndex(
       .filter((x) => x.hasSize);
 
     if (matching.length === 1) return matching[0].idx;
+    
+    // If multiple variants have this size but only one has stock, use that one
+    if (matching.length > 1) {
+      const withStock = matching.filter((m) => {
+        const variant = variants[m.idx];
+        const sizeQty = (variant.sizeQuantities || []).find(
+          (sq) => normalize(sq.size) === sizeHint,
+        );
+        return (sizeQty?.quantity || 0) > 0;
+      });
+      if (withStock.length === 1) return withStock[0].idx;
+    }
   }
 
+  // If only one variant exists, use it as default
   if (variants.length === 1) return 0;
 
   return -1;
@@ -165,7 +200,20 @@ function assertStockAvailable(
 
   const variantIndex = resolveVariantIndex(variants, line);
   if (variantIndex < 0) {
-    throw new Error(`Variant not found for ${describeLine(line)}`);
+    // Provide detailed error message with available variants
+    const availableVariants = variants
+      .map((v, idx) => {
+        const sizes = (v.sizeQuantities || [])
+          .map((sq) => sq.size)
+          .filter(Boolean)
+          .join(", ");
+        return `Variant ${idx}: color=${v.color || "N/A"}, id=${v.id || "N/A"}, sizes=[${sizes}]`;
+      })
+      .join("; ");
+    
+    throw new Error(
+      `Variant not found for ${describeLine(line)}. Available variants: ${availableVariants}`
+    );
   }
 
   const variant = variants[variantIndex];
@@ -175,7 +223,14 @@ function assertStockAvailable(
 
   const sizeIndex = resolveSizeIndex(sizeQuantities, line);
   if (sizeIndex < 0) {
-    throw new Error(`Size not found for ${describeLine(line)}`);
+    // Provide detailed error message with available sizes
+    const availableSizes = sizeQuantities
+      .map((sq) => `${sq.size}(qty:${sq.quantity || 0})`)
+      .join(", ");
+    
+    throw new Error(
+      `Size not found for ${describeLine(line)}. Available sizes: ${availableSizes}`
+    );
   }
 
   const available = Number(sizeQuantities[sizeIndex]?.quantity || 0);

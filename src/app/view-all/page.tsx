@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import ProductsList from "../../components/ProductsList";
 import { useLanguage } from "@/contexts/LanguageContext";
 
-export default function BestSellersPage() {
+export default function ViewAllPage() {
   const { t } = useLanguage();
   const searchParams = useSearchParams();
   const category = searchParams?.get("category") || "all";
@@ -13,7 +13,7 @@ export default function BestSellersPage() {
   // Format category name for display
   const getCategoryTitle = () => {
     if (category === "all") {
-      return "Best Sellers";
+      return "All Products";
     }
     // Capitalize first letter of each word
     return category
@@ -29,7 +29,7 @@ export default function BestSellersPage() {
         <div className="mx-auto max-w-6xl px-4 py-3 md:py-4">
           <div className="text-center">
             <p className="text-xs md:text-sm text-gray-400 uppercase tracking-[0.15em] mb-1 font-medium">
-              {category === "all" ? "Customer Favorites" : "Best Sellers"}
+              {category === "all" ? "Explore Our Collection" : "Category"}
             </p>
             <h1 className="text-3xl md:text-4xl font-semibold text-gray-900 uppercase tracking-[0.2em] mb-1.5">
               {getCategoryTitle()}
