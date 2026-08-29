@@ -2734,8 +2734,7 @@ export default function PurchaseHistoryPage() {
       const normalizedPaymentStatus = normalizePaymentStatus(row.status, row.paymentStatus);
       const matchesPaymentStatus =
         filterPaymentStatus === "all" ||
-        normalizedPaymentStatus === filterPaymentStatus ||
-        (normalizedPaymentStatus === "unknown" && filterPaymentStatus === "all"); // Include unknown in "all" filter
+        normalizedPaymentStatus === filterPaymentStatus;
       
       if (index < 5) {
         console.log(`  -> normalized payment: ${normalizedPaymentStatus}, matches: ${matchesPaymentStatus}`);

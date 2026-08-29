@@ -42,7 +42,7 @@ const groq = process.env.GROQ_API_KEY
   : null;
 
 interface Message {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
 }
 
@@ -280,7 +280,7 @@ Examples:
         // If no context, try to extract product name from message
         if (!product) {
           const words = userMessage.toLowerCase().split(/\s+/);
-          const productKeywords = words.filter(w => 
+          const productKeywords = words.filter((w: string) => 
             w.length > 3 && 
             !['this', 'that', 'have', 'does', 'available', 'stock', 'color', 'size', 'price', 'shirt', 'dress', 'jeans', 'pants'].includes(w)
           );

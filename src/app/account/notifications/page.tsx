@@ -127,11 +127,12 @@ export default function NotificationsPage() {
           });
         } catch (notifError) {
           console.error("Error fetching from notifications collection:", notifError);
-          console.error("Error details:", {
-            message: notifError.message,
-            code: notifError.code,
-            stack: notifError.stack
-          });
+          if (notifError instanceof Error) {
+            console.error("Error details:", {
+              message: notifError.message,
+              stack: notifError.stack
+            });
+          }
           // Continue to fetch from transactions even if notifications query fails
         }
 
