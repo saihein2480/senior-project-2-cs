@@ -9,6 +9,7 @@ import ServiceWorkerRegistration from "../components/ServiceWorkerRegistration";
 import QueryProvider from "../providers/QueryProvider";
 import { CustomerAuthProvider } from "../contexts/CustomerAuthContext";
 import { CartProvider } from "../contexts/CartContext";
+import ChatBot from "../components/ChatBot";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -73,6 +74,7 @@ export default function RootLayout({
                 <main className="flex-1">{children}</main>
                 <Footer />
                 <InstallPrompt />
+                <ChatBot />
               </CartProvider>
             </CustomerAuthProvider>
           </LanguageProvider>

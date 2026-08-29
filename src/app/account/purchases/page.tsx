@@ -385,8 +385,11 @@ function normalizePaymentStatus(
     if (/(success|succeeded|paid|completed)/.test(ps)) return "paid";
     if (/(pending_refund)/.test(ps)) return "pending_refund";
     if (/(refund_rejected)/.test(ps)) return "refund_rejected";
+    if (/(partially_refunded|partial)/.test(ps)) return "partially_refunded";
+    if (/(refunded)/.test(ps)) return "refunded";
     if (/(pending|processing|created|initiated)/.test(ps)) return "pending";
     if (/(fail|failed|error|declined|stock_conflict)/.test(ps)) return "failed";
+    if (/(cancelled|canceled|void)/.test(ps)) return "cancelled";
   }
   
   // Fallback to status field
@@ -403,6 +406,8 @@ function normalizePaymentStatus(
   // Check for partially_refunded BEFORE refunded to avoid false match
   if (/(partially_refunded|partial)/.test(raw)) return "partially_refunded";
   if (/(refunded)/.test(raw)) return "refunded";
+  
+  // If no match, treat as paid for delivered/completed orders
   return "unknown";
 }
 
@@ -2033,18 +2038,7 @@ function PurchaseRow({
         {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
       </td>
       <td className="px-4 py-3 text-gray-700">
-        {(() => {
-          const isCOD = row.paymentMethod === "cod";
-          const isPaid = normalizePaymentStatus(row.status, row.paymentStatus) === "paid";
-          
-          // For COD orders, only show Transaction ID if payment status is paid
-          if (isCOD && !isPaid) {
-            return "-";
-          }
-          
-          // For non-COD orders or paid COD orders, show Transaction ID
-          return row.transactionId || row.id || "-";
-        })()}
+        {row.transactionId || row.id || "-"}
       </td>
       <td className="px-4 py-3 text-right relative">
         <button
@@ -2589,7 +2583,7 @@ export default function PurchaseHistoryPage() {
     "all",
   );
   const [filterPaymentStatus, setFilterPaymentStatus] = useState<
-    "all" | "paid" | "pending" | "failed" | "cancelled" | "refunded" | "partially_refunded"
+    "all" | "paid" | "pending" | "failed" | "cancelled" | "refunded" | "partially_refunded" | "pending_refund" | "refund_rejected"
   >("all");
   const [dateRange, setDateRange] = useState<
     "today" | "7d" | "30d" | "90d" | "all" | "custom"
@@ -2620,6 +2614,8 @@ export default function PurchaseHistoryPage() {
     }
 
     // Query only transactions for this user (much faster than fetching all)
+    console.log("Fetching transactions for user:", user.uid);
+    
     const txnQuery = query(
       collection(db, "transactions"),
       where("customer.uid", "==", user.uid),
@@ -2629,14 +2625,38 @@ export default function PurchaseHistoryPage() {
     const unsubscribe = onSnapshot(
       txnQuery,
       (snap) => {
-        const items = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as Omit<Txn, "id">),
-        }));
+        console.log("Transactions query returned:", snap.size, "documents");
+        const items = snap.docs.map((d) => {
+          const data = d.data() as Omit<Txn, "id">;
+          console.log("Transaction:", d.id, {
+            transactionId: data.transactionId,
+            onlineOrderId: data.onlineOrderId,
+            paymentMethod: data.paymentMethod,
+            total: data.total,
+            status: data.status,
+            paymentStatus: data.paymentStatus,
+            orderStatus: data.orderStatus,
+          });
+          return {
+            id: d.id,
+            ...data,
+          };
+        });
+        console.log("Mapped transactions:", items.length);
+        console.log("First transaction:", items[0]);
         setRows(items);
         setPageLoading(false);
       },
-      () => {
+      (error) => {
+        console.error("Error fetching transactions:", error);
+        console.error("Error code:", error.code);
+        console.error("Error message:", error.message);
+        
+        // If index is missing, show user-friendly message
+        if (error.code === "failed-precondition") {
+          console.error("Firestore index required. Create it here:", error.message);
+        }
+        
         setPageLoading(false);
       },
     );
@@ -2682,7 +2702,22 @@ export default function PurchaseHistoryPage() {
   );
 
   const filteredRows = useMemo(() => {
-    return rows.filter((row) => {
+    console.log("=== FILTERING ROWS ===");
+    console.log("Total rows:", rows.length);
+    console.log("Filter payment status:", filterPaymentStatus);
+    console.log("Filter order status:", filterStatus);
+    
+    const filtered = rows.filter((row, index) => {
+      if (index < 5) { // Log first 5 for debugging
+        console.log(`Row ${index}:`, {
+          id: row.transactionId || row.id,
+          paymentMethod: row.paymentMethod,
+          status: row.status,
+          paymentStatus: row.paymentStatus,
+          orderStatus: row.orderStatus,
+        });
+      }
+      
       const searchText = searchTerm.trim().toLowerCase();
       const matchesSearch =
         !searchText ||
@@ -2696,10 +2731,16 @@ export default function PurchaseHistoryPage() {
       const matchesStatus =
         filterStatus === "all" || normalizedStatus === filterStatus;
 
-      const normalizedPaymentStatus = normalizePaymentStatus(row.status);
+      const normalizedPaymentStatus = normalizePaymentStatus(row.status, row.paymentStatus);
       const matchesPaymentStatus =
         filterPaymentStatus === "all" ||
-        normalizedPaymentStatus === filterPaymentStatus;
+        normalizedPaymentStatus === filterPaymentStatus ||
+        (normalizedPaymentStatus === "unknown" && filterPaymentStatus === "all"); // Include unknown in "all" filter
+      
+      if (index < 5) {
+        console.log(`  -> normalized payment: ${normalizedPaymentStatus}, matches: ${matchesPaymentStatus}`);
+        console.log(`  -> normalized order: ${normalizedStatus}, matches: ${matchesStatus}`);
+      }
 
       let matchesDateRange = true;
       if (dateRange !== "all") {
@@ -2746,6 +2787,9 @@ export default function PurchaseHistoryPage() {
         matchesDateRange
       );
     });
+    
+    console.log("Filtered rows:", filtered.length);
+    return filtered;
   }, [
     rows,
     searchTerm,

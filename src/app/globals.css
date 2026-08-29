@@ -45,3 +45,25 @@ body {
 .animate-slide-up {
   animation: slide-up 0.5s ease-out forwards;
 }
+
+/* Chatbot animations */
+@keyframes bounce-dot {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-25%);
+  }
+}
+
+.animate-bounce {
+  animation: bounce-dot 1s infinite;
+}
+
+.delay-100 {
+  animation-delay: 0.1s;
+}
+
+.delay-200 {
+  animation-delay: 0.2s;
+}
