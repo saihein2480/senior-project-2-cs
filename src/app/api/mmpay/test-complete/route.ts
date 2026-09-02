@@ -86,11 +86,30 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
           },
         ];
 
-  const subtotal = txItems.reduce(
+  // Financial breakdown MUST come from the values calculated at checkout and
+  // stored on the order. Recalculating here would drop tax/discount/coupon.
+  const itemsSubtotal = txItems.reduce(
     (sum, item) =>
       sum + Number(item.unitPrice || 0) * Number(item.quantity || 0),
     0,
   );
+
+  const subtotal = Number(order.subtotal || 0) || itemsSubtotal;
+  const tax = Number(order.tax || 0);
+  const discount = Number(order.discount || 0);
+  const couponDiscountTHB = Number(order.couponDiscountTHB || 0);
+  const taxRate = Number(order.taxRate || 0);
+  const total =
+    Number(order.total || 0) || Math.max(0, subtotal - discount) + tax;
+
+  const orderExchangeRate = Number(order.exchangeRate || 0);
+  const envExchangeRate = Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
+  const exchangeRate =
+    orderExchangeRate > 0
+      ? orderExchangeRate
+      : Number.isFinite(envExchangeRate) && envExchangeRate > 0
+        ? envExchangeRate
+        : 0;
 
   await transactionDocRef.set({
     transactionId: payload.transactionRefId,
@@ -102,22 +121,43 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
       displayName:
         ((order.customer as Record<string, unknown> | undefined)
           ?.displayName as string | undefined) || "Online Customer",
+      phone:
+        ((order.customer as Record<string, unknown> | undefined)?.phone as
+          | string
+          | undefined) || "",
+      address:
+        ((order.customer as Record<string, unknown> | undefined)?.address as
+          | string
+          | undefined) || "",
       customerType: "individual",
     },
     items: txItems,
     subtotal,
-    tax: 0,
-    discount: 0,
-    total: subtotal,
-    amountPaid: subtotal,
+    tax,
+    taxRate,
+    discount,
+    total,
+    amountPaid: total,
     change: 0,
-    paymentMethod: "scan",
+    paymentMethod: (order.paymentMethod as string | undefined) || "scan",
     timestamp: new Date().toISOString(),
     createdAt: new Date(),
     status: "completed",
     sellingCurrency: "THB",
+    ...(exchangeRate > 0 ? { exchangeRate } : {}),
+    amountMmk: Number(order.amountMmk || 0),
     sellingTotal: Number(order.amountMmk || 0),
     paymentProvider: "MMPAY",
+    orderSource: "web_storefront",
+    customerUid: (order.customer as Record<string, unknown> | undefined)?.uid,
+    ...(order.couponCode
+      ? {
+          couponCode: order.couponCode,
+          appliedCouponCode: order.couponCode,
+          couponId: order.couponId,
+          couponDiscountTHB,
+        }
+      : {}),
     paymentMeta: {
       method: payload.method,
       vendor: payload.vendor,
@@ -127,6 +167,50 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
       testCompleted: true,
     },
   });
+
+  // Mirror the live webhook: consume the coupon and award loyalty points so the
+  // sandbox flow produces the same records as a real payment.
+  const customerUid = (order.customer as Record<string, unknown> | undefined)
+    ?.uid;
+
+  if (typeof customerUid === "string" && customerUid) {
+    const couponId = order.couponId as string | undefined;
+    const couponCode = order.couponCode as string | undefined;
+
+    if (couponId && couponCode) {
+      try {
+        const { CouponService } = await import("@/lib/couponService");
+        // eslint-disable-next-line react-hooks/rules-of-hooks -- not a React hook; the `use` prefix only looks like one
+        await CouponService.useCouponAdmin(
+          adminDb,
+          customerUid,
+          couponId,
+          payload.transactionRefId,
+        );
+      } catch (couponError) {
+        console.error(
+          "Error marking coupon as used for test payment:",
+          couponError,
+        );
+      }
+    }
+
+    try {
+      const { LoyaltyService } = await import("@/lib/loyaltyService");
+      await LoyaltyService.awardPoints({
+        customerId: customerUid,
+        transactionId: payload.transactionRefId,
+        transactionAmount: total,
+        source: "online",
+        description: `Online payment for order ${payload.orderId}`,
+      });
+    } catch (loyaltyError) {
+      console.error(
+        "Error awarding loyalty points for test payment:",
+        loyaltyError,
+      );
+    }
+  }
 }
 
 export async function POST(req: Request) {

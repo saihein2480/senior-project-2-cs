@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 // Proxy GET /api/settings -> http://localhost:3000/api/settings
+// No caching for real-time updates
 export async function GET() {
   try {
     const upstreamUrl =
@@ -9,14 +10,17 @@ export async function GET() {
       "";
 
     const upstream = await fetch(upstreamUrl, {
-      next: { revalidate: 600 }, // Cache for 10 minutes (settings change less frequently)
+      cache: 'no-store', // Disable Next.js caching completely
+      next: { revalidate: 0 }, // Never cache
     });
     const data = await upstream.json().catch(() => null);
     const status = upstream.status || 200;
     return NextResponse.json(data, {
       status,
       headers: {
-        "Cache-Control": "public, s-maxage=600, stale-while-revalidate=1200",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", // Disable all caching
+        "Pragma": "no-cache",
+        "Expires": "0",
       },
     });
   } catch (error) {

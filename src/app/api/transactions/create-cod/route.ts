@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
+import { syncOnlineCustomerToPos } from "@/lib/updateCustomerStats";
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,7 +13,19 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { customer, items, subtotalTHB, discountTHB, taxTHB, totalTHB } = body;
+    const {
+      customer,
+      items,
+      subtotalTHB,
+      discountTHB,
+      taxTHB,
+      taxRatePercent,
+      totalTHB,
+      exchangeRate,
+      couponCode,
+      couponId,
+      couponDiscountTHB,
+    } = body;
 
     // Validate required fields
     if (!customer || !items || !Array.isArray(items) || items.length === 0) {
@@ -62,14 +75,20 @@ export async function POST(request: NextRequest) {
       0
     );
     const discount = discountTHB || 0;
-    const tax = taxTHB || (subtotal - discount) * 0.07; // 7% tax
-    const total = totalTHB || (subtotal - discount + tax);
+    const tax = taxTHB || 0; // Use tax from checkout page, or 0 if not provided
+    const taxRate = Number(taxRatePercent || 0); // Percentage actually applied
+    const couponDiscount = Number(couponDiscountTHB || 0);
+    const total =
+      totalTHB || Math.max(0, subtotal - discount - couponDiscount) + tax;
 
     // Generate unique online order ID (different from transaction ID)
     const orderId = `COD-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    
-    // Get exchange rate for MMK conversion
-    const mmkRate = Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
+
+    // Prefer the rate the customer actually saw at checkout.
+    const mmkRate =
+      Number(exchangeRate || 0) > 0
+        ? Number(exchangeRate)
+        : Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
     const amountMmk = mmkRate > 0 ? total * mmkRate : total;
 
     // Prepare transaction data for Firebase
@@ -101,6 +120,7 @@ export async function POST(request: NextRequest) {
       })),
       subtotal,
       tax,
+      taxRate,
       discount,
       total,
       amountPaid: total, // For COD, amount paid equals total (will be paid on delivery)
@@ -123,6 +143,13 @@ export async function POST(request: NextRequest) {
         cartDiscount: discount,
         cartDiscountPercent: 0,
       },
+      // Coupon information
+      ...(couponCode && {
+        couponCode,
+        appliedCouponCode: couponCode,
+        couponId,
+        couponDiscountTHB: couponDiscountTHB || 0,
+      }),
       // Delivery tracking fields
       deliveryStatus: "pending", // pending, confirmed, shipped, delivered, cancelled
       orderSource: "web_storefront",
@@ -161,12 +188,26 @@ export async function POST(request: NextRequest) {
         amount: (item.discountedPriceTHB || item.unitPriceTHB) * item.quantity,
         quantity: item.quantity,
       })),
+      // Financial breakdown
+      subtotal,
+      tax,
+      taxRate,
+      discount,
       total, // Add THB total amount
       amountMmk,
+      exchangeRate: mmkRate,
       status: "pending",
       paymentStatus: "PENDING",
       paymentMethod: "cod",
       provider: "COD",
+      paymentProvider: "COD",
+      // Coupon information
+      ...(couponCode && {
+        couponCode,
+        appliedCouponCode: couponCode,
+        couponId,
+        couponDiscountTHB: couponDiscountTHB || 0,
+      }),
       deliveryStatus: "pending",
       orderSource: "web_storefront",
       createdAt: new Date().toISOString(),
@@ -175,11 +216,67 @@ export async function POST(request: NextRequest) {
 
     await adminDb.collection("onlineOrders").doc(orderId).set(onlineOrderData);
 
+    // Sync customer to POS system's customers collection
+    if (customer.uid) {
+      await syncOnlineCustomerToPos(customer.uid);
+    }
+
     console.log(
       "COD transaction and online order created successfully:",
       transactionId,
       docRef.id
     );
+
+    // Mark coupon as used and deduct points if a coupon was applied
+    if (customer.uid && couponId) {
+      try {
+        const { CouponService } = await import("@/lib/couponService");
+        const couponUsed = await CouponService.useCouponAdmin(
+          adminDb,
+          customer.uid,
+          couponId,
+          transactionId
+        );
+
+        if (couponUsed) {
+          console.log("Coupon marked as used and points deducted:", {
+            customerId: customer.uid,
+            couponId,
+            couponCode,
+          });
+        } else {
+          console.warn("Failed to mark coupon as used, but order will proceed");
+        }
+      } catch (couponError) {
+        console.error("Error marking coupon as used:", couponError);
+        // Don't fail the order if coupon update fails
+      }
+    }
+
+    // Award loyalty points for COD order
+    if (customer.uid) {
+      try {
+        const { LoyaltyService } = await import("@/lib/loyaltyService");
+        const loyaltyResult = await LoyaltyService.awardPoints({
+          customerId: customer.uid,
+          transactionId,
+          transactionAmount: total,
+          source: 'online',
+          description: `Online COD order ${orderId}`,
+        });
+
+        if (loyaltyResult.success) {
+          console.log("Loyalty points awarded for COD order:", {
+            points: loyaltyResult.pointsAwarded,
+            newTotal: loyaltyResult.newTotalPoints,
+            coupons: loyaltyResult.couponsGenerated.length,
+          });
+        }
+      } catch (loyaltyError) {
+        // Don't fail the order if loyalty fails
+        console.error("Error awarding loyalty points for COD:", loyaltyError);
+      }
+    }
 
     return NextResponse.json({
       success: true,

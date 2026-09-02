@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useProduct } from "../../hooks/useProducts";
-import { useCurrencyRate } from "../../hooks/useSettings";
+import { useCurrencyRate, useTaxRate } from "../../hooks/useSettings";
 import { useCustomerAuth } from "../../contexts/CustomerAuthContext";
 import { useCart } from "../../contexts/CartContext";
 import { useOnlinePromotions } from "../../hooks/useOnlinePromotions";
 import { applyBestPromotionToLine } from "../../lib/onlinePromotion";
+import { CouponService, type Coupon } from "../../lib/couponService";
 
 type ColorVariant = {
   id?: string;
@@ -33,6 +34,7 @@ export default function CheckoutPage() {
   const params = useSearchParams();
   const { user, profile, loading } = useCustomerAuth();
   const { rate: mmkRate } = useCurrencyRate();
+  const { taxRate, taxRatePercent, hasTaxRate } = useTaxRate();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
   const { items: cartItems, subtotalTHB, clearCart } = useCart();
 
@@ -49,6 +51,10 @@ export default function CheckoutPage() {
   const [onlineOrderId, setOnlineOrderId] = useState<string>("");
   const [completingTest, setCompletingTest] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<"scan" | "cod">("scan");
+  const [activeCoupon, setActiveCoupon] = useState<any>(null);
+  const [availableCoupons, setAvailableCoupons] = useState<Coupon[]>([]);
+  const [loadingCoupon, setLoadingCoupon] = useState(false);
+  const [couponActionId, setCouponActionId] = useState<string | null>(null);
 
   const variant = useMemo(() => {
     const variants = ((product?.colorVariants || []) as ColorVariant[]).map(
@@ -130,8 +136,15 @@ export default function CheckoutPage() {
     0,
   );
   const subtotalAfterDiscount = Math.max(0, baseTotalTHB - discountTHB);
-  const taxTHB = subtotalAfterDiscount * 0.07; // 7% tax
-  const totalTHB = subtotalAfterDiscount + taxTHB;
+  
+  // Calculate coupon discount
+  const couponDiscount = activeCoupon
+    ? CouponService.calculateDiscount(subtotalAfterDiscount, activeCoupon)
+    : { discountAmount: 0, finalAmount: subtotalAfterDiscount };
+  
+  const subtotalAfterCoupon = couponDiscount.finalAmount;
+  const taxTHB = subtotalAfterCoupon * taxRate; // Use dynamic tax rate from POS settings
+  const totalTHB = subtotalAfterCoupon + taxTHB;
   const promotionTitle =
     lineResults.find((row) => row.promotion?.name)?.promotion?.name ||
     "Promotion";
@@ -146,6 +159,84 @@ export default function CheckoutPage() {
   }, [profile]);
 
   const isProfileComplete = missingProfileFields.length === 0;
+
+  // Load the activated coupon plus any the customer could still apply.
+  const refreshCoupons = useCallback(async () => {
+    if (!user) {
+      setActiveCoupon(null);
+      setAvailableCoupons([]);
+      return;
+    }
+
+    setLoadingCoupon(true);
+    try {
+      const [applied, available] = await Promise.all([
+        CouponService.getActiveCoupon(user.uid),
+        CouponService.getAvailableCoupons(user.uid),
+      ]);
+      setActiveCoupon(applied);
+      setAvailableCoupons(available);
+    } catch (error) {
+      console.error("Error loading coupons:", error);
+      setActiveCoupon(null);
+      setAvailableCoupons([]);
+    } finally {
+      setLoadingCoupon(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    refreshCoupons();
+  }, [refreshCoupons]);
+
+  const applyCoupon = async (couponId: string) => {
+    if (!user) return;
+
+    setCouponActionId(couponId);
+    setError(null);
+    try {
+      const response = await fetch("/api/loyalty/use-coupon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId: user.uid, couponId }),
+      });
+      const data = await response.json();
+
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || "Failed to apply coupon");
+      }
+
+      await refreshCoupons();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to apply coupon");
+    } finally {
+      setCouponActionId(null);
+    }
+  };
+
+  const removeCoupon = async (couponId: string) => {
+    if (!user) return;
+
+    setCouponActionId(couponId);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/loyalty/use-coupon?customerId=${encodeURIComponent(user.uid)}&couponId=${encodeURIComponent(couponId)}`,
+        { method: "DELETE" },
+      );
+      const data = await response.json();
+
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || "Failed to remove coupon");
+      }
+
+      await refreshCoupons();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to remove coupon");
+    } finally {
+      setCouponActionId(null);
+    }
+  };
 
   const createPayment = async () => {
     if (!checkoutItems.length) {
@@ -184,29 +275,68 @@ export default function CheckoutPage() {
     setOnlineOrderId("");
 
     try {
-      const payloadItems = checkoutItems.map((item) => {
-        const line = applyBestPromotionToLine({
-          unitPriceTHB: item.unitPriceTHB,
-          quantity: item.quantity,
-          productId: item.productId,
-          variantId: item.variantId,
-          promotions: onlinePromotions,
-        });
-        const discountedUnitTHB =
-          item.quantity > 0 ? line.finalSubtotalTHB / item.quantity : 0;
-        const unitMmk = Math.max(1, Math.round(discountedUnitTHB * mmkRate));
+      // The gateway itemisation must add up to the amount we actually charge.
+      // Building lines straight from item prices would ignore the coupon and
+      // tax, so the customer would be shown (and possibly charged) the
+      // undiscounted total. Instead, allocate the final MMK total across the
+      // lines in proportion to their value, letting the last line absorb any
+      // rounding remainder so the sum matches totalMMK exactly.
+      const linePromoTotalsTHB = checkoutItems.map(
+        (item) =>
+          applyBestPromotionToLine({
+            unitPriceTHB: item.unitPriceTHB,
+            quantity: item.quantity,
+            productId: item.productId,
+            variantId: item.variantId,
+            promotions: onlinePromotions,
+          }).finalSubtotalTHB,
+      );
+      const linesTotalTHB = linePromoTotalsTHB.reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+
+      let allocatedMmk = 0;
+      const payloadItems = checkoutItems.map((item, index) => {
+        const isLastLine = index === checkoutItems.length - 1;
+        const share =
+          linesTotalTHB > 0
+            ? linePromoTotalsTHB[index] / linesTotalTHB
+            : 1 / checkoutItems.length;
+
+        const lineMmk = isLastLine
+          ? totalMMK - allocatedMmk
+          : Math.max(0, Math.round(totalMMK * share));
+        allocatedMmk += lineMmk;
+
+        const variantLabel = [item.color, item.size].filter(Boolean).join(", ");
+        const nameParts = [item.name];
+        if (variantLabel) nameParts.push(`(${variantLabel})`);
+        if (item.quantity > 1) nameParts.push(`x${item.quantity}`);
+
+        // quantity is 1 because `amount` already covers the whole line; the
+        // real quantity is kept in the label so the payment page still shows it.
         return {
-          name: item.name,
-          amount: unitMmk,
-          quantity: item.quantity,
+          name: nameParts.join(" "),
+          amount: lineMmk,
+          quantity: 1,
         };
-      });
+        // Zero-value lines are dropped below; they contribute nothing to the
+        // sum, so the itemisation still reconciles with totalMMK.
+      }).filter((line) => line.amount > 0);
 
       const response = await fetch("/api/mmpay/create-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           amountMmk: totalMMK,
+          // Pass complete financial breakdown
+          subtotal: baseTotalTHB, // Original subtotal before any discounts
+          discount: discountTHB, // Promotion discount only; coupon tracked separately
+          tax: taxTHB, // Tax amount
+          taxRate: taxRatePercent, // Rate actually applied, for accurate display later
+          total: totalTHB, // Final total
+          exchangeRate: mmkRate, // Rate used for the MMK amount
           customer: {
             uid: user.uid,
             email: user.email || profile.email,
@@ -215,6 +345,12 @@ export default function CheckoutPage() {
             address: profile.address,
           },
           items: payloadItems,
+          // Add coupon information
+          ...(activeCoupon && {
+            couponCode: activeCoupon.code,
+            couponId: activeCoupon.id,
+            couponDiscountTHB: couponDiscount.discountAmount,
+          }),
           cartItems: checkoutItems.map((item) => ({
             priceTHB: (() => {
               const line = applyBestPromotionToLine({
@@ -291,7 +427,13 @@ export default function CheckoutPage() {
       throw new Error("Payment URL is missing from MyanMyanPay response");
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : "Payment creation failed";
-      
+
+      // No order was created, so hand the coupon back (COD already does this).
+      if (activeCoupon && user) {
+        await CouponService.releaseCoupon(user.uid, activeCoupon.id);
+        await refreshCoupons();
+      }
+
       // Make limit errors more user-friendly
       if (errorMessage.toLowerCase().includes("limit")) {
         setError(
@@ -354,8 +496,13 @@ export default function CheckoutPage() {
           }),
           subtotalTHB: baseTotalTHB,
           discountTHB: discountTHB,
+          couponDiscountTHB: activeCoupon ? couponDiscount.discountAmount : 0,
+          couponCode: activeCoupon?.code || null,
+          couponId: activeCoupon?.id || null,
           taxTHB: taxTHB,
+          taxRatePercent: taxRatePercent,
           totalTHB: totalTHB,
+          exchangeRate: mmkRate,
         }),
       });
 
@@ -363,6 +510,9 @@ export default function CheckoutPage() {
       if (!response.ok) {
         throw new Error(data?.error || "Failed to create COD order");
       }
+
+      // The coupon is consumed server-side by /api/transactions/create-cod,
+      // which also deducts the points. Doing it again here would double-deduct.
 
       // Clear cart if checkout was from cart
       if (!productId) {
@@ -373,6 +523,11 @@ export default function CheckoutPage() {
       router.push("/account/purchases");
     } catch (e) {
       setError(e instanceof Error ? e.message : "COD order creation failed");
+      
+      // Release coupon if order creation failed
+      if (activeCoupon) {
+        await CouponService.releaseCoupon(user!.uid, activeCoupon.id);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -620,8 +775,22 @@ export default function CheckoutPage() {
               <span className="font-medium">-฿ {discountTHB.toFixed(2)}</span>
             </div>
           ) : null}
+          
+          {/* Coupon Discount */}
+          {activeCoupon && couponDiscount.discountAmount > 0 && (
+            <div className="flex items-center justify-between py-1 text-purple-700">
+              <div className="flex items-center gap-2">
+                <span>Coupon Discount</span>
+                <span className="text-xs bg-purple-100 px-2 py-0.5 rounded font-semibold">
+                  {activeCoupon.code}
+                </span>
+              </div>
+              <span className="font-medium">-฿ {couponDiscount.discountAmount.toFixed(2)}</span>
+            </div>
+          )}
+          
           <div className="flex items-center justify-between py-1">
-            <span>Tax (7%)</span>
+            <span>Tax ({taxRatePercent}%)</span>
             <span className="font-medium">฿ {taxTHB.toFixed(2)}</span>
           </div>
           <div className="flex items-center justify-between py-1 border-t border-gray-200 pt-2 mt-2">
@@ -632,6 +801,84 @@ export default function CheckoutPage() {
             <span className="font-semibold">Total (MMK)</span>
             <span className="font-semibold text-lg">Ks {totalMMK.toLocaleString()}</span>
           </div>
+          
+          {/* Applied coupon */}
+          {activeCoupon && (
+            <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+              <div className="flex items-start gap-2">
+                <svg className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
+                </svg>
+                <div className="flex-1">
+                  <p className="text-sm font-semibold text-purple-900">
+                    Coupon Applied: {activeCoupon.code}
+                  </p>
+                  <p className="text-xs text-purple-700 mt-1">
+                    {activeCoupon.discountType === "percentage"
+                      ? `${activeCoupon.discountValue}% discount`
+                      : `฿${activeCoupon.discountValue} discount`}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeCoupon(activeCoupon.id)}
+                  disabled={couponActionId === activeCoupon.id || submitting}
+                  className="text-xs font-semibold text-purple-700 underline hover:text-purple-900 disabled:opacity-50"
+                >
+                  {couponActionId === activeCoupon.id ? "Removing..." : "Remove"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Coupons the customer owns but has not applied yet */}
+          {!activeCoupon && availableCoupons.length > 0 && (
+            <div className="mt-3 rounded-lg border border-purple-200 bg-purple-50 p-3">
+              <p className="text-sm font-semibold text-purple-900">
+                You have {availableCoupons.length} coupon
+                {availableCoupons.length > 1 ? "s" : ""} available
+              </p>
+              <div className="mt-2 space-y-2">
+                {availableCoupons.map((coupon) => (
+                  <div
+                    key={coupon.id}
+                    className="flex items-center justify-between gap-3 rounded-md border border-purple-200 bg-white px-3 py-2"
+                  >
+                    <div>
+                      <p className="text-sm font-bold text-gray-900">
+                        {coupon.code}
+                      </p>
+                      <p className="text-xs text-purple-700">
+                        {coupon.discountType === "percentage"
+                          ? `${coupon.discountValue}% off`
+                          : `฿${coupon.discountValue} off`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => applyCoupon(coupon.id)}
+                      disabled={couponActionId === coupon.id || submitting}
+                      className="rounded-md bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-purple-700 disabled:opacity-50"
+                    >
+                      {couponActionId === coupon.id ? "Applying..." : "Apply"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!activeCoupon && !loadingCoupon && availableCoupons.length === 0 && (
+            <p className="mt-3 text-xs text-gray-500">
+              No coupons available.{" "}
+              <Link
+                href="/membership"
+                className="font-medium text-pink-600 hover:text-pink-700"
+              >
+                View your membership
+              </Link>
+            </p>
+          )}
         </div>
 
         {qrValue && (
@@ -702,7 +949,7 @@ export default function CheckoutPage() {
         <div className="mt-6 flex flex-wrap gap-3">
           <button
             onClick={createPayment}
-            disabled={submitting || !user || !isProfileComplete}
+            disabled={submitting || !user || !isProfileComplete || !hasTaxRate}
             className="rounded-md bg-pink-500 px-5 py-2 text-white hover:bg-pink-600 disabled:opacity-50"
           >
             {submitting
@@ -713,9 +960,11 @@ export default function CheckoutPage() {
                 ? "Login to Continue"
                 : !isProfileComplete
                   ? "Complete Profile to Continue"
-                  : paymentMethod === "cod"
-                    ? "Place COD Order"
-                    : "Pay with MyanMyanPay"}
+                  : !hasTaxRate
+                    ? "Loading tax settings..."
+                    : paymentMethod === "cod"
+                      ? "Place COD Order"
+                      : "Pay with MyanMyanPay"}
           </button>
 
           <button

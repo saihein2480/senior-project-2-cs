@@ -28,6 +28,8 @@ function NavBarContent() {
   const [showBestSellersCategories, setShowBestSellersCategories] =
     useState(false);
   const [showViewAllCategories, setShowViewAllCategories] = useState(false);
+  const [isMember, setIsMember] = useState(false);
+  const [membershipLoading, setMembershipLoading] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -52,6 +54,49 @@ function NavBarContent() {
     });
     return sorted.slice(0, 2);
   }, [shops]);
+
+  // Check membership status when user changes
+  useEffect(() => {
+    const checkMembershipStatus = async () => {
+      if (!user) {
+        setIsMember(false);
+        return;
+      }
+
+      setMembershipLoading(true);
+      try {
+        const response = await fetch(`/api/loyalty/summary?customerId=${user.uid}`);
+        const data = await response.json();
+        if (data.success && data.data) {
+          setIsMember(data.data.isMember || false);
+        } else {
+          setIsMember(false);
+        }
+      } catch (error) {
+        console.error("Error checking membership:", error);
+        setIsMember(false);
+      } finally {
+        setMembershipLoading(false);
+      }
+    };
+
+    checkMembershipStatus();
+
+    // Listen for membership updates
+    const handleMembershipUpdate = () => {
+      checkMembershipStatus();
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("app:membership-updated", handleMembershipUpdate);
+    }
+
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("app:membership-updated", handleMembershipUpdate);
+      }
+    };
+  }, [user]);
 
   // Sync currency from localStorage on mount and listen for changes
   useEffect(() => {
@@ -1169,6 +1214,36 @@ function NavBarContent() {
                   />
                 </svg>
               </Link>
+
+              <Link
+                href={buildUrlWithBranch("/membership")}
+                className={`flex items-center justify-between py-4 border-b border-gray-100 text-xl transition-colors ${
+                  isActive("/membership")
+                    ? "text-pink-500"
+                    : "text-gray-900 hover:text-pink-500"
+                }`}
+                onClick={() => setMenuOpen(false)}
+              >
+                <span className="flex items-center gap-2">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" />
+                  </svg>
+                  {user && !isMember && !membershipLoading ? "Join Membership" : "Membership & Rewards"}
+                </span>
+                <svg
+                  className="w-4 h-4 text-gray-300 flex-shrink-0"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M9 5l7 7-7 7"
+                  />
+                </svg>
+              </Link>
             </div>
 
             {/* Utility / account footer section */}
@@ -1181,6 +1256,13 @@ function NavBarContent() {
                     className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
                   >
                     My Account
+                  </Link>
+                  <Link
+                    href={buildUrlWithBranch("/membership")}
+                    onClick={() => setMenuOpen(false)}
+                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                  >
+                    {!isMember && !membershipLoading ? "Join Membership" : "Membership & Rewards"}
                   </Link>
                   <Link
                     href={buildUrlWithBranch("/account/purchases")}

@@ -43,6 +43,7 @@ type FirestoreStockDoc = {
   shop?: string;
   shopId?: string;
   branch?: string;
+  isNew?: boolean;
   [key: string]: unknown;
 };
 
@@ -57,6 +58,7 @@ export type SearchProduct = {
   colorVariants?: ColorVariant[];
   stock: number;
   colors?: string[];
+  isNew?: boolean;
 };
 
 export type SearchFilters = {
@@ -67,7 +69,35 @@ export type SearchFilters = {
   maxPrice?: number;
   style?: string; // e.g., "oversized", "slim fit"
   inStock?: boolean;
+  branch?: string; // Filter by branch ID
+  isNew?: boolean; // Filter for new arrivals
 };
+
+const NEW_DAYS = Number(process?.env?.NEXT_PUBLIC_NEW_ITEM_DAYS) || 7;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function isNewItem(createdAt: FirestoreTimestampLike): boolean {
+  try {
+    let createdMs = Date.now();
+    if (createdAt) {
+      if (
+        typeof createdAt === "object" &&
+        createdAt !== null &&
+        "toMillis" in createdAt &&
+        typeof (createdAt as { toMillis?: unknown }).toMillis === "function"
+      ) {
+        createdMs = (createdAt as { toMillis: () => number }).toMillis();
+      } else if (typeof createdAt === "number") {
+        createdMs = createdAt;
+      } else {
+        createdMs = new Date(String(createdAt)).getTime();
+      }
+    }
+    return Date.now() - createdMs <= NEW_DAYS * MS_PER_DAY;
+  } catch {
+    return false;
+  }
+}
 
 function getStockFromVariants(colorVariants: ColorVariant[] = []): number {
   return Array.isArray(colorVariants)
@@ -104,6 +134,7 @@ function mapStockDocToSearchProduct(
     colorVariants,
     stock: data.stock || stockFromVariants || 0,
     colors: colors.map((c) => c.toLowerCase()),
+    isNew: isNewItem(data.createdAt || null),
   };
 }
 
@@ -122,9 +153,54 @@ export async function searchProducts(
     const q = query(collection(db, "stocks"), orderBy("createdAt", "desc"));
     const snap = await getDocs(q);
 
-    let products = snap.docs.map((d) =>
-      mapStockDocToSearchProduct(d.id, d.data() as FirestoreStockDoc),
-    );
+    // Map documents to products and keep reference to original data for filtering
+    const productsWithDocs = snap.docs.map((d) => ({
+      product: mapStockDocToSearchProduct(d.id, d.data() as FirestoreStockDoc),
+      docData: d.data() as FirestoreStockDoc,
+    }));
+
+    // Filter by branch if specified (uses 'shop' field in database)
+    let filteredProductsWithDocs = productsWithDocs;
+    if (filters.branch) {
+      filteredProductsWithDocs = productsWithDocs.filter(
+        (item) => item.docData.shop === filters.branch
+      );
+      console.log(`🏪 Filtered by shop/branch: ${filters.branch}, found ${filteredProductsWithDocs.length} products`);
+    }
+
+    // Extract just the products
+    let products = filteredProductsWithDocs.map((item) => item.product);
+
+    // Remove duplicates by grouping by name (products with multiple colors)
+    const uniqueProducts = new Map<string, SearchProduct>();
+    for (const product of products) {
+      const productName = product.name;
+      if (!uniqueProducts.has(productName)) {
+        uniqueProducts.set(productName, product);
+      } else {
+        // If duplicate exists, combine stock and colors
+        const existing = uniqueProducts.get(productName)!;
+        existing.stock += product.stock;
+        if (product.colors) {
+          existing.colors = [...new Set([...(existing.colors || []), ...product.colors])];
+        }
+        if (product.colorVariants) {
+          existing.colorVariants = [...(existing.colorVariants || []), ...(product.colorVariants || [])];
+        }
+        // Preserve isNew flag if any variant is new
+        if (product.isNew) {
+          existing.isNew = true;
+        }
+      }
+    }
+    
+    products = Array.from(uniqueProducts.values());
+    
+    // Debug: Log isNew status when filtering for new products
+    if (filters.isNew) {
+      console.log(`🔍 Products before isNew filter: ${products.length}`);
+      console.log(`🔍 Sample products with isNew:`, products.slice(0, 3).map(p => ({ name: p.name, isNew: p.isNew })));
+    }
 
     // Apply filters
     if (filters.keyword) {
@@ -177,6 +253,11 @@ export async function searchProducts(
 
     if (filters.inStock) {
       products = products.filter((p) => p.stock > 0);
+    }
+
+    if (filters.isNew) {
+      products = products.filter((p: any) => p.isNew === true || p.isNew === 'true' || p.isNew === 1);
+      console.log(`🔍 Products after isNew filter: ${products.length}`);
     }
 
     return products;

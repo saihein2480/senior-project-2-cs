@@ -33,6 +33,17 @@ type CreateOrderRequest = {
     priceTHB: number;
     quantity: number;
   };
+  // Financial breakdown fields
+  subtotal?: number; // THB subtotal before discount and tax
+  tax?: number; // THB tax amount
+  taxRate?: number; // Tax rate as a percentage (e.g. 7 for 7%)
+  discount?: number; // THB discount amount (same as couponDiscountTHB)
+  total?: number; // THB total amount
+  exchangeRate?: number; // THB -> MMK rate used at checkout
+  // Coupon fields
+  couponCode?: string;
+  couponId?: string;
+  couponDiscountTHB?: number;
 };
 
 function getMmpay() {
@@ -218,10 +229,24 @@ export async function POST(req: Request) {
         cartItems: body.cartItems || [],
         items: body.items,
         amountMmk: body.amountMmk,
+        // Store financial breakdown for accurate order display
+        subtotal: Number(body.subtotal || body.total || 0),
+        tax: Number(body.tax || 0),
+        taxRate: Number(body.taxRate || 0),
+        discount: Number(body.discount || 0),
+        total: Number(body.total || 0),
+        exchangeRate: Number(body.exchangeRate || 0),
         status: "pending",
         paymentStatus: "PENDING",
         paymentMethod: "scan", // QR scan payment method
         provider: "MMPAY",
+        // Store coupon information
+        ...(body.couponCode && {
+          couponCode: body.couponCode,
+          appliedCouponCode: body.couponCode,
+          couponId: body.couponId,
+          couponDiscountTHB: body.couponDiscountTHB || 0,
+        }),
         orderSource: "web_storefront",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),

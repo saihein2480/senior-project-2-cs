@@ -236,6 +236,16 @@ type Txn = {
   paymentMethod?: string;
   items?: TxnItem[];
   deliveryStatus?: string;
+  // Financial breakdown
+  subtotal?: number;
+  tax?: number;
+  taxRate?: number; // Percentage applied at purchase time (e.g. 7 for 7%)
+  discount?: number;
+  // Coupon fields
+  couponCode?: string;
+  appliedCouponCode?: string;
+  couponId?: string;
+  couponDiscountTHB?: number;
   cancellationRequest?: {
     status: string;
     reason?: string;
@@ -492,6 +502,58 @@ function getPaymentBadgeClass(status?: string) {
   return "bg-slate-100 text-slate-700 border-slate-200";
 }
 
+/** Trim floating point noise so labels read "7%" instead of "7.000000001%". */
+function formatRatePercent(percent: number) {
+  const rounded = Math.round(percent * 100) / 100;
+  return String(rounded);
+}
+
+/**
+ * Rebuild the money breakdown for a transaction.
+ *
+ * Every figure is taken from what was stored at purchase time so the receipt
+ * always matches what the customer actually paid. `discount` holds promotion
+ * savings only; coupon savings live in `couponDiscountTHB`.
+ */
+function getOrderSummary(row: Txn) {
+  const itemsSubtotal = (row.items || []).reduce(
+    (sum, item) =>
+      sum + Number(item.unitPrice || 0) * Number(item.quantity || 1),
+    0,
+  );
+
+  const storedSubtotal = Number(row.subtotal || 0);
+  const subtotal = storedSubtotal > 0 ? storedSubtotal : itemsSubtotal;
+
+  const promotionDiscount = Math.max(0, Number(row.discount || 0));
+  const couponDiscount = Math.max(0, Number(row.couponDiscountTHB || 0));
+  const taxableBase = Math.max(0, subtotal - promotionDiscount - couponDiscount);
+
+  const tax = Math.max(0, Number(row.tax || 0));
+
+  // Prefer the rate stored with the order. Older records predate that field,
+  // so fall back to deriving it from the amounts we do have.
+  const storedRate = Number(row.taxRate || 0);
+  const taxPercent =
+    storedRate > 0
+      ? storedRate
+      : taxableBase > 0 && tax > 0
+        ? (tax / taxableBase) * 100
+        : 0;
+
+  const total = Number(row.total || 0) || taxableBase + tax;
+
+  return {
+    subtotal,
+    promotionDiscount,
+    couponDiscount,
+    taxableBase,
+    tax,
+    taxPercent,
+    total,
+  };
+}
+
 function getDefaultCustomDateRange() {
   const end = new Date();
   const start = new Date();
@@ -514,6 +576,7 @@ function PurchaseDetailsModal({
   const items = row.items || [];
   const cancelRequest = row.cancellationRequest;
   const refundRequest = row.refundRequest;
+  const summary = getOrderSummary(row);
 
   return (
     <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4 sm:p-0">
@@ -967,6 +1030,22 @@ function PurchaseDetailsModal({
                 <span className="font-medium text-gray-900">Date: </span>
                 {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
               </div>
+              {/* Applied Coupon Information */}
+              {(row.couponCode || row.appliedCouponCode) && (
+                <div className="pt-2 border-t border-gray-300">
+                  <span className="font-medium text-gray-900">Applied Coupon: </span>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="inline-block px-2.5 py-1 bg-purple-100 text-purple-800 rounded-md text-xs font-bold">
+                      {row.couponCode || row.appliedCouponCode}
+                    </span>
+                    {(row.couponDiscountTHB || row.discount) && (
+                      <span className="text-sm font-semibold text-purple-700">
+                        Discount: -฿{Number(row.couponDiscountTHB || row.discount || 0).toFixed(2)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1013,6 +1092,83 @@ function PurchaseDetailsModal({
                 })}
               </div>
             )}
+          </div>
+
+          {/* Invoice Summary */}
+          <div className="rounded-md border border-gray-200 bg-white overflow-hidden">
+            <div className="bg-blue-50 px-4 py-2 border-b border-blue-100">
+              <h3 className="text-sm font-semibold text-gray-900">Order Summary</h3>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-sm">
+              {/* Subtotal */}
+              <div className="flex justify-between items-center">
+                <span className="text-gray-600">Subtotal</span>
+                <span className="font-medium text-gray-900">
+                  ฿ {summary.subtotal.toFixed(2)}
+                </span>
+              </div>
+
+              {/* Promotion Discount */}
+              {summary.promotionDiscount > 0 && (
+                <div className="flex justify-between items-center text-emerald-700">
+                  <span className="flex items-center gap-1">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                    </svg>
+                    Promotion Discount
+                  </span>
+                  <span className="font-medium">
+                    -฿ {summary.promotionDiscount.toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              {/* Coupon Discount */}
+              {summary.couponDiscount > 0 && (
+                <div className="flex justify-between items-center text-purple-700">
+                  <span className="flex items-center gap-1">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
+                    </svg>
+                    Coupon Discount
+                    <span className="inline-block ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-800 rounded text-xs font-bold">
+                      {row.couponCode || row.appliedCouponCode}
+                    </span>
+                  </span>
+                  <span className="font-medium">
+                    -฿ {summary.couponDiscount.toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              {/* Tax - always shown so the breakdown adds up, even at 0% */}
+              <div className="flex justify-between items-center">
+                <span className="text-gray-600">
+                  Tax ({formatRatePercent(summary.taxPercent)}%)
+                </span>
+                <span className="font-medium text-gray-900">
+                  ฿ {summary.tax.toFixed(2)}
+                </span>
+              </div>
+
+              {/* Total */}
+              <div className="flex justify-between items-center pt-2 border-t border-gray-300">
+                <span className="font-bold text-gray-900">Total</span>
+                <span className="font-bold text-lg text-gray-900">
+                  ฿ {summary.total.toFixed(2)}
+                </span>
+              </div>
+
+              {/* MMK Total if available */}
+              {(row.amountMmk || row.sellingTotal) && (
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-gray-600">Total (MMK)</span>
+                  <span className="font-semibold text-gray-900">
+                    Ks {Number(row.amountMmk || row.sellingTotal || 0).toLocaleString()}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
 
     console.log("✅ Groq API initialized");
 
-    const { messages, productContext } = await req.json();
+    const { messages, productContext, branch } = await req.json();
 
     if (!messages || !Array.isArray(messages)) {
       return NextResponse.json(
@@ -73,6 +73,11 @@ export async function POST(req: NextRequest) {
     // Log product context if provided
     if (productContext) {
       console.log("📍 Product context provided:", productContext);
+    }
+
+    // Log branch if provided
+    if (branch) {
+      console.log("🏪 Branch filter:", branch);
     }
 
     // Get user message
@@ -259,10 +264,10 @@ Examples:
         }
       }
       
-      // Priority 5: Product Information Query
+      // Priority 5: Product Information Query (only if on product page or has specific product reference)
       const productInfoQuery = isProductInfoQuery(userMessage);
 
-      if (!productInfoText && productInfoQuery.isQuery) {
+      if (!productInfoText && productInfoQuery.isQuery && (productContext || !lowerMessage.match(/\b(show|find|search|new|arrival)\b/))) {
         console.log(`ℹ️ Detected product info query: ${productInfoQuery.queryType}`);
         
         // Try to find the product being asked about
@@ -373,7 +378,7 @@ Examples:
 
         if (occasion) {
           try {
-            const outfit = await generateOutfitRecommendation(occasion, budget);
+            const outfit = await generateOutfitRecommendation(occasion, budget, branch);
 
             if (outfit) {
               // Format outfit items as products for display
@@ -411,45 +416,56 @@ Examples:
           // Extract basic filters
           const filters: SearchFilters = { inStock: true };
           
-          // Color detection
-          const colors = ['black', 'white', 'red', 'blue', 'green', 'pink', 'yellow', 'brown', 'gray', 'purple', 'orange'];
-          for (const color of colors) {
-            if (lowerMessage.includes(color)) {
-              filters.color = color;
-              break;
+          // Add branch filter if provided
+          if (branch) {
+            filters.branch = branch;
+          }
+          
+          // Check if asking for new arrivals
+          const isNewArrivals = lowerMessage.includes('new') && (lowerMessage.includes('arrival') || lowerMessage.includes('item') || lowerMessage === 'new arrivals');
+          
+          // Add isNew filter for new arrivals
+          if (isNewArrivals) {
+            filters.isNew = true;
+          }
+          
+          if (!isNewArrivals) {
+            // Color detection
+            const colors = ['black', 'white', 'red', 'blue', 'green', 'pink', 'yellow', 'brown', 'gray', 'purple', 'orange'];
+            for (const color of colors) {
+              if (lowerMessage.includes(color)) {
+                filters.color = color;
+                break;
+              }
             }
-          }
-          
-          // Category detection
-          if (lowerMessage.includes('t-shirt') || lowerMessage.includes('tshirt')) {
-            filters.category = 't-shirt';
-          } else if (lowerMessage.includes('jeans')) {
-            filters.category = 'jeans';
-          } else if (lowerMessage.includes('dress')) {
-            filters.category = 'dress';
-          } else if (lowerMessage.includes('shirt') && !lowerMessage.includes('t-shirt')) {
-            filters.category = 'shirt';
-          } else if (lowerMessage.includes('pants')) {
-            filters.category = 'pants';
-          } else if (lowerMessage.includes('jacket')) {
-            filters.category = 'jacket';
-          }
-          
-          // Price detection
-          const priceMatch = lowerMessage.match(/under\s+(\d+(?:,\d+)*)/i);
-          if (priceMatch) {
-            filters.maxPrice = parseInt(priceMatch[1].replace(/,/g, ''));
-          }
-          
-          // Search for new arrivals
-          if (lowerMessage.includes('new') || lowerMessage.includes('arrival')) {
-            // Don't set category filter for new arrivals
-            filters.category = undefined;
+            
+            // Category detection
+            if (lowerMessage.includes('t-shirt') || lowerMessage.includes('tshirt')) {
+              filters.category = 't-shirt';
+            } else if (lowerMessage.includes('jeans')) {
+              filters.category = 'jeans';
+            } else if (lowerMessage.includes('dress')) {
+              filters.category = 'dress';
+            } else if (lowerMessage.includes('shirt') && !lowerMessage.includes('t-shirt')) {
+              filters.category = 'shirt';
+            } else if (lowerMessage.includes('pants')) {
+              filters.category = 'pants';
+            } else if (lowerMessage.includes('jacket')) {
+              filters.category = 'jacket';
+            }
+            
+            // Price detection
+            const priceMatch = lowerMessage.match(/under\s+(\d+(?:,\d+)*)/i);
+            if (priceMatch) {
+              filters.maxPrice = parseInt(priceMatch[1].replace(/,/g, ''));
+            }
           }
           
           try {
             const searchResults = await searchProducts(filters);
-            products = searchResults.slice(0, 10).map((p) => ({
+            // For new arrivals, show more products (already sorted by createdAt desc)
+            const limit = isNewArrivals ? 20 : 10;
+            products = searchResults.slice(0, limit).map((p) => ({
               id: p.id,
               name: p.name,
               price: p.price,
@@ -458,7 +474,7 @@ Examples:
               stock: p.stock,
               image: p.image,
             }));
-            console.log(`✅ Found ${products.length} products`);
+            console.log(`✅ Found ${products.length} products${isNewArrivals ? ' (new arrivals)' : ''}`);
           } catch (searchError) {
             console.error("❌ Product search error:", searchError);
           }

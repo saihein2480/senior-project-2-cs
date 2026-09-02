@@ -98,6 +98,8 @@ async function upsertCustomerDocuments(
       totalPurchases: 0,
       totalSpent: 0,
       receivables: 0,
+      customerSource: "online", // Mark as online customer
+      isOnline: true, // Flag for online customers
       createdAt: serverTimestamp(),
     },
     { merge: true },

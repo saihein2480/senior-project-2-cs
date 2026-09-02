@@ -9,6 +9,8 @@ import ServiceWorkerRegistration from "../components/ServiceWorkerRegistration";
 import QueryProvider from "../providers/QueryProvider";
 import { CustomerAuthProvider } from "../contexts/CustomerAuthContext";
 import { CartProvider } from "../contexts/CartContext";
+
+export const dynamic = 'force-dynamic';
 import ChatBot from "../components/ChatBot";
 
 const geistSans = Geist({

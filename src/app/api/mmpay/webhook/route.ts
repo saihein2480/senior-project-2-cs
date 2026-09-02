@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { MMPaySDK } from "mmpay-node-sdk";
 import { adminDb } from "../../../../lib/firebase-admin";
 import { deductStockForPaidOnlineOrder } from "../../../../lib/onlineStockService";
+import { updateCustomerStats, syncOnlineCustomerToPos } from "../../../../lib/updateCustomerStats";
 
 type MmpayPayload = {
   orderId: string;
@@ -102,15 +103,28 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
           },
         ];
 
-  const subtotal = txItems.reduce(
+  // Use stored values from onlineOrders document (calculated at checkout)
+  const subtotal = Number(order.subtotal || 0) || txItems.reduce(
     (sum, item) =>
       sum + Number(item.unitPrice || 0) * Number(item.quantity || 0),
     0,
   );
+  const tax = Number(order.tax || 0);
+  const discount = Number(order.discount || 0);
+  const couponDiscountTHB = Number(order.couponDiscountTHB || 0);
+  const taxRate = Number(order.taxRate || 0);
+  const total =
+    Number(order.total || 0) || Math.max(0, subtotal - discount) + tax;
 
+  const orderExchangeRate = Number(order.exchangeRate || 0);
   const envExchangeRate = Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
-  const hasExchangeRate =
-    Number.isFinite(envExchangeRate) && envExchangeRate > 0;
+  const exchangeRate =
+    orderExchangeRate > 0
+      ? orderExchangeRate
+      : Number.isFinite(envExchangeRate) && envExchangeRate > 0
+        ? envExchangeRate
+        : 0;
+  const hasExchangeRate = exchangeRate > 0;
 
   await transactionDocRef.set({
     transactionId,
@@ -134,21 +148,32 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
     },
     items: txItems,
     subtotal,
-    tax: 0,
-    discount: 0,
-    total: subtotal,
-    amountPaid: subtotal,
+    tax,
+    taxRate,
+    discount,
+    total,
+    amountPaid: total,
     change: 0,
     paymentMethod: (order.paymentMethod as string | undefined) || "scan",
     timestamp: new Date().toISOString(),
     createdAt: new Date(),
     status: "completed",
     sellingCurrency: "THB",
-    ...(hasExchangeRate ? { exchangeRate: envExchangeRate } : {}),
+    ...(hasExchangeRate ? { exchangeRate } : {}),
+    amountMmk: Number(order.amountMmk || payload.amount || 0),
     sellingTotal: Number(order.amountMmk || payload.amount || 0),
     paymentProvider: "MMPAY",
     orderSource: "web_storefront",
     customerUid: (order.customer as Record<string, unknown> | undefined)?.uid,
+    // Add coupon information
+    ...(order.couponCode
+      ? {
+          couponCode: order.couponCode,
+          appliedCouponCode: order.couponCode,
+          couponId: order.couponId,
+          couponDiscountTHB,
+        }
+      : {}),
     paymentMeta: {
       method: payload.method,
       vendor: payload.vendor,
@@ -157,6 +182,59 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
       transactionRefId: payload.transactionRefId || "",
     },
   });
+
+  // Award loyalty points for successful payment
+  const customerUid = (order.customer as Record<string, unknown> | undefined)?.uid;
+  if (customerUid && typeof customerUid === 'string') {
+    // Mark coupon as used if one was applied
+    const couponId = order.couponId as string | undefined;
+    const couponCode = order.couponCode as string | undefined;
+    
+    if (couponId && couponCode) {
+      try {
+        const { CouponService } = await import("@/lib/couponService");
+        const couponUsed = await CouponService.useCouponAdmin(
+          adminDb,
+          customerUid,
+          couponId,
+          transactionId
+        );
+
+        if (couponUsed) {
+          console.log("Coupon marked as used for MMPay order:", {
+            orderId: payload.orderId,
+            couponId,
+            couponCode,
+          });
+        }
+      } catch (couponError) {
+        console.error("Error marking coupon as used for MMPay:", couponError);
+      }
+    }
+    
+    try {
+      const { LoyaltyService } = await import("@/lib/loyaltyService");
+      const loyaltyResult = await LoyaltyService.awardPoints({
+        customerId: customerUid,
+        transactionId,
+        transactionAmount: subtotal,
+        source: 'online',
+        description: `Online payment for order ${payload.orderId}`,
+      });
+
+      if (loyaltyResult.success) {
+        console.log("Loyalty points awarded for online payment:", {
+          orderId: payload.orderId,
+          points: loyaltyResult.pointsAwarded,
+          newTotal: loyaltyResult.newTotalPoints,
+          coupons: loyaltyResult.couponsGenerated.length,
+        });
+      }
+    } catch (loyaltyError) {
+      // Don't fail the transaction if loyalty fails
+      console.error("Error awarding loyalty points for online payment:", loyaltyError);
+    }
+  }
 }
 
 export async function POST(req: Request) {
@@ -249,6 +327,22 @@ export async function POST(req: Request) {
     if (payload.status === "SUCCESS") {
       try {
         await deductStockForPaidOnlineOrder(adminDb, payload.orderId);
+        
+        // Update customer statistics and sync to POS
+        const orderDoc = await adminDb.collection("onlineOrders").doc(payload.orderId).get();
+        if (orderDoc.exists) {
+          const orderData = orderDoc.data();
+          const customerUid = orderData?.customer?.uid;
+          const orderTotal = Number(orderData?.total || payload.amount || 0);
+          
+          if (customerUid) {
+            // Sync customer to POS customers collection if not already there
+            await syncOnlineCustomerToPos(customerUid);
+            
+            // Update purchase statistics
+            await updateCustomerStats(customerUid, orderTotal, 1);
+          }
+        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to sync inventory";

@@ -113,7 +113,7 @@ const occasionStyles: Record<
 /**
  * Get all available products from Firebase
  */
-async function getAllProducts(): Promise<Product[]> {
+async function getAllProducts(branchFilter?: string): Promise<Product[]> {
   if (!db) {
     console.error("❌ Firebase DB not initialized");
     return [];
@@ -126,6 +126,11 @@ async function getAllProducts(): Promise<Product[]> {
     const products: Product[] = [];
     querySnapshot.forEach((doc) => {
       const data = doc.data();
+      
+      // Filter by branch if specified (uses 'shop' field in database)
+      if (branchFilter && data.shop !== branchFilter) {
+        return; // Skip this product
+      }
       
       // Extract colors from colorVariants
       const colorVariants = data.colorVariants || [];
@@ -166,7 +171,7 @@ async function getAllProducts(): Promise<Product[]> {
       }
     });
 
-    console.log(`📦 Fetched ${products.length} products with stock`);
+    console.log(`📦 Fetched ${products.length} products with stock${branchFilter ? ` for branch: ${branchFilter}` : ''}`);
     if (products.length > 0) {
       console.log(`Sample product:`, {
         name: products[0].name,
@@ -222,7 +227,8 @@ function findMatchingColorProducts(
  */
 export async function generateOutfitRecommendation(
   occasion: string,
-  maxBudget?: number
+  maxBudget?: number,
+  branchFilter?: string
 ): Promise<OutfitRecommendation | null> {
   const occasionKey = occasion.toLowerCase();
   const occasionConfig = occasionStyles[occasionKey];
@@ -234,10 +240,10 @@ export async function generateOutfitRecommendation(
     return null;
   }
 
-  console.log(`🎯 Generating outfit for: ${occasion}`);
+  console.log(`🎯 Generating outfit for: ${occasion}${branchFilter ? ` (branch: ${branchFilter})` : ''}`);
 
   // Get all available products
-  const allProducts = await getAllProducts();
+  const allProducts = await getAllProducts(branchFilter);
   console.log(`📦 Total products available: ${allProducts.length}`);
 
   if (allProducts.length === 0) {
