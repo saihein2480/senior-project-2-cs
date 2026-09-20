@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useLanguage } from "../contexts/LanguageContext";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { useProducts, type Product } from "../hooks/useProducts";
 import { useCurrencyRate } from "../hooks/useSettings";
@@ -32,6 +32,10 @@ export default function ProductsList({
   loadMoreLink = "/view-all",
   hideSortBy = false,
   showPriceFilter = false,
+  topSellingIds = [],
+  topSellingQuantities = {},
+  sortByTopSelling = false,
+  topSellingLoading = false,
 }: {
   showOnlyNew?: boolean;
   itemsPerPageDefault?: number;
@@ -40,12 +44,20 @@ export default function ProductsList({
   loadMoreLink?: string;
   hideSortBy?: boolean;
   showPriceFilter?: boolean;
+  topSellingIds?: string[];
+  /** productId -> total units sold, used to show "N sold" on best sellers */
+  topSellingQuantities?: Record<string, number>;
+  sortByTopSelling?: boolean;
+  topSellingLoading?: boolean;
 }) {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
   const urlQuery = (searchParams?.get("q") || "").trim();
   const urlCategory = (searchParams?.get("category") || "all").trim();
   const urlBranch = searchParams?.get("branch") || "";
   const urlCurrency = (searchParams?.get("currency") || "THB") as "THB" | "MMK";
+  const urlPage = Math.max(1, parseInt(searchParams?.get("page") || "1", 10) || 1);
   const [localQuery, setLocalQuery] = useState(urlQuery);
 
   // sync localQuery with URL param changes
@@ -95,8 +107,41 @@ export default function ProductsList({
   const [selectedSizes, setSelectedSizes] = useState<Record<string, string>>(
     {},
   );
-  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [currentPage, setCurrentPageState] = useState<number>(urlPage);
   const [itemsPerPage] = useState<number>(itemsPerPageDefault);
+
+  // keep currentPage in sync with the URL (e.g. browser back/forward)
+  useEffect(() => {
+    setCurrentPageState(urlPage);
+  }, [urlPage]);
+
+  // update both local state and the URL so the page survives navigation
+  // (e.g. visiting a product detail page and using the browser back button)
+  const currentPageRef = useRef(currentPage);
+  currentPageRef.current = currentPage;
+
+  const setCurrentPage = React.useCallback(
+    (value: number | ((prev: number) => number)) => {
+      const next =
+        typeof value === "function" ? value(currentPageRef.current) : value;
+
+      setCurrentPageState(next);
+
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        if (next > 1) {
+          params.set("page", String(next));
+        } else {
+          params.delete("page");
+        }
+        const queryString = params.toString();
+        router.replace(`${pathname}${queryString ? `?${queryString}` : ""}`, {
+          scroll: false,
+        });
+      }
+    },
+    [router, pathname],
+  );
   const [showFilter, setShowFilter] = useState(false);
   const [showPriceDropdown, setShowPriceDropdown] = useState(false);
   const [filterBranch, setFilterBranch] = useState<string>("");
@@ -122,6 +167,20 @@ export default function ProductsList({
       setFilterCategory(urlCategory);
     }
   }, [urlCategory]);
+
+  // Switching category shrinks the result set, so the current page position is
+  // no longer meaningful. The nav menu already drops `page` when it applies a
+  // category, but this covers any other route to a category change (a shared
+  // link that kept `?page=`, for example). Only the *initial* URL is honoured
+  // as-is, so deep links such as ?category=Top&page=2 still work.
+  const prevUrlCategoryRef = useRef(urlCategory);
+  useEffect(() => {
+    if (prevUrlCategoryRef.current === urlCategory) return;
+    prevUrlCategoryRef.current = urlCategory;
+    if (currentPage > 1) {
+      setCurrentPage(1);
+    }
+  }, [urlCategory, currentPage, setCurrentPage]);
 
   // Sync filterCurrency with URL parameter
   useEffect(() => {
@@ -222,10 +281,11 @@ export default function ProductsList({
           if (!hasSize) return false;
         }
         if (showOnlyNew && !(p as Product).isNew) return false;
-        // when showing only new arrivals, exclude out-of-stock items
-        if (showOnlyNew) {
-          const qty = Number((p as Product).stock || 0);
-          if (qty <= 0) return false;
+        // Best sellers is the only listing that hides sold-out products
+        // entirely. Every other listing keeps them visible but pushes them to
+        // the end of the grid (see the sorting step below).
+        if (sortByTopSelling && Number((p as Product).stock || 0) <= 0) {
+          return false;
         }
         if (filterMinPrice || filterMaxPrice) {
           const price = Number(p.price || 0);
@@ -249,69 +309,106 @@ export default function ProductsList({
       })
     : [];
 
-  // Apply sorting, then put out-of-stock items at the end while preserving relative order
+  // Apply sorting, then push out-of-stock items to the end of the list
   const sortedProducts = filteredProducts
     ? (() => {
-        const list = filteredProducts.slice();
-        list.sort((a: Product, b: Product) => {
-          try {
-            if (sortBy === "newest") {
-              const aVal = Number(
-                (a.createdAt &&
-                typeof a.createdAt === "object" &&
-                a.createdAt !== null &&
-                "toMillis" in a.createdAt &&
-                typeof (a.createdAt as { toMillis?: () => number }).toMillis ===
-                  "function"
-                  ? (a.createdAt as { toMillis: () => number }).toMillis()
-                  : a.createdAt) ?? 0,
-              );
-              const bVal = Number(
-                (b.createdAt &&
-                typeof b.createdAt === "object" &&
-                b.createdAt !== null &&
-                "toMillis" in b.createdAt &&
-                typeof (b.createdAt as { toMillis?: () => number }).toMillis ===
-                  "function"
-                  ? (b.createdAt as { toMillis: () => number }).toMillis()
-                  : b.createdAt) ?? 0,
-              );
-              return bVal - aVal; // newest first
-            }
+        // When showing best sellers, restrict the list to only products that
+        // actually appear in the top-selling data (matches the "Top Selling
+        // Products" behavior in the owner dashboard) instead of showing the
+        // full catalog sorted with top sellers merely bubbled to the top.
+        //
+        // This restriction is unconditional: if the ranking is empty (still
+        // loading, or genuinely no sales yet) we must show nothing rather than
+        // silently falling back to the entire catalogue.
+        const list = sortByTopSelling
+          ? filteredProducts.filter((p) => topSellingIds.includes(p.id))
+          : filteredProducts.slice();
 
-            if (sortBy === "price-asc") {
-              const aP = Number(a.price ?? 0);
-              const bP = Number(b.price ?? 0);
-              return aP - bP;
+        // If sortByTopSelling is enabled and we have top-selling IDs, sort by that first
+        if (sortByTopSelling && topSellingIds.length > 0) {
+          list.sort((a: Product, b: Product) => {
+            const aIndex = topSellingIds.indexOf(a.id);
+            const bIndex = topSellingIds.indexOf(b.id);
+            
+            // Both products are in top-selling list - sort by their rank
+            if (aIndex !== -1 && bIndex !== -1) {
+              return aIndex - bIndex;
             }
-
-            if (sortBy === "price-desc") {
-              const aP = Number(a.price ?? 0);
-              const bP = Number(b.price ?? 0);
-              return bP - aP;
-            }
-
-            if (sortBy === "name-asc") {
-              return String(a.name || "").localeCompare(String(b.name || ""));
-            }
-
-            if (sortBy === "name-desc") {
-              return String(b.name || "").localeCompare(String(a.name || ""));
-            }
-          } catch (e) {
+            
+            // Only a is in top-selling - a comes first
+            if (aIndex !== -1) return -1;
+            
+            // Only b is in top-selling - b comes first
+            if (bIndex !== -1) return 1;
+            
+            // Neither is in top-selling - maintain existing sort
             return 0;
-          }
-          return 0;
-        });
+          });
+        } else {
+          // Regular sorting when not using top-selling
+          list.sort((a: Product, b: Product) => {
+            try {
+              if (sortBy === "newest") {
+                const aVal = Number(
+                  (a.createdAt &&
+                  typeof a.createdAt === "object" &&
+                  a.createdAt !== null &&
+                  "toMillis" in a.createdAt &&
+                  typeof (a.createdAt as { toMillis?: () => number }).toMillis ===
+                    "function"
+                    ? (a.createdAt as { toMillis: () => number }).toMillis()
+                    : a.createdAt) ?? 0,
+                );
+                const bVal = Number(
+                  (b.createdAt &&
+                  typeof b.createdAt === "object" &&
+                  b.createdAt !== null &&
+                  "toMillis" in b.createdAt &&
+                  typeof (b.createdAt as { toMillis?: () => number }).toMillis ===
+                    "function"
+                    ? (b.createdAt as { toMillis: () => number }).toMillis()
+                    : b.createdAt) ?? 0,
+                );
+                return bVal - aVal; // newest first
+              }
 
-        const inStock: Product[] = [];
-        const outStock: Product[] = [];
-        for (const p of list) {
-          const qty = Number((p as Product).stock || 0);
-          if (qty > 0) inStock.push(p);
-          else outStock.push(p);
+              if (sortBy === "price-asc") {
+                const aP = Number(a.price ?? 0);
+                const bP = Number(b.price ?? 0);
+                return aP - bP;
+              }
+
+              if (sortBy === "price-desc") {
+                const aP = Number(a.price ?? 0);
+                const bP = Number(b.price ?? 0);
+                return bP - aP;
+              }
+
+              if (sortBy === "name-asc") {
+                return String(a.name || "").localeCompare(String(b.name || ""));
+              }
+
+              if (sortBy === "name-desc") {
+                return String(b.name || "").localeCompare(String(a.name || ""));
+              }
+            } catch (e) {
+              return 0;
+            }
+            return 0;
+          });
         }
-        return [...inStock, ...outStock];
+
+        // Move sold-out products to the end while preserving the sort order
+        // within each group. On best sellers this is a no-op because sold-out
+        // products were already filtered out above.
+        const inStock: Product[] = [];
+        const outOfStock: Product[] = [];
+        for (const p of list) {
+          if (Number((p as Product).stock || 0) > 0) inStock.push(p);
+          else outOfStock.push(p);
+        }
+
+        return [...inStock, ...outOfStock];
       })()
     : [];
 
@@ -320,18 +417,29 @@ export default function ProductsList({
     1,
     Math.ceil(sortedProducts.length / itemsPerPage),
   );
-  // ensure current page is within bounds when products or filters change
+  // Pagination resets to page 1 when the user actually changes a filter.
+  // This is handled directly in the filter event handlers (see
+  // handleFilterCategoryChange, handleFilterSizeChange, etc. and the
+  // price/currency apply button) rather than via a useEffect watching
+  // filter state. That's because the filter state itself is also
+  // populated asynchronously on mount (synced from the URL / default
+  // branch once shop data loads) — a useEffect watching those values
+  // can't distinguish "user changed a filter" from "async initial sync",
+  // and resetting on the latter wipes out a page restored from the URL
+  // (e.g. via the browser back button from a product page).
+
+  // clamp currentPage if it's beyond the available pages (e.g. the result
+  // set shrank after a filter change). Skip while products are still
+  // loading — before data arrives `totalPages` is artificially `1`, which
+  // would otherwise wipe out a page number restored from the URL (e.g.
+  // after using the browser back button from a product detail page).
   useEffect(() => {
-    setCurrentPage(1);
-  }, [
-    products,
-    filterBranch,
-    filterCategory,
-    filterSize,
-    filterMinPrice,
-    filterMaxPrice,
-    filterCurrency,
-  ]);
+    if (loading) return;
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, totalPages, setCurrentPage]);
 
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
@@ -354,13 +462,15 @@ export default function ProductsList({
     return items;
   })();
 
-  if (loading)
+  // Best sellers also has to wait for the sales ranking, otherwise the grid
+  // would briefly render as "empty" before the ranking arrives.
+  if (loading || (sortByTopSelling && topSellingLoading))
     return (
       <div className="bg-white">
         <div className="max-w-6xl mx-auto px-4 py-8">
           <div className="mx-auto max-w-xl text-center">
             <div className="flex items-center justify-center">
-              <div className="h-12 w-12 border-4 border-gray-200 border-t-pink-500 rounded-full animate-spin" />
+              <div className="h-12 w-12 border-4 border-gray-200 border-t-rose-500 rounded-full animate-spin" />
             </div>
             <div className="mt-4 h-6 bg-gray-100 rounded w-48 mx-auto animate-pulse" />
             <div className="mt-3 h-3 bg-gray-100 rounded w-64 mx-auto animate-pulse" />
@@ -411,6 +521,20 @@ export default function ProductsList({
       </div>
     );
   }
+  // Best sellers: the catalogue has products, but none of them have sales yet
+  // (or none of the ranked products are available at this branch / in stock).
+  if (sortByTopSelling && sortedProducts.length === 0) {
+    return (
+      <div className="max-w-4xl mx-auto p-8 text-center">
+        <div className="text-lg md:text-xl font-medium text-gray-700">
+          No best sellers yet
+        </div>
+        <div className="mt-3 text-sm text-gray-500">
+          Products will appear here once they start selling at this branch.
+        </div>
+      </div>
+    );
+  }
 
   const handleColorSelect = (productId: string, colorId: string) => {
     setSelectedColors((prev) => {
@@ -451,16 +575,23 @@ export default function ProductsList({
       <div className="flex flex-col md:flex-row md:items-center justify-between px-2 py-2 md:px-6 md:py-4">
         <div className="flex flex-col md:flex-row md:items-center">
           <div className="text-sm text-gray-600">
-            {filteredProducts ? `${filteredProducts.length} ${t("items")}` : ""}
+            {/* Count the list that is actually rendered. On best sellers
+                `sortedProducts` is narrowed to the ranked products, so using
+                `filteredProducts` here would report the whole branch
+                catalogue instead of what's on screen. */}
+            {`${sortedProducts.length} ${t("items")}`}
           </div>
 
           {!hideFilters && (
             <div className="flex flex-wrap items-center gap-2 mt-2 ml-3 md:mt-0">
               {filterCategory !== "all" && (
-                <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
+                <span className="inline-flex items-center space-x-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-sm px-3 py-1 rounded">
                   <span>{filterCategory}</span>
                   <button
-                    onClick={() => setFilterCategory("all")}
+                    onClick={() => {
+                      setFilterCategory("all");
+                      setCurrentPage(1);
+                    }}
                     aria-label="Remove category filter"
                     className="text-amber-700 hover:text-amber-900 ml-1"
                   >
@@ -472,10 +603,13 @@ export default function ProductsList({
               {/* color filter removed */}
 
               {filterSize && (
-                <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
+                <span className="inline-flex items-center space-x-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-sm px-3 py-1 rounded">
                   <span>{filterSize}</span>
                   <button
-                    onClick={() => setFilterSize("")}
+                    onClick={() => {
+                      setFilterSize("");
+                      setCurrentPage(1);
+                    }}
                     aria-label="Remove size filter"
                     className="text-amber-700 hover:text-amber-900 ml-1"
                   >
@@ -485,7 +619,7 @@ export default function ProductsList({
               )}
 
               {(filterMinPrice || filterMaxPrice) && (
-                <span className="inline-flex items-center space-x-2 bg-pink-300 text-white text-sm px-3 py-1 rounded">
+                <span className="inline-flex items-center space-x-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-sm px-3 py-1 rounded">
                   <span>
                     {filterCurrency === "THB" ? "฿" : "Ks"}{" "}
                     {filterMinPrice || "-"} - {filterMaxPrice || "-"}
@@ -494,6 +628,7 @@ export default function ProductsList({
                     onClick={() => {
                       setFilterMinPrice("");
                       setFilterMaxPrice("");
+                      setCurrentPage(1);
                     }}
                     aria-label="Remove price filter"
                     className="text-amber-700 hover:text-amber-900 ml-1"
@@ -514,6 +649,7 @@ export default function ProductsList({
                     setFilterMinPrice("");
                     setFilterMaxPrice("");
                     setFilterCurrency("THB");
+                    setCurrentPage(1);
                   }}
                   className="text-md text-red-600 underline md:ml-2 ml-0"
                 >
@@ -631,20 +767,26 @@ export default function ProductsList({
                     </label>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => setFilterCurrency("THB")}
+                        onClick={() => {
+                          setFilterCurrency("THB");
+                          setCurrentPage(1);
+                        }}
                         className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                           filterCurrency === "THB"
-                            ? "bg-gradient-to-r from-pink-500 to-pink-400 text-white shadow-sm"
+                            ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-sm"
                             : "border border-gray-300 text-gray-600 hover:bg-gray-50"
                         }`}
                       >
                         ฿ THB
                       </button>
                       <button
-                        onClick={() => setFilterCurrency("MMK")}
+                        onClick={() => {
+                          setFilterCurrency("MMK");
+                          setCurrentPage(1);
+                        }}
                         className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                           filterCurrency === "MMK"
-                            ? "bg-gradient-to-r from-pink-500 to-pink-400 text-white shadow-sm"
+                            ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-sm"
                             : "border border-gray-300 text-gray-600 hover:bg-gray-50"
                         }`}
                       >
@@ -658,7 +800,7 @@ export default function ProductsList({
                     <label className="block text-xs font-medium text-gray-700 mb-2">
                       Price Range
                     </label>
-                    <div className="flex items-center rounded-lg border border-gray-300 bg-white overflow-hidden focus-within:outline-none focus-within:ring-2 focus-within:ring-pink-400">
+                    <div className="flex items-center rounded-lg border border-gray-300 bg-white overflow-hidden focus-within:outline-none focus-within:ring-2 focus-within:ring-rose-400">
                       <input
                         type="number"
                         value={filterMinPrice}
@@ -683,14 +825,18 @@ export default function ProductsList({
                       onClick={() => {
                         setFilterMinPrice("");
                         setFilterMaxPrice("");
+                        setCurrentPage(1);
                       }}
                       className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all"
                     >
                       Clear
                     </button>
                     <button
-                      onClick={() => setShowPriceDropdown(false)}
-                      className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-gradient-to-r from-pink-500 to-pink-400 rounded-lg hover:shadow-md transition-all"
+                      onClick={() => {
+                        setCurrentPage(1);
+                        setShowPriceDropdown(false);
+                      }}
+                      className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 rounded-lg hover:shadow-md transition-all"
                     >
                       Apply
                     </button>
@@ -707,6 +853,7 @@ export default function ProductsList({
             Array.isArray(p.colorVariants) && p.colorVariants.length > 0;
           const displayStock = p.stock ?? (p.price ? 10 : 0);
           const isOutOfStock = displayStock === 0;
+          const soldCount = Number(topSellingQuantities[p.id] || 0);
 
           const variant = hasVariants
             ? p.colorVariants!.find(
@@ -818,7 +965,7 @@ export default function ProductsList({
                                 )}
                               </span>
                             ) : null}
-                            <span className="font-bold text-pink-600">
+                            <span className="font-bold text-rose-600">
                               {formatPrice(
                                 finalPriceTHB,
                                 displayCurrency,
@@ -831,6 +978,14 @@ export default function ProductsList({
                     </div>
                   ) : (
                     <span className="text-xs text-gray-700 mb-2">—</span>
+                  )}
+
+                  {/* Units sold — best sellers only, where the ranking is by
+                      sales volume so the sold count is the meaningful number */}
+                  {sortByTopSelling && soldCount > 0 && (
+                    <div className="text-[10px] text-rose-600 font-semibold mb-1.5">
+                      {soldCount} sold
+                    </div>
                   )}
 
                   {/* Stock Indicator */}
@@ -919,7 +1074,7 @@ export default function ProductsList({
                   >
                     <button
                       onClick={() => setFilterBranch("all")}
-                      className={`w-full text-left px-3 py-2 rounded text-sm ${filterBranch === "all" ? "bg-pink-300 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
+                      className={`w-full text-left px-3 py-2 rounded text-sm ${filterBranch === "all" ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
                     >
                       {t("all_branches")}
                     </button>
@@ -928,7 +1083,7 @@ export default function ProductsList({
                       <button
                         key={sh.id}
                         onClick={() => setFilterBranch(sh.id)}
-                        className={`w-full text-left px-3 py-2 rounded text-sm ${filterBranch === sh.id ? "bg-pink-300 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
+                        className={`w-full text-left px-3 py-2 rounded text-sm ${filterBranch === sh.id ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
                       >
                         {sh.name}
                       </button>
@@ -966,7 +1121,7 @@ export default function ProductsList({
                   >
                     <button
                       onClick={() => setFilterCategory("all")}
-                      className={`w-full text-left px-3 py-2 rounded text-sm ${filterCategory === "all" ? "bg-pink-300 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
+                      className={`w-full text-left px-3 py-2 rounded text-sm ${filterCategory === "all" ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
                     >
                       {t("all_categories")}
                     </button>
@@ -974,7 +1129,7 @@ export default function ProductsList({
                       <button
                         key={c}
                         onClick={() => setFilterCategory(c)}
-                        className={`w-full text-left px-3 py-2 rounded text-sm ${filterCategory === c ? "bg-pink-300 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
+                        className={`w-full text-left px-3 py-2 rounded text-sm ${filterCategory === c ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white" : "bg-white text-gray-700 border border-gray-200"}`}
                       >
                         {c}
                       </button>
@@ -1015,7 +1170,7 @@ export default function ProductsList({
                         onClick={() => setFilterSize("")}
                         className={`col-span-4 text-left px-3 py-2 rounded text-sm ${
                           filterSize === ""
-                            ? "bg-pink-300 text-white"
+                            ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white"
                             : "bg-white text-gray-700 border border-gray-200"
                         }`}
                       >
@@ -1028,7 +1183,7 @@ export default function ProductsList({
                           onClick={() => setFilterSize(String(s))}
                           className={`text-center px-2 py-2 rounded text-sm ${
                             filterSize === String(s)
-                              ? "bg-pink-300 text-white"
+                              ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white"
                               : "bg-white text-gray-700 border border-gray-200"
                           }`}
                         >
@@ -1108,7 +1263,7 @@ export default function ProductsList({
                       setCurrentPage(1);
                     }}
                     aria-label="Apply filters"
-                    className="ml-auto px-3 py-2 rounded-full bg-pink-400 text-white text-sm"
+                    className="ml-auto px-3 py-2 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white text-sm"
                   >
                     {t("apply")}
                   </button>
@@ -1124,7 +1279,7 @@ export default function ProductsList({
         <div className="mt-4 mb-4 flex justify-center">
           <Link
             href={loadMoreLink}
-            className="px-6 py-2 bg-gradient-to-r from-pink-500 to-pink-400 text-white font-medium text-sm rounded-full hover:shadow-lg transition-all duration-300 hover:scale-105"
+            className="px-6 py-2 bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white font-medium text-sm rounded-full hover:shadow-lg transition-all duration-300 hover:scale-105"
           >
             Load More
           </Link>
@@ -1161,7 +1316,7 @@ export default function ProductsList({
                     onClick={() => setCurrentPage(page)}
                     className={`h-7 min-w-[1.75rem] px-2 rounded-md text-xs font-medium transition ${
                       currentPage === page
-                        ? "bg-gradient-to-r from-pink-500 to-pink-400 text-white shadow-sm"
+                        ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-sm"
                         : "text-gray-700 hover:bg-gray-50"
                     }`}
                   >

@@ -6,7 +6,7 @@ export default function Loading() {
       <div className="w-full max-w-4xl px-4">
         <div className="mx-auto max-w-sm text-center">
           <div className="flex items-center justify-center">
-            <div className="h-10 w-10 border-4 border-gray-200 border-t-pink-500 rounded-full animate-spin" />
+            <div className="h-10 w-10 border-4 border-gray-200 border-t-rose-500 rounded-full animate-spin" />
           </div>
           <div className="mt-4 h-5 bg-gray-100 rounded w-40 mx-auto animate-pulse" />
           <div className="mt-3 h-3 bg-gray-100 rounded w-56 mx-auto animate-pulse" />

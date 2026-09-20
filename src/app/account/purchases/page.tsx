@@ -1683,14 +1683,14 @@ function RefundRequestModal({
 
       <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col z-10">
         {/* Header */}
-        <div className="px-4 py-2.5 bg-gradient-to-r from-pink-600 to-rose-600 flex justify-between items-center">
+        <div className="px-4 py-2.5 bg-gradient-to-r from-rose-500 to-pink-500 flex justify-between items-center">
           <div>
             <h2 className="text-sm font-bold text-white">
               {row?.status?.toLowerCase() === "cancelled" 
                 ? "Request Refund" 
                 : "Request Return"}
             </h2>
-            <p className="text-xs text-pink-100">
+            <p className="text-xs text-rose-100">
               {row.transactionId || row.id}
             </p>
           </div>
@@ -1705,18 +1705,18 @@ function RefundRequestModal({
         <div className="px-3 py-3 overflow-y-auto flex-1 space-y-2.5 bg-gray-50">
           {/* QR Code Upload for All Return Requests (Including COD Delivered Orders) */}
           {isReturnRequest && (
-            <div className="rounded-lg border border-pink-200 bg-pink-50 p-2.5">
+            <div className="rounded-lg border border-rose-200 bg-rose-50 p-2.5">
               <div className="flex items-center gap-2 mb-2">
-                <div className="p-1 bg-pink-500 rounded">
+                <div className="p-1 bg-rose-500 rounded">
                   <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
                   </svg>
                 </div>
                 <div className="flex-1">
-                  <p className="font-bold text-pink-900 text-xs">
+                  <p className="font-bold text-rose-900 text-xs">
                     Payment Account Required *
                   </p>
-                  <p className="text-xs text-pink-700 leading-tight">
+                  <p className="text-xs text-rose-700 leading-tight">
                     Upload payment QR code or bank account screenshot for refund transfer
                   </p>
                 </div>
@@ -1724,7 +1724,7 @@ function RefundRequestModal({
 
               <div>
                 {!qrCodeImage ? (
-                  <div className="border-2 border-dashed border-pink-300 rounded p-3 text-center bg-white">
+                  <div className="border-2 border-dashed border-rose-300 rounded p-3 text-center bg-white">
                     <input
                       type="file"
                       accept="image/*"
@@ -1738,7 +1738,7 @@ function RefundRequestModal({
                       className="cursor-pointer flex flex-col items-center"
                     >
                       <svg
-                        className="w-8 h-8 text-pink-400 mb-1"
+                        className="w-8 h-8 text-rose-400 mb-1"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -1750,16 +1750,16 @@ function RefundRequestModal({
                           d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
                         />
                       </svg>
-                      <span className="text-xs text-pink-600 font-semibold">
+                      <span className="text-xs text-rose-600 font-semibold">
                         {uploading ? "Uploading..." : "Click to upload"}
                       </span>
-                      <span className="text-xs text-pink-500">
+                      <span className="text-xs text-rose-500">
                         PNG, JPG (5MB max)
                       </span>
                     </label>
                   </div>
                 ) : (
-                  <div className="relative border border-pink-200 rounded p-1.5 bg-white">
+                  <div className="relative border border-rose-200 rounded p-1.5 bg-white">
                     <img
                       src={qrCodeImage}
                       alt="Payment QR"
@@ -1780,18 +1780,18 @@ function RefundRequestModal({
 
           {/* Item Photos Upload for Return Requests */}
           {isReturnRequest && (
-            <div className="rounded-lg border border-pink-200 bg-pink-50 p-2.5">
+            <div className="rounded-lg border border-rose-200 bg-rose-50 p-2.5">
               <div className="flex items-center gap-2 mb-2">
-                <div className="p-1 bg-pink-500 rounded">
+                <div className="p-1 bg-rose-500 rounded">
                   <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
                   </svg>
                 </div>
                 <div className="flex-1">
-                  <p className="font-bold text-pink-900 text-xs">
+                  <p className="font-bold text-rose-900 text-xs">
                     Item Photos Required *
                   </p>
-                  <p className="text-xs text-pink-700 leading-tight">
+                  <p className="text-xs text-rose-700 leading-tight">
                     Upload 1-5 photos for verification
                   </p>
                 </div>
@@ -1800,7 +1800,7 @@ function RefundRequestModal({
               <div>
                 {/* Upload button */}
                 {itemPhotos.length < 5 && (
-                  <div className="border-2 border-dashed border-pink-300 rounded p-3 text-center bg-white mb-2">
+                  <div className="border-2 border-dashed border-rose-300 rounded p-3 text-center bg-white mb-2">
                     <input
                       type="file"
                       accept="image/*"
@@ -1815,7 +1815,7 @@ function RefundRequestModal({
                       className="cursor-pointer flex flex-col items-center"
                     >
                       <svg
-                        className="w-8 h-8 text-pink-400 mb-1"
+                        className="w-8 h-8 text-rose-400 mb-1"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -1827,10 +1827,10 @@ function RefundRequestModal({
                           d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
                         />
                       </svg>
-                      <span className="text-xs text-pink-600 font-semibold">
+                      <span className="text-xs text-rose-600 font-semibold">
                         {uploadingItemPhoto ? "Uploading..." : "Click to upload"}
                       </span>
-                      <span className="text-xs text-pink-500">
+                      <span className="text-xs text-rose-500">
                         PNG, JPG (5MB max · Max 5)
                       </span>
                     </label>
@@ -1841,7 +1841,7 @@ function RefundRequestModal({
                 {itemPhotos.length > 0 && (
                   <div className="grid grid-cols-3 gap-1.5">
                     {itemPhotos.map((photo, index) => (
-                      <div key={index} className="relative border border-pink-200 rounded p-1 bg-white">
+                      <div key={index} className="relative border border-rose-200 rounded p-1 bg-white">
                         <img
                           src={photo}
                           alt={`Item ${index + 1}`}
@@ -1863,7 +1863,7 @@ function RefundRequestModal({
                 )}
                 
                 {itemPhotos.length > 0 && (
-                  <p className="text-xs text-pink-700 mt-1.5">
+                  <p className="text-xs text-rose-700 mt-1.5">
                     {itemPhotos.length}/{5} photo{itemPhotos.length > 1 ? 's' : ''}
                   </p>
                 )}
@@ -2010,7 +2010,7 @@ function RefundRequestModal({
               onChange={(e) => setReason(e.target.value)}
               placeholder="Tell us why you want a refund... *"
               rows={2}
-              className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:outline-none focus:ring-2 focus:ring-pink-500"
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:outline-none focus:ring-2 focus:ring-rose-500"
               required
             />
           </div>
@@ -2027,7 +2027,7 @@ function RefundRequestModal({
           <button
             onClick={handleSubmit}
             disabled={submitting}
-            className="flex-1 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-700 hover:to-rose-700 text-white rounded font-semibold transition-colors disabled:opacity-50 text-xs"
+            className="flex-1 py-2 bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white rounded font-semibold transition-colors disabled:opacity-50 text-xs"
           >
             {submitting ? "Submitting..." : (row?.status?.toLowerCase() === "cancelled" ? "Request Refund" : "Request Return")}
           </button>
@@ -2477,9 +2477,9 @@ function RefundDetailsModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="relative w-full max-w-lg max-h-[90vh] overflow-hidden rounded-2xl bg-gradient-to-br from-white to-pink-50/30 shadow-2xl">
+      <div className="relative w-full max-w-lg max-h-[90vh] overflow-hidden rounded-2xl bg-gradient-to-br from-white to-rose-50/30 shadow-2xl">
         {/* Header with gradient */}
-        <div className="sticky top-0 z-10 bg-gradient-to-r from-pink-500 to-rose-500 px-6 py-4">
+        <div className="sticky top-0 z-10 bg-gradient-to-r from-rose-500 to-pink-500 px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="rounded-lg bg-white/20 p-2 backdrop-blur-sm">
@@ -2500,9 +2500,9 @@ function RefundDetailsModal({
 
         <div className="overflow-y-auto max-h-[calc(90vh-180px)] px-6 py-5 space-y-4">
           {/* Order Information - Compact Card */}
-          <div className="rounded-xl border border-pink-100 bg-white/80 backdrop-blur-sm p-4 shadow-sm">
-            <h3 className="text-sm font-semibold text-pink-900 mb-3 flex items-center gap-2">
-              <span className="text-pink-500">📋</span> Order Information
+          <div className="rounded-xl border border-rose-100 bg-white/80 backdrop-blur-sm p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-rose-900 mb-3 flex items-center gap-2">
+              <span className="text-rose-500">📋</span> Order Information
             </h3>
             <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-xs">
               <div>
@@ -2533,12 +2533,12 @@ function RefundDetailsModal({
 
           {/* Return Refunds - Pink Theme */}
           {isReturnType && completedRefunds.length > 0 && (
-            <div className="rounded-xl border border-pink-200 bg-gradient-to-br from-pink-50 to-rose-50 p-4 shadow-sm">
+            <div className="rounded-xl border border-rose-200 bg-gradient-to-br from-rose-50 to-pink-50 p-4 shadow-sm">
               <div className="flex items-center gap-2 mb-3">
-                <div className="rounded-lg bg-pink-500 p-1.5">
+                <div className="rounded-lg bg-gradient-to-r from-rose-500 to-pink-500 p-1.5">
                   <DollarSign size={16} className="text-white" />
                 </div>
-                <h3 className="font-semibold text-pink-900">
+                <h3 className="font-semibold text-rose-900">
                   {row.orderStatus === "fully_returned" ? "Full Return Refund" : "Partial Return Refund"}
                 </h3>
               </div>
@@ -2546,17 +2546,17 @@ function RefundDetailsModal({
               {completedRefunds.map((refund, idx) => {
                 const refundAmount = refund.amount || refund.totalAmount || 0;
                 return (
-                <div key={idx} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-pink-200' : ''}`}>
+                <div key={idx} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-rose-200' : ''}`}>
                   {/* Refund Amount - Highlighted */}
-                  <div className="bg-white/60 rounded-lg p-3 mb-3 border border-pink-200/50">
+                  <div className="bg-white/60 rounded-lg p-3 mb-3 border border-rose-200/50">
                     <div className="flex justify-between items-center mb-1.5">
-                      <span className="text-xs font-medium text-pink-700">Refund Amount (THB)</span>
-                      <span className="text-lg font-bold text-pink-600">THB {refundAmount.toFixed(2)}</span>
+                      <span className="text-xs font-medium text-rose-700">Refund Amount (THB)</span>
+                      <span className="text-lg font-bold text-rose-600">THB {refundAmount.toFixed(2)}</span>
                     </div>
                     {row.sellingTotal && (
                       <div className="flex justify-between items-center">
-                        <span className="text-xs font-medium text-pink-700">Refund Amount (MMK)</span>
-                        <span className="text-base font-bold text-pink-600">
+                        <span className="text-xs font-medium text-rose-700">Refund Amount (MMK)</span>
+                        <span className="text-base font-bold text-rose-600">
                           Ks {(refundAmount * (row.exchangeRate || 1)).toLocaleString()}
                         </span>
                       </div>
@@ -2567,8 +2567,8 @@ function RefundDetailsModal({
                   <div className="space-y-1.5 text-xs">
                     {refund.confirmedAt && (
                       <div className="flex justify-between items-center">
-                        <span className="text-pink-700/80">Refund Date</span>
-                        <span className="font-medium text-pink-900">
+                        <span className="text-rose-700/80">Refund Date</span>
+                        <span className="font-medium text-rose-900">
                           {new Date(refund.confirmedAt.toDate()).toLocaleDateString('en-US', { 
                             month: 'short', day: 'numeric', year: 'numeric', 
                             hour: '2-digit', minute: '2-digit' 
@@ -2578,30 +2578,30 @@ function RefundDetailsModal({
                     )}
                     {refund.processedBy && (
                       <div className="flex justify-between items-center">
-                        <span className="text-pink-700/80">Processed By</span>
-                        <span className="font-medium text-pink-900">{refund.processedBy}</span>
+                        <span className="text-rose-700/80">Processed By</span>
+                        <span className="font-medium text-rose-900">{refund.processedBy}</span>
                       </div>
                     )}
                   </div>
 
                   {/* Notes */}
                   {refund.notes && (
-                    <div className="mt-2.5 p-2.5 bg-pink-100/50 rounded-lg border border-pink-200">
-                      <p className="text-xs font-medium text-pink-800 mb-1">Notes:</p>
-                      <p className="text-xs text-pink-900">{refund.notes}</p>
+                    <div className="mt-2.5 p-2.5 bg-rose-100/50 rounded-lg border border-rose-200">
+                      <p className="text-xs font-medium text-rose-800 mb-1">Notes:</p>
+                      <p className="text-xs text-rose-900">{refund.notes}</p>
                     </div>
                   )}
 
                   {/* Payment Method Notice */}
-                  <div className="mt-3 p-2.5 bg-white/60 rounded-lg border border-pink-200/50">
+                  <div className="mt-3 p-2.5 bg-white/60 rounded-lg border border-rose-200/50">
                     {row.paymentMethod === "cash" && (
-                      <p className="text-xs text-pink-800 flex items-start gap-2">
+                      <p className="text-xs text-rose-800 flex items-start gap-2">
                         <span className="text-base">💵</span>
                         <span>Cash refund. Please visit the store with your receipt to collect your refund.</span>
                       </p>
                     )}
                     {(row.paymentMethod === "scan" || row.paymentMethod === "wallet") && (
-                      <p className="text-xs text-pink-800 flex items-start gap-2">
+                      <p className="text-xs text-rose-800 flex items-start gap-2">
                         <span className="text-base">📱</span>
                         <span>Refund has been processed back to your QR payment method within 3-5 business days.</span>
                       </p>
@@ -2616,7 +2616,7 @@ function RefundDetailsModal({
           {cancellationRefund && cancellationRefund.status === "completed" && (
             <div className="rounded-xl border border-rose-200 bg-gradient-to-br from-rose-50 to-pink-50 p-4 shadow-sm">
               <div className="flex items-center gap-2 mb-3">
-                <div className="rounded-lg bg-rose-500 p-1.5">
+                <div className="rounded-lg bg-gradient-to-r from-rose-500 to-pink-500 p-1.5">
                   <DollarSign size={16} className="text-white" />
                 </div>
                 <h3 className="font-semibold text-rose-900">Cancellation Refund</h3>
@@ -2686,14 +2686,14 @@ function RefundDetailsModal({
           )}
 
           {/* Status Information - Compact */}
-          <div className="rounded-xl border border-pink-100 bg-white/80 backdrop-blur-sm p-4 shadow-sm">
-            <h3 className="text-sm font-semibold text-pink-900 mb-3 flex items-center gap-2">
-              <span className="text-pink-500">📊</span> Status Information
+          <div className="rounded-xl border border-rose-100 bg-white/80 backdrop-blur-sm p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-rose-900 mb-3 flex items-center gap-2">
+              <span className="text-rose-500">📊</span> Status Information
             </h3>
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
                 <p className="text-gray-500 mb-1">Payment Status</p>
-                <span className="inline-block px-2.5 py-1 rounded-full bg-pink-100 text-pink-700 font-semibold capitalize text-[11px]">
+                <span className="inline-block px-2.5 py-1 rounded-full bg-rose-100 text-rose-700 font-semibold capitalize text-[11px]">
                   {row.status === "refunded" ? "Fully Refunded" : 
                    row.status === "partially_refunded" ? "Partially Refunded" :
                    row.status?.replace(/_/g, " ") || "N/A"}
@@ -2712,10 +2712,10 @@ function RefundDetailsModal({
         </div>
 
         {/* Footer */}
-        <div className="sticky bottom-0 border-t border-pink-100 bg-white/90 backdrop-blur-sm px-6 py-4">
+        <div className="sticky bottom-0 border-t border-rose-100 bg-white/90 backdrop-blur-sm px-6 py-4">
           <button
             onClick={onClose}
-            className="w-full rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 px-4 py-2.5 text-sm font-semibold text-white hover:from-pink-600 hover:to-rose-600 transition-all duration-200 shadow-lg shadow-pink-500/30"
+            className="w-full rounded-xl bg-gradient-to-r from-rose-500 to-pink-500 px-4 py-2.5 text-sm font-semibold text-white hover:from-rose-600 hover:to-pink-600 transition-all duration-200 shadow-lg shadow-rose-500/30"
           >
             Close
           </button>
@@ -3360,7 +3360,7 @@ export default function PurchaseHistoryPage() {
       <div className="mt-5">
         <Link
           href="/account/profile"
-          className="text-sm font-medium text-pink-600 hover:text-pink-700"
+          className="text-sm font-medium text-rose-600 hover:text-rose-700"
         >
           Back to Profile
         </Link>

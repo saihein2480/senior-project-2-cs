@@ -101,6 +101,26 @@ export async function POST(request: NextRequest) {
       updatedAt: FieldValue.serverTimestamp(),
     });
 
+    // Create an owner-facing notification so it shows up in the POS
+    // notification bell/page and routes to the cancellation requests page.
+    try {
+      await adminDb.collection("notifications").add({
+        type: "cancellation_request",
+        title: "Order Cancellation Request",
+        message: `Customer requested to cancel order #${transactionId}`,
+        link: "/owner/requests/cancellations",
+        metadata: {
+          transactionId: transactionDoc.id,
+          orderId: transactionId,
+        },
+        read: false,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    } catch (notifError) {
+      console.error("Error creating owner notification for cancellation request:", notifError);
+      // Don't fail the request if the notification fails to be created
+    }
+
     return NextResponse.json({
       success: true,
       message: "Cancellation request submitted successfully. Please wait for owner approval.",

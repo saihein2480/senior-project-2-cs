@@ -4,11 +4,32 @@ import React from "react";
 import { useSearchParams } from "next/navigation";
 import ProductsList from "../../components/ProductsList";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { useTopSelling } from "@/hooks/useTopSelling";
 
 export default function BestSellersPage() {
-  const { t } = useLanguage();
   const searchParams = useSearchParams();
   const category = searchParams?.get("category") || "all";
+  const branch = searchParams?.get("branch") || "";
+
+  // Fetch top-selling products based on actual sales data
+  const { topSelling, loading: topSellingLoading } = useTopSelling({
+    branch: branch || undefined,
+    limit: 50, // Get top 50 products
+    autoLoad: true,
+  });
+
+  // Extract product IDs in order of sales volume
+  const topSellingProductIds = topSelling.map(p => p.productId);
+
+  // productId -> units sold, so the cards can show "N sold"
+  const topSellingQuantities = React.useMemo(
+    () =>
+      topSelling.reduce<Record<string, number>>((acc, p) => {
+        acc[p.productId] = p.quantitySold;
+        return acc;
+      }, {}),
+    [topSelling],
+  );
 
   // Format category name for display
   const getCategoryTitle = () => {
@@ -37,7 +58,7 @@ export default function BestSellersPage() {
             <div className="flex items-center justify-center gap-4 md:gap-6">
               <div className="h-px w-12 md:w-16 bg-gray-300" />
               <svg
-                className="w-5 h-5 md:w-6 md:h-6 text-pink-400 flex-shrink-0"
+                className="w-5 h-5 md:w-6 md:h-6 text-rose-500 flex-shrink-0"
                 fill="currentColor"
                 viewBox="0 0 64 64"
               >
@@ -49,6 +70,14 @@ export default function BestSellersPage() {
               </svg>
               <div className="h-px w-12 md:w-16 bg-gray-300" />
             </div>
+            {topSellingLoading && (
+              <p className="text-xs text-gray-500 mt-2">Loading best sellers...</p>
+            )}
+            {!topSellingLoading && topSelling.length > 0 && (
+              <p className="text-xs text-gray-500 mt-2">
+                Top {topSelling.length} most popular items
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -60,6 +89,10 @@ export default function BestSellersPage() {
           itemsPerPageDefault={40}
           hideFilters={true}
           showPriceFilter={true}
+          topSellingIds={topSellingProductIds}
+          topSellingQuantities={topSellingQuantities}
+          sortByTopSelling={true}
+          topSellingLoading={topSellingLoading}
         />
       </main>
     </div>

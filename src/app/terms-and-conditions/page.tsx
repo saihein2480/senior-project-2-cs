@@ -8,11 +8,11 @@ export default function TermsPage() {
 
   return (
     <div className="max-w-6xl mx-auto py-8 px-4">
-      <h1 className="text-2xl font-serif text-center text-pink-400 mb-6 font-pacifico">
+      <h1 className="text-2xl font-serif text-center text-rose-500 mb-6 font-pacifico">
         {t("terms")}
       </h1>
 
-      <div className="border border-pink-300 m-9 mr-30 ml-30"></div>
+      <div className="border border-rose-300 m-9 mr-30 ml-30"></div>
 
       <div className="prose max-w-none">
         <ol className="list-decimal list-inside ml-4 space-y-2">

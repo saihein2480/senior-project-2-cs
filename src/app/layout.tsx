@@ -4,8 +4,6 @@ import "./globals.css";
 import NavBar from "../components/NavBar";
 import { LanguageProvider } from "../contexts/LanguageContext";
 import Footer from "../components/Footer";
-import InstallPrompt from "../components/InstallPrompt";
-import ServiceWorkerRegistration from "../components/ServiceWorkerRegistration";
 import QueryProvider from "../providers/QueryProvider";
 import { CustomerAuthProvider } from "../contexts/CustomerAuthContext";
 import { CartProvider } from "../contexts/CartContext";
@@ -71,11 +69,9 @@ export default function RootLayout({
           <LanguageProvider>
             <CustomerAuthProvider>
               <CartProvider>
-                <ServiceWorkerRegistration />
                 <NavBar />
                 <main className="flex-1">{children}</main>
                 <Footer />
-                <InstallPrompt />
                 <ChatBot />
               </CartProvider>
             </CustomerAuthProvider>

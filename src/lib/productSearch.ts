@@ -8,6 +8,8 @@ import {
   DocumentData,
 } from "firebase/firestore";
 import { db } from "./firebase";
+import { variantMatchesColor } from "./colorFamily";
+import { categoryMatches } from "./categorySynonyms";
 
 type SizeQuantity = {
   size?: string;
@@ -65,6 +67,7 @@ export type SearchFilters = {
   keyword?: string;
   category?: string;
   color?: string;
+  size?: string; // e.g., "M", "XL" — matched against variant size quantities
   minPrice?: number;
   maxPrice?: number;
   style?: string; // e.g., "oversized", "slim fit"
@@ -215,9 +218,11 @@ export async function searchProducts(
 
     if (filters.category) {
       const category = filters.category.toLowerCase();
+      // Shoppers say "t-shirt" while the catalogue says "Top", so expand the
+      // term to the store's own category names before matching.
       products = products.filter(
         (p) =>
-          p.category?.includes(category) ||
+          categoryMatches(p.category, category) ||
           p.name.includes(category) ||
           p.description?.includes(category),
       );
@@ -225,12 +230,20 @@ export async function searchProducts(
 
     if (filters.color) {
       const color = filters.color.toLowerCase();
-      products = products.filter(
-        (p) =>
+      // Colour names in the catalogue are paint-chart style ("Gun Powder"), so
+      // fall back to classifying each variant's hex into a basic colour family.
+      products = products.filter((p) => {
+        const variantMatch = (p.colorVariants || []).some((variant) =>
+          variantMatchesColor(variant.color, variant.colorCode, color),
+        );
+
+        return (
+          variantMatch ||
           p.colors?.some((c) => c.includes(color)) ||
           p.name.includes(color) ||
-          p.description?.includes(color),
-      );
+          p.description?.includes(color)
+        );
+      });
     }
 
     if (filters.style) {
@@ -249,6 +262,21 @@ export async function searchProducts(
 
     if (filters.maxPrice !== undefined) {
       products = products.filter((p) => p.price <= filters.maxPrice!);
+    }
+
+    // Size is held per colour variant, so check the variant stock rather than
+    // the product name. Respects inStock: without it, any listed size matches.
+    if (filters.size) {
+      const wanted = filters.size.toUpperCase().trim();
+      products = products.filter((p) =>
+        (p.colorVariants || []).some((variant) =>
+          (variant.sizeQuantities || []).some(
+            (sq) =>
+              String(sq.size).toUpperCase().trim() === wanted &&
+              (filters.inStock ? Number(sq.quantity) > 0 : true),
+          ),
+        ),
+      );
     }
 
     if (filters.inStock) {
@@ -360,11 +388,25 @@ export function extractFiltersFromQuery(query: string): SearchFilters {
     }
   }
 
+  // Extract size. Bare "s"/"m"/"l" are far too ambiguous in a sentence, so
+  // those only count when written as "size M". Distinctive tokens like XL are
+  // safe on their own. Note "oversized" cannot match: there is no word boundary
+  // before its "size".
+  const explicitSize = lowerQuery.match(
+    /\bsize\s*[:\-]?\s*(xxxl|xxl|xl|xs|s|m|l)\b/i,
+  );
+  const standaloneSize = lowerQuery.match(/\b(xxxl|xxl|xl|xs)\b/i);
+  const sizeToken = explicitSize?.[1] || standaloneSize?.[1];
+  if (sizeToken) {
+    filters.size = sizeToken.toUpperCase();
+  }
+
   // If no specific filters, use the query as keyword
   if (
     !filters.color &&
     !filters.category &&
     !filters.style &&
+    !filters.size &&
     !filters.minPrice &&
     !filters.maxPrice
   ) {

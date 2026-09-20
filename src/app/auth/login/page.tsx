@@ -99,7 +99,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full rounded-md bg-pink-500 px-4 py-2 text-white transition hover:bg-pink-600 disabled:opacity-50"
+          className="w-full rounded-md bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 px-4 py-2 text-white transition disabled:opacity-50"
         >
           {submitting ? "Signing in..." : "Login"}
         </button>
@@ -118,7 +118,7 @@ export default function LoginPage() {
         New customer?{" "}
         <Link
           href="/auth/register"
-          className="font-medium text-pink-600 hover:text-pink-700"
+          className="font-medium text-rose-600 hover:text-rose-700"
         >
           Register here
         </Link>

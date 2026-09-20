@@ -51,7 +51,7 @@ export default function CartPage() {
         <p className="mt-4 text-gray-600">Your cart is currently empty.</p>
         <Link
           href="/"
-          className="mt-6 inline-block rounded-md bg-pink-500 px-4 py-2 text-white hover:bg-pink-600"
+          className="mt-6 inline-block rounded-md bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 px-4 py-2 text-white"
         >
           Continue Shopping
         </Link>
@@ -173,7 +173,7 @@ export default function CartPage() {
         <div className="mt-5 flex flex-wrap gap-3">
           <button
             onClick={() => router.push("/checkout")}
-            className="rounded-md bg-pink-500 px-5 py-2 text-white hover:bg-pink-600"
+            className="rounded-md bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 px-5 py-2 text-white"
           >
             Proceed to Checkout
           </button>

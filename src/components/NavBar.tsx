@@ -6,8 +6,8 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useCustomerAuth } from "../contexts/CustomerAuthContext";
 import { useCart } from "../contexts/CartContext";
-import { useProducts } from "../hooks/useProducts";
 import { useShops } from "../hooks/useShops";
+import { useCategories } from "../hooks/useCategories";
 
 function NavBarContent() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -36,11 +36,13 @@ function NavBarContent() {
   const { t } = useLanguage();
   const { user, logout } = useCustomerAuth();
   const { itemCount } = useCart();
-  const { data: products = [] } = useProducts();
   const { data: shops = [] } = useShops();
+  const { data: adminCategories = [] } = useCategories();
   const branchDropdownRef = useRef<HTMLDivElement | null>(null);
   const currencyDropdownRef = useRef<HTMLDivElement | null>(null);
   const languageDropdownRef = useRef<HTMLDivElement | null>(null);
+  const searchDropdownRef = useRef<HTMLDivElement | null>(null);
+  const mobileSearchBarRef = useRef<HTMLDivElement | null>(null);
 
   // Get only first two branches (Main Branch should be first)
   // Sort by name to ensure "Main Branch" comes first if it exists by name
@@ -139,16 +141,11 @@ function NavBarContent() {
     };
   }, [searchParams]);
 
-  // Extract unique categories from products
-  const categories = React.useMemo(() => {
-    if (!products || products.length === 0) return [];
-    const cats = new Set<string>();
-    products.forEach((p) => {
-      if (p.description) cats.add(p.description);
-      if (p.category) cats.add(p.category);
-    });
-    return Array.from(cats).sort();
-  }, [products]);
+  // The category menu mirrors the list the owner manages in the POS app
+  // (settings/categories). It is deliberately NOT derived from product data:
+  // doing that would keep showing categories the owner deleted and would hide
+  // a newly added category until some product happened to use it.
+  const categories = adminCategories;
 
   const isActive = (p: string) => {
     if (!pathname) return false;
@@ -159,6 +156,7 @@ function NavBarContent() {
     if (!p) return false;
     return (
       p === "/" ||
+      p.startsWith("/view-all") ||
       p.startsWith("/new-arrivals") ||
       p.startsWith("/best-sellers") ||
       p.startsWith("/product/")
@@ -166,7 +164,7 @@ function NavBarContent() {
   };
 
   const navLinkClass = (p: string, extra = "") =>
-    `text-gray-800  ${isActive(p) ? "text-[#111827] font-semibold underline decoration-pink-300 underline-offset-4 decoration-2" : ""} ${extra}`.trim();
+    `text-gray-800  ${isActive(p) ? "text-[#111827] font-semibold underline decoration-rose-300 underline-offset-4 decoration-2" : ""} ${extra}`.trim();
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -293,10 +291,16 @@ function NavBarContent() {
     return;
   }, [searchOpen]);
 
-  // Handle category filter
-  const handleCategoryClick = (category: string) => {
+  // Handle category filter.
+  //
+  // Categories are a *filter*, not a route: we only ever change the
+  // `category` query parameter on a product listing page. `targetPath` lets
+  // the side menu apply a category from anywhere (e.g. tapping "Jeans" under
+  // New Arrivals while sitting on the cart page) instead of requiring the
+  // shopper to navigate to that page first.
+  const handleCategoryClick = (category: string, targetPath?: string) => {
     setSelectedCategory(category);
-    const currentPath = pathname || "/";
+    const currentPath = targetPath || pathname || "/";
     const currentParams = new URLSearchParams(searchParams?.toString() || "");
 
     // Preserve branch parameter
@@ -309,14 +313,22 @@ function NavBarContent() {
       currentParams.set("currency", selectedCurrency);
     }
 
-    // Set category parameter
+    // Set category parameter. Note: URLSearchParams encodes values on
+    // serialisation, so the raw value is stored as-is — encoding it here too
+    // would double-encode and make multi-word categories such as
+    // "Short Skirt" arrive as "Short%20Skirt", matching no product.
     if (category === "all") {
-      currentParams.set("category", "all");
+      currentParams.delete("category");
     } else {
-      currentParams.set("category", encodeURIComponent(category));
+      currentParams.set("category", category);
     }
 
-    const newUrl = `${currentPath}?${currentParams.toString()}`;
+    // Changing the filter invalidates the current page position, so start the
+    // result set from the beginning again.
+    currentParams.delete("page");
+
+    const queryString = currentParams.toString();
+    const newUrl = queryString ? `${currentPath}?${queryString}` : currentPath;
 
     // Dispatch currency event to ensure it persists across navigation
     try {
@@ -481,15 +493,29 @@ function NavBarContent() {
       ) {
         setShowLanguageDropdown(false);
       }
+      if (searchDropdownRef.current || mobileSearchBarRef.current) {
+        const clickedInsideDesktopSearch =
+          searchDropdownRef.current?.contains(event.target as Node) ?? false;
+        const clickedInsideMobileSearch =
+          mobileSearchBarRef.current?.contains(event.target as Node) ?? false;
+        if (!clickedInsideDesktopSearch && !clickedInsideMobileSearch) {
+          setSearchOpen(false);
+        }
+      }
     };
 
-    if (showBranchDropdown || showCurrencyDropdown || showLanguageDropdown) {
+    if (
+      showBranchDropdown ||
+      showCurrencyDropdown ||
+      showLanguageDropdown ||
+      searchOpen
+    ) {
       document.addEventListener("mousedown", handleClickOutside);
     }
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
     };
-  }, [showBranchDropdown, showCurrencyDropdown, showLanguageDropdown]);
+  }, [showBranchDropdown, showCurrencyDropdown, showLanguageDropdown, searchOpen]);
 
   // Handle branch filter
   const handleBranchClick = (branchId: string) => {
@@ -565,7 +591,7 @@ function NavBarContent() {
   return (
     <>
       <nav
-        className={`sticky top-0 z-50 bg-white border-b border-gray-200 transition-shadow ${
+        className={`sticky top-0 z-50 bg-white border-b border-pink-200/70 transition-shadow ${
           scrolled ? "shadow-sm" : ""
         }`}
         aria-label="Main navigation"
@@ -577,7 +603,7 @@ function NavBarContent() {
             <button
               aria-label="Toggle menu"
               onClick={() => setMenuOpen((s) => !s)}
-              className="p-1 -ml-1 text-gray-700 md:hidden"
+              className="p-1 -ml-1 text-pink-600 hover:text-pink-700 transition-colors md:hidden"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -592,11 +618,11 @@ function NavBarContent() {
             </button>
 
             {/* Search icon with dropdown search box */}
-            <div className="relative">
+            <div className="relative" ref={searchDropdownRef}>
               <button
                 aria-label="Toggle search"
                 onClick={() => setSearchOpen((s) => !s)}
-                className="inline-flex text-gray-700 hover:text-gray-900 transition-colors"
+                className="inline-flex text-pink-600 hover:text-pink-700 transition-colors"
               >
                 <svg
                   className="h-5 w-5"
@@ -668,8 +694,8 @@ function NavBarContent() {
                 }}
                 className={`text-xs font-semibold tracking-widest uppercase transition-colors ${
                   isActive("/view-all")
-                    ? "text-gray-900"
-                    : "text-gray-500 hover:text-gray-900"
+                    ? "text-pink-700 underline decoration-pink-300 underline-offset-4 decoration-2"
+                    : "text-pink-600 hover:text-pink-700"
                 }`}
               >
                 Shop
@@ -678,8 +704,8 @@ function NavBarContent() {
                 href={buildUrlWithBranch("/new-arrivals")}
                 className={`text-xs font-semibold tracking-widest uppercase transition-colors ${
                   isActive("/new-arrivals")
-                    ? "text-gray-900"
-                    : "text-gray-500 hover:text-gray-900"
+                    ? "text-pink-700 underline decoration-pink-300 underline-offset-4 decoration-2"
+                    : "text-pink-600 hover:text-pink-700"
                 }`}
               >
                 {t("new_arrivals")}
@@ -688,8 +714,8 @@ function NavBarContent() {
                 href={buildUrlWithBranch("/best-sellers")}
                 className={`text-xs font-semibold tracking-widest uppercase transition-colors ${
                   isActive("/best-sellers")
-                    ? "text-gray-900"
-                    : "text-gray-500 hover:text-gray-900"
+                    ? "text-pink-700 underline decoration-pink-300 underline-offset-4 decoration-2"
+                    : "text-pink-600 hover:text-pink-700"
                 }`}
               >
                 {t("best_sellers")}
@@ -702,7 +728,7 @@ function NavBarContent() {
             href={buildUrlWithBranch("/")}
             className="flex items-center md:absolute md:left-1/2 md:-translate-x-1/2"
           >
-            <span className="text-lg md:text-2xl font-semibold tracking-[0.2em] uppercase text-gray-900">
+            <span className="text-lg md:text-2xl font-semibold tracking-[0.2em] uppercase text-transparent bg-clip-text bg-gray-900">
               {t("brand")}
             </span>
           </Link>
@@ -713,7 +739,7 @@ function NavBarContent() {
             <div className="hidden md:block relative" ref={branchDropdownRef}>
               <button
                 onClick={() => setShowBranchDropdown(!showBranchDropdown)}
-                className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors"
+                className="flex items-center gap-1 text-xs font-medium text-pink-600 hover:text-pink-700 transition-colors"
               >
                 <span>
                   {availableBranches.find((s) => s.id === selectedBranch)
@@ -760,7 +786,7 @@ function NavBarContent() {
             <div className="hidden md:block relative" ref={currencyDropdownRef}>
               <button
                 onClick={() => setShowCurrencyDropdown(!showCurrencyDropdown)}
-                className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors"
+                className="flex items-center gap-1 text-xs font-medium text-pink-600 hover:text-pink-700 transition-colors"
               >
                 <span>{selectedCurrency}</span>
                 <svg
@@ -811,7 +837,7 @@ function NavBarContent() {
             <div className="hidden md:block relative" ref={languageDropdownRef}>
               <button
                 onClick={() => setShowLanguageDropdown(!showLanguageDropdown)}
-                className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors"
+                className="flex items-center gap-1 text-xs font-medium text-pink-600 hover:text-pink-700 transition-colors"
               >
                 <span>{lang === "EN" ? "English" : "Myanmar"}</span>
                 <svg
@@ -867,7 +893,7 @@ function NavBarContent() {
                 user ? buildUrlWithBranch("/account/profile") : "/auth/login"
               }
               aria-label="Account"
-              className="text-gray-700 hover:text-gray-900 transition-colors"
+              className="text-pink-600 hover:text-pink-700 transition-colors"
             >
               <svg
                 className="h-5 w-5"
@@ -888,7 +914,7 @@ function NavBarContent() {
             <Link
               href={buildUrlWithBranch("/cart")}
               aria-label="Cart"
-              className="relative text-gray-700 hover:text-gray-900 transition-colors"
+              className="relative text-pink-600 hover:text-pink-700 transition-colors"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -906,7 +932,7 @@ function NavBarContent() {
                 <circle cx="17" cy="20" r="1.5" />
               </svg>
               {itemCount > 0 && (
-                <span className="absolute -right-2 -top-2 min-w-4 rounded-full bg-pink-500 px-1 text-center text-[10px] font-semibold text-white">
+                <span className="absolute -right-2 -top-2 min-w-4 rounded-full bg-rose-500 px-1 text-center text-[10px] font-semibold text-white">
                   {itemCount > 99 ? "99+" : itemCount}
                 </span>
               )}
@@ -955,8 +981,8 @@ function NavBarContent() {
                 href={buildUrlWithBranch("/")}
                 className={`flex items-center justify-between py-4 border-b border-gray-100 text-xl transition-colors ${
                   isActive("/")
-                    ? "text-pink-500"
-                    : "text-gray-900 hover:text-pink-500"
+                    ? "text-rose-500"
+                    : "text-gray-900 hover:text-rose-500"
                 }`}
                 onClick={() => setMenuOpen(false)}
               >
@@ -979,24 +1005,17 @@ function NavBarContent() {
               {/* View All with collapsible categories */}
               <div className="border-b border-gray-100">
                 <button
-                  onClick={() => {
-                    if (pathname !== "/view-all") {
-                      router.push(buildUrlWithBranch("/view-all"));
-                      setShowViewAllCategories(true);
-                      // Don't close menu - keep it open
-                    } else {
-                      setShowViewAllCategories(!showViewAllCategories);
-                    }
-                  }}
+                  onClick={() => setShowViewAllCategories((s) => !s)}
+                  aria-expanded={showViewAllCategories}
                   className={`flex items-center justify-between w-full py-4 text-xl transition-colors ${
                     isActive("/view-all")
-                      ? "text-pink-500"
-                      : "text-gray-900 hover:text-pink-500"
+                      ? "text-rose-500"
+                      : "text-gray-900 hover:text-rose-500"
                   }`}
                 >
                   <span>Products</span>
                   <svg
-                    className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform duration-200 ${pathname === "/view-all" && showViewAllCategories ? "rotate-90" : ""}`}
+                    className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform duration-200 ${showViewAllCategories ? "rotate-90" : ""}`}
                     fill="none"
                     stroke="currentColor"
                     strokeWidth={1.5}
@@ -1010,17 +1029,19 @@ function NavBarContent() {
                   </svg>
                 </button>
 
-                {/* Category Filter for View All */}
-                {pathname === "/view-all" && showViewAllCategories && (
+                {/* Category filters for Products. Selecting one applies the
+                    `category` filter on /view-all from wherever the shopper
+                    currently is — categories are filters, not their own pages. */}
+                {showViewAllCategories && (
                   <div className="pb-3 space-y-0.5">
                     <button
                       onClick={() => {
-                        handleCategoryClick("all");
+                        handleCategoryClick("all", "/view-all");
                         setMenuOpen(false);
                       }}
                       className={`block w-full text-left py-2 text-sm transition-colors ${
-                        selectedCategory === "all"
-                          ? "text-pink-600 font-medium"
+                        isActive("/view-all") && selectedCategory === "all"
+                          ? "text-rose-600 font-medium"
                           : "text-gray-500 hover:text-gray-800"
                       }`}
                     >
@@ -1030,11 +1051,12 @@ function NavBarContent() {
                       <button
                         key={cat}
                         onClick={() => {
-                          handleCategoryClick(cat);
+                          handleCategoryClick(cat, "/view-all");
+                          setMenuOpen(false);
                         }}
                         className={`block w-full text-left py-2 text-sm transition-colors ${
-                          selectedCategory === cat
-                            ? "text-pink-600 font-medium"
+                          isActive("/view-all") && selectedCategory === cat
+                            ? "text-rose-600 font-medium"
                             : "text-gray-500 hover:text-gray-800"
                         }`}
                       >
@@ -1048,24 +1070,17 @@ function NavBarContent() {
               {/* New Arrivals with collapsible categories */}
               <div className="border-b border-gray-100">
                 <button
-                  onClick={() => {
-                    if (pathname !== "/new-arrivals") {
-                      router.push(buildUrlWithBranch("/new-arrivals"));
-                      setShowNewArrivalsCategories(true);
-                      // Don't close menu - keep it open
-                    } else {
-                      setShowNewArrivalsCategories(!showNewArrivalsCategories);
-                    }
-                  }}
+                  onClick={() => setShowNewArrivalsCategories((s) => !s)}
+                  aria-expanded={showNewArrivalsCategories}
                   className={`flex items-center justify-between w-full py-4 text-xl transition-colors ${
                     isActive("/new-arrivals")
-                      ? "text-pink-500"
-                      : "text-gray-900 hover:text-pink-500"
+                      ? "text-rose-500"
+                      : "text-gray-900 hover:text-rose-500"
                   }`}
                 >
                   <span>{t("new_arrivals")}</span>
                   <svg
-                    className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform duration-200 ${pathname === "/new-arrivals" && showNewArrivalsCategories ? "rotate-90" : ""}`}
+                    className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform duration-200 ${showNewArrivalsCategories ? "rotate-90" : ""}`}
                     fill="none"
                     stroke="currentColor"
                     strokeWidth={1.5}
@@ -1079,17 +1094,17 @@ function NavBarContent() {
                   </svg>
                 </button>
 
-                {/* Category Filter for New Arrivals */}
-                {pathname === "/new-arrivals" && showNewArrivalsCategories && (
+                {/* Category filters for New Arrivals */}
+                {showNewArrivalsCategories && (
                   <div className="pb-3 space-y-0.5">
                     <button
                       onClick={() => {
-                        handleCategoryClick("all");
+                        handleCategoryClick("all", "/new-arrivals");
                         setMenuOpen(false);
                       }}
                       className={`block w-full text-left py-2 text-sm transition-colors ${
-                        selectedCategory === "all"
-                          ? "text-pink-600 font-medium"
+                        isActive("/new-arrivals") && selectedCategory === "all"
+                          ? "text-rose-600 font-medium"
                           : "text-gray-500 hover:text-gray-800"
                       }`}
                     >
@@ -1099,11 +1114,12 @@ function NavBarContent() {
                       <button
                         key={cat}
                         onClick={() => {
-                          handleCategoryClick(cat);
+                          handleCategoryClick(cat, "/new-arrivals");
+                          setMenuOpen(false);
                         }}
                         className={`block w-full text-left py-2 text-sm transition-colors ${
-                          selectedCategory === cat
-                            ? "text-pink-600 font-medium"
+                          isActive("/new-arrivals") && selectedCategory === cat
+                            ? "text-rose-600 font-medium"
                             : "text-gray-500 hover:text-gray-800"
                         }`}
                       >
@@ -1117,24 +1133,17 @@ function NavBarContent() {
               {/* Best Sellers with collapsible categories */}
               <div className="border-b border-gray-100">
                 <button
-                  onClick={() => {
-                    if (pathname !== "/best-sellers") {
-                      router.push(buildUrlWithBranch("/best-sellers"));
-                      setShowBestSellersCategories(true);
-                      // Don't close menu - keep it open
-                    } else {
-                      setShowBestSellersCategories(!showBestSellersCategories);
-                    }
-                  }}
+                  onClick={() => setShowBestSellersCategories((s) => !s)}
+                  aria-expanded={showBestSellersCategories}
                   className={`flex items-center justify-between w-full py-4 text-xl transition-colors ${
                     isActive("/best-sellers")
-                      ? "text-pink-500"
-                      : "text-gray-900 hover:text-pink-500"
+                      ? "text-rose-500"
+                      : "text-gray-900 hover:text-rose-500"
                   }`}
                 >
                   <span>{t("best_sellers")}</span>
                   <svg
-                    className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform duration-200 ${pathname === "/best-sellers" && showBestSellersCategories ? "rotate-90" : ""}`}
+                    className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform duration-200 ${showBestSellersCategories ? "rotate-90" : ""}`}
                     fill="none"
                     stroke="currentColor"
                     strokeWidth={1.5}
@@ -1148,17 +1157,17 @@ function NavBarContent() {
                   </svg>
                 </button>
 
-                {/* Category Filter for Best Sellers */}
-                {pathname === "/best-sellers" && showBestSellersCategories && (
+                {/* Category filters for Best Sellers */}
+                {showBestSellersCategories && (
                   <div className="pb-3 space-y-0.5">
                     <button
                       onClick={() => {
-                        handleCategoryClick("all");
+                        handleCategoryClick("all", "/best-sellers");
                         setMenuOpen(false);
                       }}
                       className={`block w-full text-left py-2 text-sm transition-colors ${
-                        selectedCategory === "all"
-                          ? "text-pink-600 font-medium"
+                        isActive("/best-sellers") && selectedCategory === "all"
+                          ? "text-rose-600 font-medium"
                           : "text-gray-500 hover:text-gray-800"
                       }`}
                     >
@@ -1168,11 +1177,12 @@ function NavBarContent() {
                       <button
                         key={cat}
                         onClick={() => {
-                          handleCategoryClick(cat);
+                          handleCategoryClick(cat, "/best-sellers");
+                          setMenuOpen(false);
                         }}
                         className={`block w-full text-left py-2 text-sm transition-colors ${
-                          selectedCategory === cat
-                            ? "text-pink-600 font-medium"
+                          isActive("/best-sellers") && selectedCategory === cat
+                            ? "text-rose-600 font-medium"
                             : "text-gray-500 hover:text-gray-800"
                         }`}
                       >
@@ -1187,15 +1197,15 @@ function NavBarContent() {
                 href={buildUrlWithBranch("/cart")}
                 className={`flex items-center justify-between py-4 border-b border-gray-100 text-xl transition-colors ${
                   isActive("/cart")
-                    ? "text-pink-500"
-                    : "text-gray-900 hover:text-pink-500"
+                    ? "text-rose-500"
+                    : "text-gray-900 hover:text-rose-500"
                 }`}
                 onClick={() => setMenuOpen(false)}
               >
                 <span className="flex items-center gap-2">
                   Cart
                   {itemCount > 0 && (
-                    <span className="bg-pink-500 text-white text-xs font-semibold px-2 py-0.5 rounded-full">
+                    <span className="bg-rose-500 text-white text-xs font-semibold px-2 py-0.5 rounded-full">
                       {itemCount}
                     </span>
                   )}
@@ -1219,15 +1229,15 @@ function NavBarContent() {
                 href={buildUrlWithBranch("/membership")}
                 className={`flex items-center justify-between py-4 border-b border-gray-100 text-xl transition-colors ${
                   isActive("/membership")
-                    ? "text-pink-500"
-                    : "text-gray-900 hover:text-pink-500"
+                    ? "text-rose-500"
+                    : "text-gray-900 hover:text-rose-500"
                 }`}
                 onClick={() => setMenuOpen(false)}
               >
                 <span className="flex items-center gap-2">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  {/* <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" />
-                  </svg>
+                  </svg> */}
                   {user && !isMember && !membershipLoading ? "Join Membership" : "Membership & Rewards"}
                 </span>
                 <svg
@@ -1253,35 +1263,35 @@ function NavBarContent() {
                   <Link
                     href={buildUrlWithBranch("/account/profile")}
                     onClick={() => setMenuOpen(false)}
-                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                    className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     My Account
                   </Link>
                   <Link
                     href={buildUrlWithBranch("/membership")}
                     onClick={() => setMenuOpen(false)}
-                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                    className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     {!isMember && !membershipLoading ? "Join Membership" : "Membership & Rewards"}
                   </Link>
                   <Link
                     href={buildUrlWithBranch("/account/purchases")}
                     onClick={() => setMenuOpen(false)}
-                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                    className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     Purchase History
                   </Link>
                   <Link
                     href={buildUrlWithBranch("/account/notifications")}
                     onClick={() => setMenuOpen(false)}
-                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                    className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     Notifications
                   </Link>
                   <Link
                     href={buildUrlWithBranch("/terms-and-conditions")}
                     onClick={() => setMenuOpen(false)}
-                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                    className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     {t("terms")}
                   </Link>
@@ -1297,14 +1307,14 @@ function NavBarContent() {
                   <Link
                     href="/auth/login"
                     onClick={() => setMenuOpen(false)}
-                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                    className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     Login
                   </Link>
                   <Link
                     href="/auth/register"
                     onClick={() => setMenuOpen(false)}
-                    className="block text-sm text-gray-600 hover:text-pink-600 transition-colors"
+                    className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     Register
                   </Link>
@@ -1316,7 +1326,7 @@ function NavBarContent() {
                   onClick={() => setLanguage("EN")}
                   className={`text-sm transition-colors ${
                     lang === "EN"
-                      ? "text-pink-600 font-semibold"
+                      ? "text-rose-600 font-semibold"
                       : "text-gray-500 hover:text-gray-800"
                   }`}
                 >
@@ -1327,7 +1337,7 @@ function NavBarContent() {
                   onClick={() => setLanguage("MM")}
                   className={`text-sm transition-colors ${
                     lang === "MM"
-                      ? "text-pink-600 font-semibold"
+                      ? "text-rose-600 font-semibold"
                       : "text-gray-500 hover:text-gray-800"
                   }`}
                 >
@@ -1340,7 +1350,10 @@ function NavBarContent() {
 
         {/* Mobile search bar */}
         {searchOpen && (
-          <div className="md:hidden border-t bg-white px-4 py-3">
+          <div
+            className="md:hidden border-t border-pink-200/70 bg-white px-4 py-3"
+            ref={mobileSearchBarRef}
+          >
             <div className="flex items-center space-x-2">
               <input
                 autoFocus
@@ -1353,16 +1366,16 @@ function NavBarContent() {
                   }
                 }}
                 placeholder={t("search_placeholder")}
-                className="w-full border rounded-full border-gray-300 px-3 py-2 text-sm outline-none"
+                className="w-full border rounded-full border-pink-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder-gray-400 outline-none"
               />
               <button
                 aria-label="Close search"
                 onClick={() => setSearchOpen(false)}
-                className="p-2 rounded-md hover:bg-gray-100"
+                className="p-2 rounded-md hover:bg-pink-100"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  className="h-5 w-5 text-gray-700"
+                  className="h-5 w-5 text-pink-600"
                   viewBox="0 0 20 20"
                   fill="currentColor"
                 >
@@ -1383,7 +1396,7 @@ function NavBarContent() {
 
 export default function NavBar() {
   return (
-    <Suspense fallback={<div className="h-16 bg-white" />}>
+    <Suspense fallback={<div className="h-16 bg-[#F8EDF1]" />}>
       <NavBarContent />
     </Suspense>
   );

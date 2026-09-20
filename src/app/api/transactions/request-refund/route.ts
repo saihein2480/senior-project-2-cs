@@ -193,6 +193,26 @@ export async function POST(request: NextRequest) {
       updatedAt: FieldValue.serverTimestamp(),
     });
 
+    // Create an owner-facing notification so it shows up in the POS
+    // notification bell/page and routes to the return requests page.
+    try {
+      await adminDb.collection("notifications").add({
+        type: "refund_request",
+        title: "Return Request",
+        message: `Customer requested a return for order #${transactionId}`,
+        link: "/owner/requests/refunds",
+        metadata: {
+          transactionId: transactionDoc.id,
+          orderId: transactionId,
+        },
+        read: false,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    } catch (notifError) {
+      console.error("Error creating owner notification for refund request:", notifError);
+      // Don't fail the request if the notification fails to be created
+    }
+
     return NextResponse.json({
       success: true,
       message: "Refund request submitted successfully. Please wait for owner approval.",

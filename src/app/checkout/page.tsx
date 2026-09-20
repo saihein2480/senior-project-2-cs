@@ -616,7 +616,7 @@ export default function CheckoutPage() {
         <p className="text-gray-700">No checkout item selected.</p>
         <Link
           href="/cart"
-          className="mt-3 inline-block text-pink-600 hover:text-pink-700"
+          className="mt-3 inline-block text-rose-600 hover:text-rose-700"
         >
           Go to Cart
         </Link>
@@ -650,7 +650,7 @@ export default function CheckoutPage() {
             onClick={() => setPaymentMethod("scan")}
             className={`p-4 border-2 rounded-xl transition-all ${
               paymentMethod === "scan"
-                ? "border-pink-500 bg-pink-50"
+                ? "border-rose-500 bg-rose-50"
                 : "border-gray-200 hover:border-gray-300"
             }`}
           >
@@ -658,7 +658,7 @@ export default function CheckoutPage() {
               <div
                 className={`h-10 w-10 rounded-full flex items-center justify-center ${
                   paymentMethod === "scan"
-                    ? "bg-pink-500 text-white"
+                    ? "bg-gradient-to-r from-rose-500 to-pink-500 text-white"
                     : "bg-gray-100 text-gray-600"
                 }`}
               >
@@ -690,7 +690,7 @@ export default function CheckoutPage() {
             onClick={() => setPaymentMethod("cod")}
             className={`p-4 border-2 rounded-xl transition-all ${
               paymentMethod === "cod"
-                ? "border-pink-500 bg-pink-50"
+                ? "border-rose-500 bg-rose-50"
                 : "border-gray-200 hover:border-gray-300"
             }`}
           >
@@ -698,7 +698,7 @@ export default function CheckoutPage() {
               <div
                 className={`h-10 w-10 rounded-full flex items-center justify-center ${
                   paymentMethod === "cod"
-                    ? "bg-pink-500 text-white"
+                    ? "bg-gradient-to-r from-rose-500 to-pink-500 text-white"
                     : "bg-gray-100 text-gray-600"
                 }`}
               >
@@ -873,7 +873,7 @@ export default function CheckoutPage() {
               No coupons available.{" "}
               <Link
                 href="/membership"
-                className="font-medium text-pink-600 hover:text-pink-700"
+                className="font-medium text-rose-600 hover:text-rose-700"
               >
                 View your membership
               </Link>
@@ -950,7 +950,7 @@ export default function CheckoutPage() {
           <button
             onClick={createPayment}
             disabled={submitting || !user || !isProfileComplete || !hasTaxRate}
-            className="rounded-md bg-pink-500 px-5 py-2 text-white hover:bg-pink-600 disabled:opacity-50"
+            className="rounded-md bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 px-5 py-2 text-white disabled:opacity-50"
           >
             {submitting
               ? paymentMethod === "cod"

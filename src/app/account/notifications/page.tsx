@@ -357,12 +357,12 @@ export default function NotificationsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-pink-50 via-rose-50 to-white">
+    <div className="min-h-screen bg-gradient-to-br from-rose-50 via-rose-50 to-white">
       <div className="mx-auto max-w-4xl px-4 py-8">
         {/* Header */}
         <div className="mb-6">
           <div className="flex items-center gap-3 mb-2">
-            <div className="rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 p-3 shadow-lg">
+            <div className="rounded-xl bg-gradient-to-r from-rose-500 to-pink-500 p-3 shadow-lg">
               <BellIcon className="text-white" size={28} />
             </div>
             <div>
@@ -380,8 +380,8 @@ export default function NotificationsPage() {
             onClick={() => setFilter("all")}
             className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
               filter === "all"
-                ? "bg-gradient-to-r from-pink-500 to-rose-500 text-white shadow-lg"
-                : "bg-white text-gray-700 border border-gray-200 hover:bg-pink-50"
+                ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-lg"
+                : "bg-white text-gray-700 border border-gray-200 hover:bg-rose-50"
             }`}
           >
             All ({notifications.length})
@@ -390,8 +390,8 @@ export default function NotificationsPage() {
             onClick={() => setFilter("unread")}
             className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
               filter === "unread"
-                ? "bg-gradient-to-r from-pink-500 to-rose-500 text-white shadow-lg"
-                : "bg-white text-gray-700 border border-gray-200 hover:bg-pink-50"
+                ? "bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-lg"
+                : "bg-white text-gray-700 border border-gray-200 hover:bg-rose-50"
             }`}
           >
             Unread ({unreadCount})
@@ -400,7 +400,7 @@ export default function NotificationsPage() {
 
         {/* Notifications List */}
         {filteredNotifications.length === 0 ? (
-          <div className="rounded-2xl border border-pink-100 bg-white p-12 text-center shadow-sm">
+          <div className="rounded-2xl border border-rose-100 bg-white p-12 text-center shadow-sm">
             <BellIcon className="mx-auto mb-4 text-gray-300" size={64} />
             <h3 className="text-lg font-semibold text-gray-900 mb-2">No notifications yet</h3>
             <p className="text-sm text-gray-600">
@@ -446,7 +446,7 @@ export default function NotificationsPage() {
                   </div>
                   {!notification.read && (
                     <div className="flex-shrink-0">
-                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-pink-500"></span>
+                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-rose-500"></span>
                     </div>
                   )}
                 </div>
@@ -457,7 +457,7 @@ export default function NotificationsPage() {
 
         {/* Summary Card */}
         {notifications.length > 0 && (
-          <div className="mt-6 rounded-2xl border border-pink-100 bg-gradient-to-br from-white to-pink-50/30 p-6 shadow-sm">
+          <div className="mt-6 rounded-2xl border border-rose-100 bg-gradient-to-br from-white to-rose-50/30 p-6 shadow-sm">
             <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
               <CheckCircleIcon className="text-green-600" size={20} />
               Summary

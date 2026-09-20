@@ -2,8 +2,10 @@
 import React, { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import ProductsList from "../components/ProductsList";
 import { useNewItems } from "../hooks/useNewItems";
+import { useTopSelling } from "../hooks/useTopSelling";
 
 // Decorative shapes component
 function DecorativeShapes() {
@@ -19,10 +21,15 @@ function DecorativeShapes() {
   );
 }
 
-function HeroSection() {
+function HeroSection({ branch }: { branch?: string }) {
   const [current, setCurrent] = useState(0);
   const [paused, setPaused] = useState(false);
-  const { data: items = [], isLoading: loading } = useNewItems(4);
+  const { data: items = [], isLoading: loading } = useNewItems(4, branch);
+
+  // Switching branch swaps the whole item set, which can leave `current`
+  // pointing past the end of a shorter list. Clamp while rendering instead of
+  // resetting in an effect, so there's no extra render pass.
+  const safeIndex = items.length > 0 ? Math.min(current, items.length - 1) : 0;
 
   useEffect(() => {
     if (!items.length) return;
@@ -33,7 +40,7 @@ function HeroSection() {
     return () => clearInterval(id);
   }, [items, paused]);
 
-  if (loading || !items.length) return null;
+  if (loading) return null;
 
   return (
     <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-rose-50 via-pink-50 to-white p-8 md:p-16 shadow-xl border border-pink-100">
@@ -53,7 +60,7 @@ function HeroSection() {
           </div>
 
           <p className="text-gray-700 text-base md:text-lg leading-relaxed max-w-md">
-            Premium fabrics • Latest trends • Affordable luxury • Fast delivery
+            Shop your style • Latest trends • Affordable luxury • Fast delivery
           </p>
 
           <div className="space-y-3 text-sm md:text-base text-gray-600">
@@ -67,7 +74,7 @@ function HeroSection() {
             </div>
             <div className="flex items-center gap-3">
               <div className="w-2 h-2 rounded-full bg-gradient-to-r from-rose-500 to-pink-500"></div>
-              <span className="font-medium">Exclusive Member Discounts</span>
+              <span className="font-medium">Exclusive Member Benefits</span>
             </div>
           </div>
 
@@ -81,15 +88,18 @@ function HeroSection() {
           </div>
         </div>
 
-        {/* Right: Product Image Carousel */}
+        {/* Right: Product Image Carousel. Rendered only when the selected
+            branch actually has new items — the surrounding hero copy and CTA
+            stay visible either way. */}
+        {items.length > 0 && (
         <div className="relative h-80 md:h-96">
           <Image
             src={
-              items[current]?.image ||
-              items[current]?.groupImage ||
+              items[safeIndex]?.image ||
+              items[safeIndex]?.groupImage ||
               "/fallback.png"
             }
-            alt={items[current]?.name || "Product"}
+            alt={items[safeIndex]?.name || "Product"}
             fill
             className="object-contain drop-shadow-2xl"
             priority
@@ -102,9 +112,9 @@ function HeroSection() {
                 key={idx}
                 onClick={() => setCurrent(idx)}
                 className={`transition-all duration-300 rounded-full ${
-                  idx === current
+                  idx === safeIndex
                     ? "bg-gradient-to-r from-rose-500 to-pink-500 w-8 h-3 shadow-md"
-                    : "bg-gray-300 hover:bg-pink-300 w-3 h-3"
+                    : "bg-gray-300 hover:bg-rose-300 w-3 h-3"
                 }`}
               />
             ))}
@@ -113,34 +123,57 @@ function HeroSection() {
           {/* Navigation arrows */}
           <button
             onClick={() =>
-              setCurrent((c) => (c === 0 ? items.length - 1 : c - 1))
+              setCurrent(safeIndex === 0 ? items.length - 1 : safeIndex - 1)
             }
-            className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-6 bg-white hover:bg-gradient-to-r hover:from-rose-500 hover:to-pink-500 text-gray-700 hover:text-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all duration-300 border border-pink-200"
+            className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-6 bg-white hover:bg-gradient-to-r hover:from-rose-500 hover:to-pink-500 text-gray-700 hover:text-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all duration-300 border border-rose-200"
           >
             ‹
           </button>
           <button
             onClick={() =>
-              setCurrent((c) => (c === items.length - 1 ? 0 : c + 1))
+              setCurrent(safeIndex === items.length - 1 ? 0 : safeIndex + 1)
             }
-            className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-6 bg-white hover:bg-gradient-to-r hover:from-rose-500 hover:to-pink-500 text-gray-700 hover:text-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all duration-300 border border-pink-200"
+            className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-6 bg-white hover:bg-gradient-to-r hover:from-rose-500 hover:to-pink-500 text-gray-700 hover:text-white rounded-full p-3 shadow-lg hover:shadow-xl transition-all duration-300 border border-rose-200"
           >
             ›
           </button>
         </div>
+        )}
       </div>
     </div>
   );
 }
 
 export default function Home() {
+  const searchParams = useSearchParams();
+  const branch = searchParams?.get("branch") || "";
+
+  // Fetch top-selling products for the best sellers section
+  const { topSelling, loading: topSellingLoading } = useTopSelling({
+    branch: branch || undefined,
+    limit: 20,
+    autoLoad: true,
+  });
+
+  const topSellingProductIds = topSelling.map(p => p.productId);
+
+  // productId -> units sold, so the cards can show "N sold"
+  const topSellingQuantities = React.useMemo(
+    () =>
+      topSelling.reduce<Record<string, number>>((acc, p) => {
+        acc[p.productId] = p.quantitySold;
+        return acc;
+      }, {}),
+    [topSelling],
+  );
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-white via-pink-50/30 to-white font-sans text-gray-900">
       {/* Main Content */}
       <div className="py-8 md:py-12">
         <div className="mx-auto max-w-6xl px-4 sm:px-6 md:px-8">
           {/* Hero Section */}
-          <HeroSection />
+          <HeroSection branch={branch} />
         </div>
 
         {/* New Arrivals Section */}
@@ -155,7 +188,7 @@ export default function Home() {
             <div className="flex items-center justify-center gap-4 md:gap-6">
               <div className="h-px w-12 md:w-16 bg-gray-300" />
               <svg
-                className="w-5 h-5 md:w-6 md:h-6 text-pink-400 flex-shrink-0"
+                className="w-5 h-5 md:w-6 md:h-6 text-rose-500 flex-shrink-0"
                 fill="currentColor"
                 viewBox="0 0 64 64"
               >
@@ -190,7 +223,7 @@ export default function Home() {
             <div className="flex items-center justify-center gap-4 md:gap-6">
               <div className="h-px w-12 md:w-16 bg-gray-300" />
               <svg
-                className="w-5 h-5 md:w-6 md:h-6 text-pink-400 flex-shrink-0"
+                className="w-5 h-5 md:w-6 md:h-6 text-rose-500 flex-shrink-0"
                 fill="currentColor"
                 viewBox="0 0 64 64"
               >
@@ -210,6 +243,10 @@ export default function Home() {
             showLoadMoreButton={true}
             loadMoreLink="/best-sellers"
             hideSortBy={true}
+            topSellingIds={topSellingProductIds}
+            topSellingQuantities={topSellingQuantities}
+            sortByTopSelling={true}
+            topSellingLoading={topSellingLoading}
           />
         </section>
       </div>

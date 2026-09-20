@@ -343,6 +343,27 @@ export async function POST(req: Request) {
             await updateCustomerStats(customerUid, orderTotal, 1);
           }
         }
+
+        // Create an owner-facing notification so it shows up in the POS
+        // notification bell/page and routes to the online orders page.
+        try {
+          const customerName =
+            orderDoc.exists ? orderDoc.data()?.customer?.displayName || orderDoc.data()?.customer?.email : undefined;
+          await adminDb.collection("notifications").add({
+            type: "online_order",
+            title: "New Online Order",
+            message: `Order #${payload.orderId} has been paid by ${customerName || "a customer"}`,
+            link: "/owner/sales/online-orders",
+            metadata: {
+              orderId: payload.orderId,
+            },
+            read: false,
+            createdAt: new Date().toISOString(),
+          });
+        } catch (notifError) {
+          console.error("Error creating owner notification for new online order:", notifError);
+          // Don't fail the webhook if the notification fails to be created
+        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to sync inventory";

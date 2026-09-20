@@ -1,149 +1,191 @@
 "use client";
 
 import React from "react";
+import Image from "next/image";
 import { useLanguage } from "../contexts/LanguageContext";
+
+/** Pink map-pin used beside each branch name. */
+function PinIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      className="h-5 w-5 text-pink-600 flex-shrink-0"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+    >
+      <path d="M12 2a7 7 0 00-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 00-7-7zm0 9.5A2.5 2.5 0 1112 6.5a2.5 2.5 0 010 5z" />
+    </svg>
+  );
+}
+
+/** Pink handset used beside each phone number. */
+function PhoneIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      className="h-4 w-4 text-pink-600 flex-shrink-0"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+    >
+      <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.36 11.36 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1c0 1.24.2 2.45.57 3.57a1 1 0 01-.25 1.02l-2.2 2.2z" />
+    </svg>
+  );
+}
 
 export default function Footer() {
   const { t } = useLanguage();
+
   return (
-    <footer className="w-full bg-pink-600 mt-8 text-white">
-      <div className="max-w-6xl mx-auto px-4 py-10">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+    <footer className="relative w-full mt-8 overflow-hidden bg-[#F8EDF1]">
+      <div className="max-w-6xl mx-auto px-6 pt-12 pb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_1fr_auto] gap-10 lg:gap-8 items-start">
+          {/* Shan Yoma */}
           <div>
-            <h4 className="font-semibold text-white text-lg mb-2">
+            <h4 className="flex items-center gap-2 font-bold text-gray-900 text-lg mb-3">
+              <PinIcon />
               {t("contact_shan_yoma")}
             </h4>
-            <p className="text-md flex items-start gap-2 text-gray-100">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-4 w-4 text-cyan-300 flex-shrink-0"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="1.5"
-                  d="M21 10c0 6-9 13-9 13S3 16 3 10a9 9 0 1118 0z"
-                />
-              </svg>
-              <span className="text-gray-100">{t("address_shan")}</span>
+            <p className="text-sm text-gray-500 leading-relaxed mb-4">
+              {t("address_shan")}
             </p>
-            <p className="mt-3 text-md space-y-2 text-gray-100">
+            <div className="space-y-2">
               <a
                 href={`tel:${t("phone1")}`}
-                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
+                className="flex items-center gap-3 text-sm font-medium text-pink-600 hover:text-pink-700 transition-colors"
               >
+                <PhoneIcon />
                 {t("phone1")}
               </a>
               <a
                 href={`tel:${t("phone2")}`}
-                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
+                className="flex items-center gap-3 text-sm font-medium text-pink-600 hover:text-pink-700 transition-colors"
               >
+                <PhoneIcon />
                 {t("phone2")}
               </a>
-            </p>
+            </div>
           </div>
 
+          {/* Nitchin Pagoda */}
           <div>
-            <h4 className="font-semibold text-white text-lg mb-2">
+            <h4 className="flex items-center gap-2 font-bold text-gray-900 text-lg mb-3">
+              <PinIcon />
               {t("contact_nitchin")}
             </h4>
-            <p className="text-md flex items-start gap-2 text-gray-100">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-4 w-4 text-cyan-300 flex-shrink-0"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="1.5"
-                  d="M21 10c0 6-9 13-9 13S3 16 3 10a9 9 0 1118 0z"
-                />
-              </svg>
-              <span className="text-gray-100">{t("address_nitchin")}</span>
+            <p className="text-sm text-gray-500 leading-relaxed mb-4">
+              {t("address_nitchin")}
             </p>
-            <p className="mt-3 text-md space-y-2 text-gray-100">
+            <div className="space-y-2">
               <a
                 href={`tel:${t("phone1")}`}
-                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
+                className="flex items-center gap-3 text-sm font-medium text-pink-600 hover:text-pink-700 transition-colors"
               >
+                <PhoneIcon />
                 {t("phone1")}
               </a>
               <a
                 href={`tel:${t("phone2")}`}
-                className="text-cyan-300 hover:text-cyan-200 flex items-center gap-2 block transition-colors"
+                className="flex items-center gap-3 text-sm font-medium text-pink-600 hover:text-pink-700 transition-colors"
               >
+                <PhoneIcon />
                 {t("phone2")}
               </a>
-            </p>
+            </div>
           </div>
 
+          {/* Legal */}
           <div>
-            <h4 className="font-semibold text-white text-lg mb-2">
+            <h4 className="flex items-center gap-2 font-bold text-gray-900 text-lg mb-3">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-5 w-5 text-pink-600 flex-shrink-0"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.8}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z"
+                />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 13h6M9 17h4" />
+              </svg>
               {t("legal")}
             </h4>
-            <p className="text-md mb-2">
-              <a href="/terms-and-conditions" className="text-cyan-300 hover:text-cyan-200 transition-colors">
-                {t("terms")}
-              </a>
-            </p>
-            <div className="mt-4 flex items-center space-x-3">
+            <a
+              href="/terms-and-conditions"
+              className="text-sm font-medium text-pink-600 hover:text-pink-700 transition-colors"
+            >
+              {t("terms")}
+            </a>
+            <div className="mt-4 flex items-center gap-3">
               <a
                 href="#"
                 aria-label="Instagram"
-                className="text-white hover:text-cyan-300 transition-colors"
+                className="w-9 h-9 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition-colors"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  className="h-5 w-5"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
+                  strokeWidth={2}
                 >
-                  <rect x="3" y="3" width="18" height="18" rx="4" ry="4" />
-                  <path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z" />
+                  <rect x="3" y="3" width="18" height="18" rx="5" ry="5" />
+                  <circle cx="12" cy="12" r="3.5" />
                   <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
                 </svg>
               </a>
               <a
                 href="#"
                 aria-label="Facebook"
-                className="text-white hover:text-cyan-300 transition-colors"
+                className="w-9 h-9 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition-colors"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  className="h-5 w-5"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="currentColor"
                 >
-                  <path d="M22 12a10 10 0 10-11.5 9.9v-7h-2.2V12h2.2V9.8c0-2.2 1.3-3.4 3.3-3.4.95 0 1.95.17 1.95.17v2.1h-1.07c-1.05 0-1.37.65-1.37 1.32V12h2.34l-.37 2.9h-1.97v7A10 10 0 0022 12z" />
+                  <path d="M13.5 21v-8h2.6l.4-3h-3V8.2c0-.8.3-1.3 1.4-1.3H16.6V4.2S15.6 4 14.6 4c-2 0-3.4 1.2-3.4 3.5V10H8.6v3h2.6v8h2.3z" />
                 </svg>
               </a>
               <a
                 href="#"
                 aria-label="TikTok"
-                className="text-white hover:text-cyan-300 transition-colors"
+                className="w-9 h-9 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition-colors"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  className="h-5 w-5"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="currentColor"
                 >
-                  <path d="M9 8v8a4 4 0 104 4V9h2a4 4 0 10-2-1.732V8h-4z" />
+                  <path d="M16.6 5.8a4.3 4.3 0 01-1-2.8h-2.8v11.1a2.3 2.3 0 11-1.6-2.2V9.1a5 5 0 101.6 3.7V8.2a6 6 0 003.8 1.3V6.7a3.4 3.4 0 01-.9-.9z" />
                 </svg>
               </a>
             </div>
           </div>
+
+          {/* Boutique illustration */}
+          <div className="flex justify-center lg:justify-end lg:-mt-16">
+            <Image
+              src="/pink-boutique.png"
+              alt="Pink Boutique"
+              width={230}
+              height={230}
+              className="object-contain select-none pointer-events-none"
+            />
+          </div>
         </div>
 
-        <div className="mt-8 border-t border-teal-500 pt-6">
-          <div className="text-center text-md text-gray-200">
+        <div className="mt-2 border-t border-pink-200/70 pt-5">
+          <div className="text-center text-sm text-gray-500">
             {t("copyright")}
           </div>
         </div>

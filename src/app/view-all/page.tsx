@@ -37,7 +37,7 @@ export default function ViewAllPage() {
             <div className="flex items-center justify-center gap-4 md:gap-6">
               <div className="h-px w-12 md:w-16 bg-gray-300" />
               <svg
-                className="w-5 h-5 md:w-6 md:h-6 text-pink-400 flex-shrink-0"
+                className="w-5 h-5 md:w-6 md:h-6 text-rose-500 flex-shrink-0"
                 fill="currentColor"
                 viewBox="0 0 64 64"
               >
@@ -57,7 +57,7 @@ export default function ViewAllPage() {
       <main className="w-full">
         <ProductsList
           showOnlyNew={false}
-          itemsPerPageDefault={40}
+          itemsPerPageDefault={18}
           hideFilters={true}
           showPriceFilter={true}
         />

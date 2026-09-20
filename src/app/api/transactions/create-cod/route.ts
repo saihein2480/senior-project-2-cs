@@ -221,6 +221,25 @@ export async function POST(request: NextRequest) {
       await syncOnlineCustomerToPos(customer.uid);
     }
 
+    // Create an owner-facing notification so it shows up in the POS
+    // notification bell/page and routes to the online orders page.
+    try {
+      await adminDb.collection("notifications").add({
+        type: "online_order",
+        title: "New Online Order",
+        message: `Order #${orderId} (COD) has been placed by ${customer.displayName || customer.email || "a customer"}`,
+        link: "/owner/sales/online-orders",
+        metadata: {
+          orderId,
+        },
+        read: false,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    } catch (notifError) {
+      console.error("Error creating owner notification for new COD order:", notifError);
+      // Don't fail order creation if the notification fails to be created
+    }
+
     console.log(
       "COD transaction and online order created successfully:",
       transactionId,

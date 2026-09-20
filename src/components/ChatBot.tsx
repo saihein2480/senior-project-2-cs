@@ -4,6 +4,31 @@ import React, { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useSearchParams, usePathname } from "next/navigation";
+import { useCustomerAuth } from "@/contexts/CustomerAuthContext";
+import { useCurrency, formatPrice as formatPriceWithCurrency } from "@/hooks/useCurrency";
+import { useCurrencyRate } from "@/hooks/useSettings";
+
+/**
+ * Render assistant text with the small amount of markdown the bot emits.
+ *
+ * Replies were previously dropped into a plain <p>, so every `**bold**` showed
+ * up as literal asterisks.
+ */
+function ChatText({ content }: { content: string }) {
+  return (
+    <p className="text-sm whitespace-pre-wrap">
+      {content.split(/(\*\*[^*]+\*\*)/g).map((chunk, index) =>
+        chunk.startsWith("**") && chunk.endsWith("**") && chunk.length > 4 ? (
+          <strong key={index} className="font-semibold">
+            {chunk.slice(2, -2)}
+          </strong>
+        ) : (
+          <React.Fragment key={index}>{chunk}</React.Fragment>
+        ),
+      )}
+    </p>
+  );
+}
 
 interface Message {
   role: "user" | "assistant";
@@ -45,7 +70,7 @@ const FEATURE_CATEGORIES = [
     title: "Product Search",
     examples: [
       "Show me black t-shirts",
-      "Find jeans under 50,000 MMK",
+      "Find jeans under 50,000",
       "New arrivals",
     ],
   },
@@ -116,7 +141,14 @@ export default function ChatBot() {
   const [showMenu, setShowMenu] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  
+
+  // Currency hooks for proper price display
+  const currency = useCurrency();
+  const { rate: mmkRate } = useCurrencyRate();
+
+  // Needed so order and coupon questions can be answered for this customer.
+  const { user } = useCustomerAuth();
+
   // Use Next.js hooks to detect URL changes
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -194,8 +226,8 @@ export default function ChatBot() {
     }
   }, [isOpen]);
 
-  const formatPrice = (price: number) => {
-    return new Intl.NumberFormat("en-US").format(price);
+  const formatPrice = (priceTHB: number) => {
+    return formatPriceWithCurrency(priceTHB, currency, mmkRate);
   };
 
   const sendMessage = async (content: string) => {
@@ -207,9 +239,24 @@ export default function ChatBot() {
     setIsLoading(true);
 
     try {
+      // Send a verified ID token so the assistant can look up THIS customer's
+      // real orders and coupons. Anonymous visitors simply omit it.
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+
+      if (user) {
+        try {
+          const idToken = await user.getIdToken();
+          headers.Authorization = `Bearer ${idToken}`;
+        } catch (tokenError) {
+          console.error("Could not get ID token for chat:", tokenError);
+        }
+      }
+
       const response = await fetch("/api/ai-chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           messages: [...messages, userMessage].map((m) => ({
             role: m.role,
@@ -291,7 +338,7 @@ export default function ChatBot() {
         <div className="fixed bottom-4 right-4 md:bottom-6 md:right-6 z-50">
           <button
             onClick={() => setIsOpen(true)}
-            className="flex h-14 w-14 md:h-16 md:w-16 items-center justify-center rounded-full bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-110 group overflow-hidden relative"
+            className="flex h-14 w-14 md:h-16 md:w-16 items-center justify-center rounded-full bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-110 group overflow-hidden relative"
             aria-label="Open chat"
           >
             <div className="relative w-full h-full transition-transform">
@@ -306,9 +353,9 @@ export default function ChatBot() {
             </div>
           </button>
           {/* Notification badge */}
-          <span className="absolute -top-1 -right-1 h-5 w-5 md:h-6 md:w-6 rounded-full bg-white flex items-center justify-center shadow-lg border-2 border-pink-300">
+          <span className="absolute -top-1 -right-1 h-5 w-5 md:h-6 md:w-6 rounded-full bg-white flex items-center justify-center shadow-lg border-2 border-rose-300">
             <svg
-              className="w-3 h-3 md:w-4 md:h-4 text-pink-500"
+              className="w-3 h-3 md:w-4 md:h-4 text-rose-500"
               fill="currentColor"
               viewBox="0 0 24 24"
             >
@@ -394,7 +441,7 @@ export default function ChatBot() {
               >
                 {/* Assistant Avatar */}
                 {message.role === "assistant" && (
-                  <div className="flex-shrink-0 w-15 h-15 rounded-full overflow-hidden border-2 border-pink-200 shadow-sm">
+                  <div className="flex-shrink-0 w-15 h-15 rounded-full overflow-hidden border-2 border-rose-200 shadow-sm">
                     <Image
                       src="/lori_adult.png"
                       alt="Iori"
@@ -413,7 +460,7 @@ export default function ChatBot() {
                       : "bg-white text-gray-800 rounded-2xl rounded-tl-sm shadow-sm border border-gray-100"
                   } p-3`}
                 >
-                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                  <ChatText content={message.content} />
 
                   {/* Outfit Recommendation Display */}
                   {message.isOutfit && message.outfit && message.products && message.products.length > 0 && (
@@ -474,7 +521,7 @@ export default function ChatBot() {
                               </p>
                               <div className="flex items-center justify-between mt-1">
                                 <p className="text-sm text-rose-600 font-semibold">
-                                  {formatPrice(product.price)} MMK
+                                  {formatPrice(product.price)}
                                 </p>
                                 {product.colors && product.colors.length > 0 && (
                                   <div className="flex gap-1">
@@ -498,7 +545,7 @@ export default function ChatBot() {
                       <div className="flex items-center justify-between py-2 px-3 bg-white rounded-lg border border-rose-200">
                         <span className="font-semibold text-gray-700">Total Outfit Price:</span>
                         <span className="text-lg font-bold text-rose-600">
-                          {formatPrice(message.outfit.totalPrice)} MMK
+                          {formatPrice(message.outfit.totalPrice)}
                         </span>
                       </div>
 
@@ -561,7 +608,7 @@ export default function ChatBot() {
                               {product.name}
                             </p>
                             <p className="text-sm text-rose-600 font-semibold">
-                              {formatPrice(product.price)} MMK
+                              {formatPrice(product.price)}
                             </p>
                             <p className="text-xs text-gray-500">
                               {product.stock > 0
@@ -586,7 +633,7 @@ export default function ChatBot() {
             {isLoading && (
               <div className="flex justify-start gap-2">
                 {/* Assistant Avatar */}
-                <div className="flex-shrink-0 w-10 h-10 rounded-full overflow-hidden border-2 border-pink-200 shadow-sm">
+                <div className="flex-shrink-0 w-10 h-10 rounded-full overflow-hidden border-2 border-rose-200 shadow-sm">
                   <Image
                     src="/lori_adult.png"
                     alt="Iori"
@@ -621,7 +668,7 @@ export default function ChatBot() {
                       <button
                         key={category.id}
                         onClick={() => setSelectedCategory(category.id)}
-                        className="px-2 py-1.5 hover:text-pink-600 border border-rose-200 rounded text-xs font-medium text-gray-700 transition-colors text-left"
+                        className="px-2 py-1.5 hover:text-rose-600 border border-rose-200 rounded text-xs font-medium text-gray-700 transition-colors text-left"
                       >
                         {category.title}
                       </button>
@@ -649,7 +696,7 @@ export default function ChatBot() {
                           handleQuickPrompt(example);
                           setSelectedCategory(null);
                         }}
-                        className="w-full text-left text-xs px-2 py-1.5 border border-rose-200 bg-gray-50 hover:text-pink-600 text-gray-600 rounded transition-colors"
+                        className="w-full text-left text-xs px-2 py-1.5 border border-rose-200 bg-gray-50 hover:text-rose-600 text-gray-600 rounded transition-colors"
                       >
                         {example}
                       </button>
@@ -693,7 +740,7 @@ export default function ChatBot() {
                           <button
                             key={category.id}
                             onClick={() => setSelectedCategory(category.id)}
-                            className="px-3 py-2 md:px-2 md:py-1.5 hover:text-pink-600 border border-rose-200 rounded text-sm md:text-xs font-medium text-gray-700 transition-colors text-left"
+                            className="px-3 py-2 md:px-2 md:py-1.5 hover:text-rose-600 border border-rose-200 rounded text-sm md:text-xs font-medium text-gray-700 transition-colors text-left"
                           >
                             {category.title}
                           </button>
@@ -718,7 +765,7 @@ export default function ChatBot() {
                           <button
                             key={idx}
                             onClick={() => handleQuickPrompt(example)}
-                            className="w-full text-left text-sm md:text-xs px-3 py-2 md:px-2 md:py-1.5 border border-rose-200 bg-gray-50 hover:text-pink-600 text-gray-600 rounded transition-colors"
+                            className="w-full text-left text-sm md:text-xs px-3 py-2 md:px-2 md:py-1.5 border border-rose-200 bg-gray-50 hover:text-rose-600 text-gray-600 rounded transition-colors"
                           >
                             {example}
                           </button>

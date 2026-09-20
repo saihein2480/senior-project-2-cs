@@ -79,7 +79,7 @@ export default function CustomerProfilePage() {
         {message && <p className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">{message}</p>}
 
         <div className="flex flex-wrap items-center gap-3">
-          <button type="submit" disabled={saving} className="rounded-md bg-pink-500 px-4 py-2 text-white hover:bg-pink-600 disabled:opacity-50">
+          <button type="submit" disabled={saving} className="rounded-md bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 px-4 py-2 text-white disabled:opacity-50">
             {saving ? "Saving..." : "Save Profile"}
           </button>
 

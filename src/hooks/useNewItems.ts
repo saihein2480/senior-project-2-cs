@@ -17,11 +17,17 @@ type NewItemsResponse = {
  * Fetch new items with 5-minute cache
  * @param limit - Optional limit on number of items (default: all)
  */
-export function useNewItems(limit?: number) {
+export function useNewItems(limit?: number, branch?: string) {
   return useQuery({
-    queryKey: ["newItems", limit],
+    // `branch` is part of the key so switching branch refetches rather than
+    // reusing another branch's carousel items.
+    queryKey: ["newItems", limit, branch ?? "all"],
     queryFn: async (): Promise<NewItem[]> => {
-      const response = await fetch("/api/new-items");
+      const url = new URL("/api/new-items", window.location.origin);
+      if (branch) url.searchParams.set("branch", branch);
+      if (limit) url.searchParams.set("limit", String(limit));
+
+      const response = await fetch(url.toString());
       if (!response.ok) {
         throw new Error(`New items API error: ${response.status}`);
       }
