@@ -30,24 +30,65 @@ export function createMainMenuKeyboard(): InlineKeyboard {
 }
 
 /**
- * Create product categories keyboard
+ * Decorative icon for a category name.
+ *
+ * Category names come from whatever the owner typed in the POS, so there is no
+ * icon field to read. Best-effort match on common clothing words, falling back
+ * to a neutral tag. Purely cosmetic — never used for filtering.
  */
-export function createCategoriesKeyboard(): InlineKeyboard {
-  const categories = [
-    { text: "👕 T-Shirts", callback_data: "category_t-shirt" },
-    { text: "👔 Shirts", callback_data: "category_shirt" },
-    { text: "👖 Jeans", callback_data: "category_jeans" },
-    { text: "👗 Dresses", callback_data: "category_dress" },
-    { text: "🧥 Jackets", callback_data: "category_jacket" },
-    { text: "👟 Shoes", callback_data: "category_shoes" },
-    { text: "🔙 Back", callback_data: "menu_main" },
+function categoryIcon(name: string): string {
+  const n = name.toLowerCase();
+  // Order matters: the first match wins, so more specific words come first.
+  // "Short Skirt" must hit the skirt rule before the "short" bottoms rule.
+  const table: Array<[string[], string]> = [
+    [["skirt"], "👚"],
+    [["t-shirt", "tshirt", "tee", "top"], "👕"],
+    [["shirt", "blouse"], "👔"],
+    [["dress", "gown"], "👗"],
+    [["hoodie", "sweater", "sweatshirt"], "🧶"],
+    [["jacket", "coat", "outer"], "🧥"],
+    [["jean", "trouser", "pant", "short", "bottom"], "👖"],
+    [["shoe", "sneaker", "sandal", "boot", "footwear"], "👟"],
+    [["bag", "purse", "backpack"], "👜"],
+    [["hat", "cap"], "🧢"],
+    [["accessor", "jewel", "watch", "belt"], "💎"],
+    [["set", "outfit"], "👘"],
+    [["kid", "child", "baby"], "🧸"],
   ];
 
-  const rows: InlineKeyboardButton[][] = [];
-  for (let i = 0; i < categories.length - 1; i += 2) {
-    rows.push(categories.slice(i, i + 2));
+  for (const [needles, icon] of table) {
+    if (needles.some((needle) => n.includes(needle))) return icon;
   }
-  rows.push([categories[categories.length - 1]]);
+  return "🏷️";
+}
+
+/** Keep the keyboard tappable; the rest stay reachable from the website. */
+const MAX_CATEGORY_BUTTONS = 24;
+
+/**
+ * Create the product categories keyboard from the store's own categories.
+ *
+ * Buttons carry the category's **index**, not its name. Names are owner-entered
+ * and may be non-Latin — a Burmese name costs 3 bytes per character in UTF-8, so
+ * it can exceed Telegram's 64-byte callback_data limit, and Telegram rejects the
+ * entire message when that happens. The index is re-resolved against a fresh
+ * read when the button is tapped; see `handleCategoryCallback`.
+ */
+export function createCategoriesKeyboard(categories: string[]): InlineKeyboard {
+  const shown = categories.slice(0, MAX_CATEGORY_BUTTONS);
+
+  const buttons: InlineKeyboardButton[] = shown.map((name, index) => ({
+    text: `${categoryIcon(name)} ${name.length > 24 ? `${name.slice(0, 23)}…` : name}`,
+    callback_data: `category_${index}`,
+  }));
+
+  const rows: InlineKeyboardButton[][] = [];
+  for (let i = 0; i < buttons.length; i += 2) {
+    rows.push(buttons.slice(i, i + 2));
+  }
+
+  rows.push([{ text: "🛍️ All Products", callback_data: "category_all" }]);
+  rows.push([{ text: "🔙 Back", callback_data: "menu_main" }]);
 
   return { inline_keyboard: rows };
 }

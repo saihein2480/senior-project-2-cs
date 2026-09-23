@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
+import { getStoreCategories } from "@/lib/categories";
 
 export const dynamic = "force-dynamic";
 
@@ -22,12 +23,8 @@ export async function GET() {
       );
     }
 
-    const snap = await adminDb.collection("settings").doc("categories").get();
-
-    const raw = snap.exists ? snap.data()?.categories : [];
-    const categories = Array.isArray(raw)
-      ? raw.map((c) => String(c ?? "").trim()).filter((c) => c.length > 0)
-      : [];
+    // Shared with the Telegram bot so both read the same document the same way.
+    const categories = await getStoreCategories();
 
     return NextResponse.json(
       { success: true, data: categories },

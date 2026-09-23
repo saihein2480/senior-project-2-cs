@@ -262,15 +262,39 @@ async function handleHelpCommand(ctx: BotContext): Promise<void> {
 }
 
 /**
+ * Categories for the browse keyboard, read fresh from the POS on every use.
+ *
+ * Deliberately uncached: the owner's category list is the source of truth and a
+ * chat has no UI to push updates into, so reading it at the moment the customer
+ * taps is what "live" means here.
+ */
+async function loadCategories(): Promise<string[]> {
+  const { getStoreCategories } = await import("../categories");
+  return getStoreCategories();
+}
+
+/**
  * Handle /products command
  */
 async function handleProductsCommand(ctx: BotContext): Promise<void> {
   await sendChatAction(ctx.chatId, "typing");
 
+  const categories = await loadCategories();
+
+  if (categories.length === 0) {
+    // No categories configured in the POS yet — still let them browse.
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: "🛍️ *Browse Products*\n\nNo categories are set up yet\\.",
+      reply_markup: createCategoriesKeyboard([]),
+    });
+    return;
+  }
+
   await sendMessage({
     chat_id: ctx.chatId,
     text: "🛍️ *Browse Products*\n\nSelect a category to view products:",
-    reply_markup: createCategoriesKeyboard(),
+    reply_markup: createCategoriesKeyboard(categories),
   });
 }
 
@@ -296,7 +320,7 @@ async function handleSearchCommand(ctx: BotContext, query: string): Promise<void
       await sendMessage({
         chat_id: ctx.chatId,
         text: `🔍 No products found for "${escapeMarkdown(query)}"\n\nTry different keywords or browse by category\\.`,
-        reply_markup: createCategoriesKeyboard(),
+        reply_markup: createCategoriesKeyboard(await loadCategories()),
       });
       return;
     }
@@ -724,23 +748,53 @@ async function handleMenuCallback(ctx: BotContext, data: string): Promise<void> 
  * Handle category callbacks
  */
 async function handleCategoryCallback(ctx: BotContext, data: string): Promise<void> {
-  const category = data.replace("category_", "");
+  const selector = data.replace("category_", "");
 
   await sendChatAction(ctx.chatId, "typing");
 
   try {
-    const products = await searchProducts({ category });
+    // Re-read the list so the index resolves against what the POS holds *now*.
+    const categories = await loadCategories();
+
+    let category: string | null = null;
+
+    if (selector !== "all") {
+      const index = Number(selector);
+
+      if (!Number.isInteger(index) || index < 0 || index >= categories.length) {
+        // The owner changed the category list after this keyboard was sent.
+        await sendMessage({
+          chat_id: ctx.chatId,
+          text: "🛍️ *Browse Products*\n\nOur categories have changed\\. Please pick again:",
+          reply_markup: createCategoriesKeyboard(categories),
+        });
+        return;
+      }
+
+      category = categories[index];
+    }
+
+    const products = category
+      ? await searchProducts({ category })
+      : await searchProducts({});
 
     if (products.length === 0) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: `No products found in ${escapeMarkdown(category)} category\\.`,
-        reply_markup: createCategoriesKeyboard(),
+        text: category
+          ? `No products found in ${escapeMarkdown(category)} right now\\.`
+          : `No products available right now\\.`,
+        reply_markup: createCategoriesKeyboard(categories),
       });
       return;
     }
 
-    const listText = formatProductList(products);
+    // Name the category explicitly: the button label is truncated, and it makes
+    // a stale-index mismatch obvious instead of silently confusing.
+    const heading = category
+      ? `${escapeMarkdown(category)}\n\n`
+      : `🛍️ *All Products*\n\n`;
+    const listText = heading + formatProductList(products);
     await sendMessage({
       chat_id: ctx.chatId,
       text: listText,
