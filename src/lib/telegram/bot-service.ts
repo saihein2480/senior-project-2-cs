@@ -692,15 +692,16 @@ async function handleOrdersCommand(ctx: BotContext): Promise<void> {
       return;
     }
 
-    // Import order functions
-    const { findCustomerOrders } = await import("../orderSupport");
-    const orders = await findCustomerOrders(customer.email);
+    await primeCurrency();
 
-    const ordersText = formatOrderList(orders);
+    // Match on the customer's uid, not their email: two customer documents can
+    // share an email here, and the email field is nested under `customer` anyway.
+    const { findCustomerOrdersByUid } = await import("../orderSupport");
+    const orders = await findCustomerOrdersByUid(customer.id, 10);
 
     await sendMessage({
       chat_id: ctx.chatId,
-      text: ordersText,
+      text: formatOrderList(orders),
       reply_markup: createBackButton(),
     });
   } catch (error) {

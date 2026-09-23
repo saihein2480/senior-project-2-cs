@@ -1,5 +1,17 @@
-import { db } from "./firebase";
-import { collection, query, where, getDocs, orderBy, limit } from "firebase/firestore";
+/**
+ * Order lookups for the Telegram bot and the AI chat route.
+ *
+ * Uses the Admin SDK, not the client SDK. Both callers run on the server with no
+ * signed-in user, and `firestore.rules` only lets management list `onlineOrders`
+ * — so a client-SDK query here was denied outright.
+ *
+ * Field names matter: `onlineOrders` documents written at checkout carry the
+ * reference as `orderId`, the amount as `total` and the email nested at
+ * `customer.email`. The previous queries used `orderRef`, `totalAmount` and a
+ * top-level `customerEmail`, none of which exist on any of the 247 stored orders.
+ */
+
+import { adminDb } from "./firebase-admin";
 
 export interface OrderInfo {
   orderId: string;
@@ -18,39 +30,120 @@ export interface OrderInfo {
   trackingNumber?: string;
 }
 
+/** `createdAt` is written as an ISO string at checkout, not a Timestamp. */
+function toDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { toDate?: unknown }).toDate === "function"
+  ) {
+    return (value as { toDate: () => Date }).toDate();
+  }
+  const parsed = new Date(String(value ?? ""));
+  return Number.isNaN(parsed.getTime()) ? new Date(0) : parsed;
+}
+
 /**
- * Search for order by reference number
+ * Map a stored `onlineOrders` document onto `OrderInfo`.
+ *
+ * Money is the awkward part, because two generations of checkout wrote different
+ * shapes:
+ *  - COD orders store a THB `total` and `items[].amount` in THB.
+ *  - Older MMPAY orders store only `amountMmk` and `items[].amount` in **MMK**.
+ * Reading `items[].amount` as THB therefore quoted those lines ~100x too high.
+ *
+ * `cartItems[].priceTHB` is the one field written in THB by both, so it is the
+ * preferred source for line prices and for reconstructing a total when no THB
+ * total was stored. That reconstruction is a subtotal — it excludes tax and
+ * discounts — so it is only used when nothing better exists.
+ */
+function mapOrder(id: string, data: Record<string, unknown>): OrderInfo {
+  const cartItems = Array.isArray(data.cartItems)
+    ? (data.cartItems as Array<Record<string, unknown>>)
+    : [];
+  const rawItems = Array.isArray(data.items)
+    ? (data.items as Array<Record<string, unknown>>)
+    : [];
+
+  const items = cartItems.length
+    ? cartItems.map((item) => ({
+        productName: String(item.productName || item.name || "Item"),
+        quantity: Number(item.quantity || 1),
+        price: Number(item.priceTHB ?? item.unitPriceTHB ?? 0),
+      }))
+    : rawItems.map((item) => ({
+        productName: String(item.name || item.productName || "Item"),
+        quantity: Number(item.quantity || 1),
+        // Only trusted as THB when the document also carries a THB total;
+        // otherwise this figure is MMK and would be misleading.
+        price:
+          data.total !== undefined || data.totalAmount !== undefined
+            ? Number(item.amount ?? item.price ?? 0)
+            : 0,
+      }));
+
+  const storedTotal = Number(data.total ?? data.totalAmount ?? 0);
+  const cartSubtotal = cartItems.reduce(
+    (sum, item) =>
+      sum + Number(item.priceTHB ?? item.unitPriceTHB ?? 0) * Number(item.quantity || 1),
+    0,
+  );
+  const rate = Number(data.exchangeRate ?? 0);
+  const fromMmk = rate > 0 ? Number(data.amountMmk ?? 0) / rate : 0;
+
+  return {
+    orderId: id,
+    // The customer-facing reference is the document id / `orderId`, e.g.
+    // "COD-1787817058191-SPKH3D". No stored order has an `orderRef` field.
+    orderRef: String(data.orderRef || data.orderId || id),
+    status: String(data.status || "pending"),
+    paymentMethod: String(data.paymentMethod || data.provider || "COD"),
+    paymentStatus: String(data.paymentStatus || "pending"),
+    totalAmount: storedTotal || cartSubtotal || fromMmk || 0,
+    createdAt: toDate(data.createdAt),
+    items,
+    shippingAddress:
+      typeof data.shippingAddress === "string" ? data.shippingAddress : undefined,
+    trackingNumber:
+      typeof data.trackingNumber === "string" ? data.trackingNumber : undefined,
+  };
+}
+
+/**
+ * Search for an order by its reference.
+ *
+ * Tries the document id first — that is what the reference actually is — then
+ * falls back to field matches so a future `orderRef` field would also work.
  */
 export async function findOrderByRef(orderRef: string): Promise<OrderInfo | null> {
-  if (!db) {
-    console.error("❌ Firebase not configured");
+  if (!adminDb) {
+    console.error("❌ Firebase Admin not configured");
     return null;
   }
 
-  try {
-    const ordersRef = collection(db, "onlineOrders");
-    const q = query(ordersRef, where("orderRef", "==", orderRef.toUpperCase()), limit(1));
-    const querySnapshot = await getDocs(q);
+  const ref = orderRef.trim();
+  if (!ref) return null;
 
-    if (querySnapshot.empty) {
-      return null;
+  try {
+    const direct = await adminDb.collection("onlineOrders").doc(ref).get();
+    if (direct.exists) {
+      return mapOrder(direct.id, direct.data() || {});
     }
 
-    const doc = querySnapshot.docs[0];
-    const data = doc.data();
+    for (const field of ["orderId", "orderRef"]) {
+      const snap = await adminDb
+        .collection("onlineOrders")
+        .where(field, "==", ref)
+        .limit(1)
+        .get();
 
-    return {
-      orderId: doc.id,
-      orderRef: data.orderRef || "",
-      status: data.status || "pending",
-      paymentMethod: data.paymentMethod || "COD",
-      paymentStatus: data.paymentStatus || "pending",
-      totalAmount: data.totalAmount || 0,
-      createdAt: data.createdAt?.toDate() || new Date(),
-      items: data.items || [],
-      shippingAddress: data.shippingAddress,
-      trackingNumber: data.trackingNumber,
-    };
+      if (!snap.empty) {
+        return mapOrder(snap.docs[0].id, snap.docs[0].data());
+      }
+    }
+
+    return null;
   } catch (error) {
     console.error("Error finding order:", error);
     return null;
@@ -58,59 +151,71 @@ export async function findOrderByRef(orderRef: string): Promise<OrderInfo | null
 }
 
 /**
- * Find recent orders by customer email or phone
+ * Recent orders for one customer, newest first.
+ *
+ * Matches on `customer.uid` rather than email: two customer documents can share
+ * an email (they do in this database), so the uid is the only exact link.
+ *
+ * Deliberately no Firestore `orderBy` — combining it with the equality filter
+ * needs a composite index that does not exist, and the previous email query
+ * failed with `failed-precondition` for exactly that reason. Sorting a single
+ * customer's orders in memory avoids the dependency.
+ */
+export async function findCustomerOrdersByUid(
+  uid: string,
+  max = 5,
+): Promise<OrderInfo[]> {
+  if (!adminDb || !uid) return [];
+
+  try {
+    const snap = await adminDb
+      .collection("onlineOrders")
+      .where("customer.uid", "==", uid)
+      .get();
+
+    return snap.docs
+      .map((doc) => mapOrder(doc.id, doc.data()))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, max);
+  } catch (error) {
+    console.error("Error finding customer orders by uid:", error);
+    return [];
+  }
+}
+
+/**
+ * Find recent orders by customer email or phone.
+ *
+ * Prefer `findCustomerOrdersByUid` where a uid is available — an email can map to
+ * more than one customer document. Kept for callers that only hold contact
+ * details.
  */
 export async function findCustomerOrders(
   email?: string,
-  phone?: string
+  phone?: string,
+  max = 5,
 ): Promise<OrderInfo[]> {
-  if (!db) {
-    console.error("❌ Firebase not configured");
+  if (!adminDb) {
+    console.error("❌ Firebase Admin not configured");
     return [];
   }
 
+  // Nested paths: checkout stores these under `customer`, never at the top level.
+  const field = email ? "customer.email" : phone ? "customer.phone" : null;
+  const value = email || phone;
+
+  if (!field || !value) return [];
+
   try {
-    const ordersRef = collection(db, "onlineOrders");
-    let q;
+    const snap = await adminDb
+      .collection("onlineOrders")
+      .where(field, "==", value)
+      .get();
 
-    if (email) {
-      q = query(
-        ordersRef,
-        where("customerEmail", "==", email),
-        orderBy("createdAt", "desc"),
-        limit(5)
-      );
-    } else if (phone) {
-      q = query(
-        ordersRef,
-        where("customerPhone", "==", phone),
-        orderBy("createdAt", "desc"),
-        limit(5)
-      );
-    } else {
-      return [];
-    }
-
-    const querySnapshot = await getDocs(q);
-    const orders: OrderInfo[] = [];
-
-    querySnapshot.forEach((doc) => {
-      const data = doc.data();
-      orders.push({
-        orderId: doc.id,
-        orderRef: data.orderRef || "",
-        status: data.status || "pending",
-        paymentMethod: data.paymentMethod || "COD",
-        paymentStatus: data.paymentStatus || "pending",
-        totalAmount: data.totalAmount || 0,
-        createdAt: data.createdAt?.toDate() || new Date(),
-        items: data.items || [],
-        shippingAddress: data.shippingAddress,
-        trackingNumber: data.trackingNumber,
-      });
-    });
-
-    return orders;
+    return snap.docs
+      .map((doc) => mapOrder(doc.id, doc.data()))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, max);
   } catch (error) {
     console.error("Error finding customer orders:", error);
     return [];
