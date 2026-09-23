@@ -78,13 +78,32 @@ async function startPolling() {
   console.log("🔑 Bot Token:", BOT_TOKEN!.substring(0, 20) + "...");
   console.log("");
 
-  // Delete webhook to enable polling
+  // Delete webhook to enable polling.
+  //
+  // A bot token has exactly one delivery mode, and it is global — not per
+  // machine. Polling here therefore unregisters whatever webhook production is
+  // using, so while this script runs the deployed app receives nothing.
   try {
+    const existing = await fetch(`${API_BASE}/getWebhookInfo`)
+      .then((r) => r.json())
+      .catch(() => null);
+    const existingUrl = existing?.result?.url;
+
     const response = await fetch(`${API_BASE}/deleteWebhook?drop_pending_updates=true`);
     const data = await response.json();
-    
+
     if (data.ok) {
       console.log("✅ Webhook deleted, polling mode enabled");
+
+      if (existingUrl) {
+        console.log("");
+        console.log("⚠️  WARNING: a webhook was registered and has now been removed:");
+        console.log(`      ${existingUrl}`);
+        console.log("    Your deployed bot will NOT receive updates while this script runs.");
+        console.log("    To hand the bot back when you are done, stop this script and visit:");
+        console.log("      <your-domain>/api/telegram/setup-webhook?secret=<TELEGRAM_WEBHOOK_SECRET>");
+        console.log("");
+      }
     }
   } catch (error) {
     console.error("❌ Failed to delete webhook:", error);
