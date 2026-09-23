@@ -6,6 +6,7 @@
 import {
   sendMessage,
   sendPhoto,
+  sendPhotoSafe,
   answerCallbackQuery,
   sendChatAction,
   editMessageText,
@@ -22,17 +23,24 @@ import {
   formatOrderList,
   formatOrder,
   formatProductPage,
+  formatProductCard,
+  formatProductDetail,
   paginateProducts,
+  setMmkRate,
 } from "./formatters";
 import {
   createMainMenuKeyboard,
   createCategoriesKeyboard,
   createBrowseKeyboard,
   createProductKeyboard,
+  createProductCardKeyboard,
+  createColourPickKeyboard,
+  createSizePickKeyboard,
+  createCartKeyboard,
   createBackButton,
   storefrontBaseUrl,
 } from "./keyboards";
-import { searchProducts } from "../productSearch";
+import { searchProducts, type SearchProduct } from "../productSearch";
 import { findOrderByRef } from "../orderSupport";
 import { getCustomerByTelegramId } from "./customer-service";
 import { linkTelegramToCustomer } from "./auth-service";
@@ -118,6 +126,8 @@ async function handleCommand(ctx: BotContext): Promise<void> {
     "/link": () => handleLinkCommand(ctx),
     "/promotions": () => handlePromotionsCommand(ctx),
     "/cancel": () => handleCancelOrderCommand(ctx, args),
+    "/newarrivals": () => renderBrowsePage(ctx, "new", 1),
+    "/bestsellers": () => renderBrowsePage(ctx, "best", 1),
   };
 
   const handler = commandHandlers[command];
@@ -275,6 +285,91 @@ async function handleHelpCommand(ctx: BotContext): Promise<void> {
 async function loadCategories(): Promise<string[]> {
   const { getStoreCategories } = await import("../categories");
   return getStoreCategories();
+}
+
+/**
+ * Point the price formatter at the owner's configured THB -> MMK rate.
+ *
+ * Called before building any message that quotes a price. `formatPrice` is
+ * synchronous by design (it runs deep inside message builders), so the rate is
+ * pushed to it rather than fetched by it. `getMmkRate` caches, so the extra
+ * Firestore read is amortised across a minute of traffic.
+ */
+async function primeCurrency(): Promise<void> {
+  try {
+    const { getMmkRate } = await import("../storeSettings");
+    setMmkRate(await getMmkRate());
+  } catch (error) {
+    // Falls back to NEXT_PUBLIC_MMK_RATE, which is the same chain the website
+    // uses, so a failure here shows a slightly stale rate rather than nothing.
+    console.error("Could not prime currency rate:", error);
+  }
+}
+
+/** A resolved product listing: what to show, what to call it, where it lives. */
+interface Listing {
+  products: SearchProduct[];
+  heading: string;
+  websitePath: string;
+}
+
+/**
+ * Resolve a browse selector into a product list.
+ *
+ * `all` | `new` | `best` | a numeric category index. Names are not used as
+ * selectors because callback_data is capped at 64 bytes and category names are
+ * owner-entered; see `createCategoriesKeyboard`.
+ *
+ * Returns null when a numeric index no longer matches the category list, which
+ * happens when the owner edits categories while a keyboard is still open.
+ */
+async function resolveListing(selector: string): Promise<Listing | null> {
+  if (selector === "all") {
+    return {
+      products: await searchProducts({}),
+      heading: "All Products",
+      websitePath: "/view-all",
+    };
+  }
+
+  if (selector === "new") {
+    return {
+      products: await searchProducts({ isNew: true }),
+      heading: "New Arrivals",
+      websitePath: "/new-arrivals",
+    };
+  }
+
+  if (selector === "best") {
+    const { getBestSellerProductIds } = await import("../bestSellers");
+    const [ranking, catalogue] = await Promise.all([
+      getBestSellerProductIds(),
+      searchProducts({}),
+    ]);
+
+    // Order the catalogue by the ranking, dropping products that never sold.
+    // Ranked ids can also point at deleted products, which the lookup skips.
+    const byId = new Map(catalogue.map((product) => [product.id, product]));
+    const products = ranking
+      .map((id) => byId.get(id))
+      .filter((product): product is SearchProduct => !!product);
+
+    return { products, heading: "Best Sellers", websitePath: "/best-sellers" };
+  }
+
+  const categories = await loadCategories();
+  const index = Number(selector);
+
+  if (!Number.isInteger(index) || index < 0 || index >= categories.length) {
+    return null;
+  }
+
+  const category = categories[index];
+  return {
+    products: await searchProducts({ category }),
+    heading: category,
+    websitePath: `/view-all?category=${encodeURIComponent(category)}`,
+  };
 }
 
 /**
@@ -712,6 +807,11 @@ async function handleCallbackQuery(query: any): Promise<void> {
       await handleBrowseCallback(ctx, callbackData);
     } else if (callbackData.startsWith("product_")) {
       await handleProductCallback(ctx, callbackData);
+    } else if (callbackData.startsWith("padd_")) {
+      // Checked before "pick_" would matter; both are add-to-cart steps.
+      await handleAddToCartCallback(ctx, callbackData);
+    } else if (callbackData.startsWith("pick_")) {
+      await handleColourPickCallback(ctx, callbackData);
     } else if (callbackData.startsWith("cart_")) {
       await handleCartCallback(ctx, callbackData);
     } else if (callbackData.startsWith("order_")) {
@@ -793,84 +893,92 @@ async function renderBrowsePage(
   await sendChatAction(ctx.chatId, "typing");
 
   try {
-    // Re-read so the index resolves against what the POS holds *now*.
-    const categories = await loadCategories();
+    await primeCurrency();
 
-    let category: string | null = null;
+    const listing = await resolveListing(selector);
 
-    if (selector !== "all") {
-      const index = Number(selector);
-
-      if (!Number.isInteger(index) || index < 0 || index >= categories.length) {
-        // The owner changed the category list after this keyboard was sent.
-        await sendMessage({
-          chat_id: ctx.chatId,
-          text: "🛍️ *Browse Products*\n\nOur categories have changed\\. Please pick again:",
-          reply_markup: createCategoriesKeyboard(categories),
-        });
-        return;
-      }
-
-      category = categories[index];
-    }
-
-    const products = category
-      ? await searchProducts({ category })
-      : await searchProducts({});
-
-    if (products.length === 0) {
+    if (!listing) {
+      // The owner changed the category list after this keyboard was sent.
       await sendMessage({
         chat_id: ctx.chatId,
-        text: category
-          ? `No products found in ${escapeMarkdown(category)} right now\\.`
-          : `No products available right now\\.`,
-        reply_markup: createCategoriesKeyboard(categories),
+        text: "🛍️ *Browse Products*\n\nOur categories have changed\\. Please pick again:",
+        reply_markup: createCategoriesKeyboard(await loadCategories()),
       });
       return;
     }
 
-    const pageData = paginateProducts(products, page);
-    const heading = category || "All Products";
-    const text = formatProductPage(pageData, heading);
-
-    const keyboard = createBrowseKeyboard({
-      selector,
-      page: pageData.page,
-      totalPages: pageData.totalPages,
-      productIds: pageData.items.map((p) => p.id),
-      firstIndex: pageData.firstIndex,
-      websiteUrl: category
-        ? `${storefrontBaseUrl()}/view-all?category=${encodeURIComponent(category)}`
-        : `${storefrontBaseUrl()}/view-all`,
-    });
-
-    // Paging from an existing listing edits it in place; a fresh entry sends a
-    // new message. Editing can fail harmlessly (e.g. identical content), so fall
-    // back to sending rather than leaving the customer with nothing.
-    if (ctx.messageId && ctx.callbackData?.startsWith("browse_")) {
-      try {
-        await editMessageText({
-          chat_id: ctx.chatId,
-          message_id: ctx.messageId,
-          text,
-          reply_markup: keyboard,
-        });
-        return;
-      } catch (editError) {
-        console.error("Could not edit browse message, sending a new one:", editError);
-      }
+    if (listing.products.length === 0) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: `No products in ${escapeMarkdown(listing.heading)} right now\\.`,
+        reply_markup: createCategoriesKeyboard(await loadCategories()),
+      });
+      return;
     }
 
+    const pageData = paginateProducts(listing.products, page);
+
+    // Each product goes out as its own photo card. A single text list cannot
+    // carry images, and images are what make this usable as a catalogue — but it
+    // does mean one message per product, so the page size stays small.
+    await sendChatAction(ctx.chatId, "upload_photo");
+
+    for (let i = 0; i < pageData.items.length; i++) {
+      const product = pageData.items[i];
+      const caption = formatProductCard(product, {
+        index: pageData.firstIndex + i,
+        total: pageData.total,
+      });
+      const keyboard = createProductCardKeyboard(product.id, product.stock > 0);
+
+      // Fall back to a text card when a product has no artwork, rather than
+      // skipping it — sendPhoto with an empty URL fails the whole message.
+      if (product.image) {
+        const sent = await sendPhotoSafe(
+          ctx.chatId,
+          product.image,
+          caption,
+          { reply_markup: keyboard },
+        );
+        if (sent) continue;
+        console.error(`Photo failed for product ${product.id}, sending text`);
+      }
+
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: caption,
+        reply_markup: keyboard,
+      });
+    }
+
+    // Footer carries the page position and navigation. Sent after the cards so
+    // the controls sit at the bottom of the chat, where the customer is looking.
+    const websiteUrl = `${storefrontBaseUrl()}${listing.websitePath}`;
     await sendMessage({
       chat_id: ctx.chatId,
-      text,
-      reply_markup: keyboard,
+      text: formatProductPage(
+        pageData,
+        listing.heading,
+        pageData.totalPages > 1
+          ? "Use Prev/Next to see more."
+          : "Use the buttons on each item to add it to your cart.",
+      ),
+      reply_markup: createBrowseKeyboard({
+        selector,
+        page: pageData.page,
+        totalPages: pageData.totalPages,
+        productIds: pageData.items.map((p) => p.id),
+        firstIndex: pageData.firstIndex,
+        websiteUrl,
+        // The cards above already carry per-product buttons.
+        navigationOnly: true,
+      }),
     });
   } catch (error) {
-    console.error("Category error:", error);
+    console.error("Browse error:", error);
     await sendMessage({
       chat_id: ctx.chatId,
-      text: formatError("Failed to load category. Please try again."),
+      text: formatError("Failed to load products. Please try again."),
     });
   }
 }
@@ -882,23 +990,289 @@ async function handleProductCallback(ctx: BotContext, data: string): Promise<voi
   const [action, productId] = data.replace("product_", "").split("_");
 
   if (action === "add") {
+    await startAddToCart(ctx, productId);
+    return;
+  }
+
+  if (action === "view") {
+    await showProductDetail(ctx, productId);
+    return;
+  }
+
+  if (action === "notify") {
     await sendMessage({
       chat_id: ctx.chatId,
-      text: "🛒 *Add to Cart*\n\nThis feature is coming soon\\!\n\nFor now, please use our website to complete your purchase\\.",
+      text: "🔔 We'll let you know when this is back in stock\\.",
+      reply_markup: createBackButton(),
     });
-  } else if (action === "view") {
-    try {
-      const product = await getProductById(productId);
-      if (product) {
-        await sendMessage({
-          chat_id: ctx.chatId,
-          text: formatProduct(product as any),
-          reply_markup: createProductKeyboard(productId, product.totalStock > 0),
-        });
-      }
-    } catch (error) {
-      console.error("View product error:", error);
+  }
+}
+
+/**
+ * Show one product's full detail as a photo card.
+ *
+ * Previously this sent a text-only message built by `formatProduct(product as
+ * any)` — but the lookup returns a `ProductInfo`, whose stock and colour fields
+ * are named differently, so the cast silently produced "Out of stock" with no
+ * colours for every product. `formatProductDetail` reads the right fields.
+ */
+async function showProductDetail(ctx: BotContext, productId: string): Promise<void> {
+  await sendChatAction(ctx.chatId, "typing");
+
+  try {
+    await primeCurrency();
+
+    const product = await getProductById(productId);
+
+    if (!product) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: formatError("Sorry, that product is no longer available."),
+        reply_markup: createBackButton(),
+      });
+      return;
     }
+
+    const caption = formatProductDetail(product);
+    const keyboard = createProductKeyboard(productId, product.totalStock > 0);
+
+    if (product.image) {
+      const sent = await sendPhotoSafe(ctx.chatId, product.image, caption, {
+        reply_markup: keyboard,
+      });
+      if (sent) return;
+      console.error(`Detail photo failed for ${productId}, sending text`);
+    }
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: caption,
+      reply_markup: keyboard,
+    });
+  } catch (error) {
+    console.error("View product error:", error);
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("Failed to load that product. Please try again."),
+    });
+  }
+}
+
+/**
+ * Step 1 of adding to cart: pick a colour.
+ *
+ * Clothing cannot be added without a size, and sizes are stocked per colour, so
+ * the flow is colour -> size -> add. A single-colour product skips straight to
+ * sizes so the common case stays one tap.
+ */
+async function startAddToCart(ctx: BotContext, productId: string): Promise<void> {
+  await sendChatAction(ctx.chatId, "typing");
+
+  try {
+    const product = await getProductById(productId);
+
+    if (!product || product.totalStock <= 0) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: formatError("Sorry, that product is out of stock."),
+        reply_markup: createBackButton(),
+      });
+      return;
+    }
+
+    const stocked = product.colorVariants
+      .map((variant, index) => ({
+        index,
+        color: variant.color,
+        stock: variant.sizeQuantities.reduce(
+          (sum, sq) => sum + (Number(sq.quantity) || 0),
+          0,
+        ),
+      }))
+      .filter((variant) => variant.stock > 0);
+
+    if (stocked.length === 0) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: formatError("Sorry, that product is out of stock."),
+        reply_markup: createBackButton(),
+      });
+      return;
+    }
+
+    if (stocked.length === 1) {
+      await promptForSize(ctx, productId, stocked[0].index);
+      return;
+    }
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text:
+        `🎨 *${escapeMarkdown(product.name)}*\n\n` +
+        `Which colour would you like?`,
+      reply_markup: createColourPickKeyboard(
+        productId,
+        product.colorVariants.map((variant) => ({
+          color: variant.color,
+          stock: variant.sizeQuantities.reduce(
+            (sum, sq) => sum + (Number(sq.quantity) || 0),
+            0,
+          ),
+        })),
+      ),
+    });
+  } catch (error) {
+    console.error("Add to cart (colour step) error:", error);
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("Could not start adding to cart. Please try again."),
+    });
+  }
+}
+
+/** Step 2: pick a size within the chosen colour. */
+async function promptForSize(
+  ctx: BotContext,
+  productId: string,
+  variantIndex: number,
+): Promise<void> {
+  const product = await getProductById(productId);
+  const variant = product?.colorVariants[variantIndex];
+
+  if (!product || !variant) {
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("That option is no longer available."),
+      reply_markup: createBackButton(),
+    });
+    return;
+  }
+
+  const available = variant.sizeQuantities.filter((sq) => sq.quantity > 0);
+
+  if (available.length === 0) {
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("That colour just sold out. Please pick another."),
+      reply_markup: createProductKeyboard(productId, product.totalStock > 0),
+    });
+    return;
+  }
+
+  const colourLabel = variant.color ? ` \\- ${escapeMarkdown(variant.color)}` : "";
+
+  await sendMessage({
+    chat_id: ctx.chatId,
+    text:
+      `📐 *${escapeMarkdown(product.name)}*${colourLabel}\n\n` +
+      `Which size? The number in brackets is how many are left\\.`,
+    reply_markup: createSizePickKeyboard(
+      productId,
+      variantIndex,
+      variant.sizeQuantities,
+    ),
+  });
+}
+
+/** Handle the colour choice: `pick_<productId>_<variantIndex>`. */
+async function handleColourPickCallback(
+  ctx: BotContext,
+  data: string,
+): Promise<void> {
+  const rest = data.replace("pick_", "");
+  const separator = rest.lastIndexOf("_");
+
+  if (separator === -1) return;
+
+  const productId = rest.slice(0, separator);
+  const variantIndex = Number(rest.slice(separator + 1));
+
+  if (!Number.isInteger(variantIndex)) return;
+
+  await promptForSize(ctx, productId, variantIndex);
+}
+
+/**
+ * Step 3: commit to the cart. `padd_<productId>_<variantIndex>_<sizeIndex>`.
+ *
+ * Indices are re-resolved against a fresh product read, so a size that sold out
+ * while the keyboard was open is rejected rather than oversold.
+ */
+async function handleAddToCartCallback(
+  ctx: BotContext,
+  data: string,
+): Promise<void> {
+  const parts = data.replace("padd_", "").split("_");
+  const sizeIndex = Number(parts.pop());
+  const variantIndex = Number(parts.pop());
+  const productId = parts.join("_");
+
+  if (!productId || !Number.isInteger(variantIndex) || !Number.isInteger(sizeIndex)) {
+    return;
+  }
+
+  await sendChatAction(ctx.chatId, "typing");
+
+  try {
+    await primeCurrency();
+
+    const product = await getProductById(productId);
+    const variant = product?.colorVariants[variantIndex];
+    const sizeEntry = variant?.sizeQuantities[sizeIndex];
+
+    if (!product || !variant || !sizeEntry || sizeEntry.quantity <= 0) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: formatError("That size just sold out. Please pick another."),
+        reply_markup: createProductKeyboard(productId, (product?.totalStock ?? 0) > 0),
+      });
+      return;
+    }
+
+    const added = await addToTelegramCart(ctx.chatId, {
+      productId,
+      name: product.name,
+      image: variant.image || product.image,
+      variantId: variant.id || undefined,
+      color: variant.color || undefined,
+      size: sizeEntry.size,
+      price: product.price,
+      quantity: 1,
+      maxQuantity: sizeEntry.quantity,
+    });
+
+    if (!added) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: formatError("Could not add that to your cart. Please try again."),
+      });
+      return;
+    }
+
+    const cart = await getTelegramCart(ctx.chatId);
+    const units = (cart?.items || []).reduce((sum, item) => sum + item.quantity, 0);
+    const subtotal = (cart?.items || []).reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0,
+    );
+
+    const detail = [variant.color, sizeEntry.size].filter(Boolean).join(" / ");
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text:
+        `✅ *Added to cart*\n\n` +
+        `${escapeMarkdown(product.name)}${detail ? ` \\(${escapeMarkdown(detail)}\\)` : ""}\n` +
+        `💰 ${escapeMarkdown(formatPrice(product.price))}\n\n` +
+        `🛒 Cart: ${units} item${units === 1 ? "" : "s"} \\- ${escapeMarkdown(formatPrice(subtotal))}`,
+      reply_markup: createCartKeyboard(true),
+    });
+  } catch (error) {
+    console.error("Add to cart error:", error);
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("Could not add that to your cart. Please try again."),
+    });
   }
 }
 
@@ -906,9 +1280,75 @@ async function handleProductCallback(ctx: BotContext, data: string): Promise<voi
  * Handle cart callbacks
  */
 async function handleCartCallback(ctx: BotContext, data: string): Promise<void> {
+  const action = data.replace("cart_", "");
+
+  if (action === "clear") {
+    const { clearTelegramCart } = await import("./cart-service");
+    const cleared = await clearTelegramCart(ctx.chatId);
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: cleared
+        ? "🗑️ Your cart is now empty\\."
+        : formatError("Could not clear your cart. Please try again."),
+      reply_markup: createMainMenuKeyboard(),
+    });
+    return;
+  }
+
+  if (action === "checkout") {
+    await sendCheckoutInstructions(ctx);
+    return;
+  }
+
+  // Item-level editing (increase/decrease/remove) is not wired up yet; the cart
+  // is carried to the website for checkout, where those controls already exist.
+  await handleCartCommand(ctx);
+}
+
+/**
+ * Hand the customer over to the website to pay.
+ *
+ * Checkout needs an address, a payment method and a verified account, so it is
+ * not something to rebuild in chat. A linked account gets its Telegram cart
+ * merged into the web cart on link, so the items travel with them.
+ */
+async function sendCheckoutInstructions(ctx: BotContext): Promise<void> {
+  const customer = await getCustomerByTelegramId(ctx.chatId);
+  const cartUrl = `${storefrontBaseUrl()}/cart`;
+  const { isTelegramLinkableUrl } = await import("./keyboards");
+
+  const lines = [
+    `🛍️ <b>Checkout</b>`,
+    ``,
+    customer
+      ? `Your account is linked, so your cart is waiting for you on the website.`
+      : `Link your account first with /link so this cart follows you to the website.`,
+    ``,
+    `Open the cart to choose delivery and payment:`,
+  ];
+
+  if (!isTelegramLinkableUrl(cartUrl)) {
+    // Telegram rejects the whole message for a non-public button URL, so on a
+    // local build the link goes in the body as copyable text instead.
+    lines.push(`<code>${cartUrl}</code>`);
+  }
+
   await sendMessage({
     chat_id: ctx.chatId,
-    text: "🛒 Cart management is coming soon\\!\n\nPlease use our website for checkout\\.",
+    text: lines.join("\n"),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...(isTelegramLinkableUrl(cartUrl)
+      ? {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🛒 Open my cart", url: cartUrl }],
+              [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+            ],
+          },
+        }
+      : {}),
   });
 }
 

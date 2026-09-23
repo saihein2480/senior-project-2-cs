@@ -14,12 +14,62 @@ export function escapeMarkdown(text: string): string {
 }
 
 /**
- * Format price in MMK
+ * THB -> MMK rate used by `formatPrice`.
+ *
+ * Held in module state so `formatPrice` can stay synchronous — it is called from
+ * deep inside message builders that have no business doing I/O. Callers prime it
+ * once per interaction via `setMmkRate(await getMmkRate())`; see `primeCurrency`
+ * in bot-service. The fallback chain matches the storefront's `useCurrencyRate()`
+ * so an unprimed call still quotes the same number the website would.
+ */
+let activeMmkRate = (() => {
+  const envRate = Number(process.env.NEXT_PUBLIC_MMK_RATE);
+  return Number.isFinite(envRate) && envRate > 0 ? envRate : 55;
+})();
+
+/** Point `formatPrice` at the owner's configured rate. */
+export function setMmkRate(rate: number): void {
+  if (Number.isFinite(rate) && rate > 0) {
+    activeMmkRate = rate;
+  }
+}
+
+export function getActiveMmkRate(): number {
+  return activeMmkRate;
+}
+
+/** `฿1,075` — integers stay whole, fractions keep two places. */
+function formatThb(priceThb: number): string {
+  const rounded = Math.round(priceThb * 100) / 100;
+  return `฿${
+    Number.isInteger(rounded)
+      ? rounded.toLocaleString("en-US")
+      : rounded.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+  }`;
+}
+
+/** `15,050 Ks` — matches the storefront's MMK label. */
+function formatMmk(priceThb: number): string {
+  return `${Math.round(priceThb * activeMmkRate).toLocaleString("en-US")} Ks`;
+}
+
+/**
+ * Format a THB price showing both currencies, e.g. `฿1,075 (15,050 Ks)`.
+ *
+ * The website shows one currency at a time because the customer picks it in the
+ * header; a chat has no such switch, so both are shown rather than guessing.
  */
 export function formatPrice(priceThb: number): string {
-  const mmkRate = Number(process.env.NEXT_PUBLIC_MMK_RATE) || 43;
-  const priceMmk = priceThb * mmkRate;
-  return new Intl.NumberFormat("en-US").format(priceMmk) + " MMK";
+  const amount = Number(priceThb) || 0;
+  return `${formatThb(amount)} (${formatMmk(amount)})`;
+}
+
+/** MMK only, for tight spots like cart line totals. */
+export function formatPriceMmk(priceThb: number): string {
+  return formatMmk(Number(priceThb) || 0);
 }
 
 /**
@@ -116,6 +166,11 @@ function inStockSizes(product: SearchProduct): string[] {
 export function formatProductPage(
   pageData: ProductPage,
   heading?: string,
+  /**
+   * Closing line. Defaults to the numbered-button hint; pass something else when
+   * the products were sent as cards carrying their own buttons, and "" to omit.
+   */
+  footerHint: string = "Tap a number below to see details.",
 ): string {
   if (pageData.total === 0) {
     return "❌ No products found. Try a different search or browse our categories.";
@@ -159,7 +214,7 @@ export function formatProductPage(
     parts.push("");
   });
 
-  parts.push(escapeMarkdown("Tap a number below to see details."));
+  if (footerHint) parts.push(escapeMarkdown(footerHint));
 
   return parts.join("\n");
 }
@@ -173,6 +228,111 @@ export function formatProductPage(
  */
 export function formatProductList(products: SearchProduct[], page: number = 1, pageSize: number = 5): string {
   return formatProductPage(paginateProducts(products, page, pageSize));
+}
+
+/**
+ * Caption for one product sent as a photo card in a listing.
+ *
+ * Kept inside Telegram's 1024-character caption limit: a caption that overflows
+ * makes `sendPhoto` fail outright, which would drop the product entirely.
+ */
+export function formatProductCard(
+  product: SearchProduct,
+  position?: { index: number; total: number },
+): string {
+  const parts: string[] = [];
+  const title = product.displayName || product.name;
+
+  parts.push(`🛍️ *${escapeMarkdown(title)}*`);
+  parts.push(`💰 ${escapeMarkdown(formatPrice(product.price))}`);
+
+  const colours = product.colorVariants?.length || product.colors?.length || 0;
+  if (colours > 1) parts.push(`🎨 ${colours} colours`);
+
+  const sizes = inStockSizes(product);
+  if (sizes.length > 0) {
+    parts.push(`📐 ${escapeMarkdown(sizes.join(", "))}`);
+  }
+
+  parts.push(
+    product.stock > 0 ? `📦 ${product.stock} in stock` : `❌ Out of stock`,
+  );
+
+  if (product.isNew) parts.push(`✨ *NEW ARRIVAL*`);
+
+  if (position) {
+    parts.push("");
+    parts.push(
+      escapeMarkdown(`Item ${position.index} of ${position.total}`),
+    );
+  }
+
+  const caption = parts.join("\n");
+  return caption.length > 1024 ? `${caption.slice(0, 1020)}...` : caption;
+}
+
+/** Shape of the fields `formatProductDetail` needs, from `lib/productInfo`. */
+export interface ProductDetailLike {
+  name: string;
+  price: number;
+  category?: string;
+  description?: string;
+  material?: string;
+  availableColors: string[];
+  availableSizes: string[];
+  totalStock: number;
+  stockBySize?: Record<string, number>;
+}
+
+/**
+ * Full product detail card.
+ *
+ * Separate from `formatProduct` because the detail lookup returns a
+ * `ProductInfo` — `totalStock`/`availableColors`/`availableSizes` — not a
+ * `SearchProduct`. The two were previously bridged with an `as any` cast, so the
+ * stock and colour lines read from fields that did not exist and every product
+ * rendered as "Out of stock" with no colours listed.
+ */
+export function formatProductDetail(product: ProductDetailLike): string {
+  const parts: string[] = [];
+
+  parts.push(`🛍️ *${escapeMarkdown(product.name)}*`);
+  parts.push(`💰 *${escapeMarkdown(formatPrice(product.price))}*`);
+
+  if (product.category) {
+    parts.push(`📁 ${escapeMarkdown(product.category)}`);
+  }
+
+  if (product.availableColors.length > 0) {
+    parts.push(`🎨 Colours: ${escapeMarkdown(product.availableColors.join(", "))}`);
+  }
+
+  if (product.availableSizes.length > 0) {
+    const sizes = product.stockBySize
+      ? product.availableSizes
+          .map((size) => `${size} (${product.stockBySize?.[size] ?? 0})`)
+          .join(", ")
+      : product.availableSizes.join(", ");
+    parts.push(`📐 Sizes: ${escapeMarkdown(sizes)}`);
+  }
+
+  if (product.material) {
+    parts.push(`🧵 ${escapeMarkdown(product.material)}`);
+  }
+
+  parts.push(
+    product.totalStock > 0
+      ? `📦 ${product.totalStock} in stock`
+      : `❌ Out of stock`,
+  );
+
+  if (product.description) {
+    parts.push("");
+    parts.push(escapeMarkdown(product.description.substring(0, 350)));
+  }
+
+  const caption = parts.join("\n");
+  return caption.length > 1024 ? `${caption.slice(0, 1020)}...` : caption;
 }
 
 /**

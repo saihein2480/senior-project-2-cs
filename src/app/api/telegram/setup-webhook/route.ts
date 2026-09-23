@@ -70,6 +70,19 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    if (action === "commands") {
+      // Publish the command menu. Telegram holds this list, so a newly added
+      // command is invisible in the UI until this runs.
+      const { setMyCommands } = await import("../../../../lib/telegram/api-client");
+      const { BOT_COMMANDS } = await import("../../../../lib/telegram/commands");
+      await setMyCommands(BOT_COMMANDS);
+      return NextResponse.json({
+        success: true,
+        message: `Registered ${BOT_COMMANDS.length} commands`,
+        commands: BOT_COMMANDS,
+      });
+    }
+
     // Default: Set webhook
     if (!WEBHOOK_URL) {
       return NextResponse.json(

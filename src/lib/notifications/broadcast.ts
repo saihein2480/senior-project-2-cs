@@ -13,7 +13,11 @@ import { adminDb } from "../firebase-admin";
 import { isEmailConfigured, sendMail } from "../email/mailer";
 import { sendMessageSafe, sendPhotoSafe } from "../telegram/api-client";
 import { buildNotificationContent } from "./content";
-import { resolveChannels, type NotificationTarget } from "./dispatch";
+import {
+  primeNotificationCurrency,
+  resolveChannels,
+  type NotificationTarget,
+} from "./dispatch";
 import type { BroadcastResult, CustomerNotificationEvent } from "./types";
 
 /**
@@ -135,6 +139,9 @@ export async function broadcastToCustomers(
     telegramFailed: 0,
     inAppCreated: 0,
   };
+
+  // One read for the whole broadcast, so every recipient sees the same price.
+  await primeNotificationCurrency();
 
   const maxRecipients = options.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
   const includeInApp = options.includeInApp !== false;

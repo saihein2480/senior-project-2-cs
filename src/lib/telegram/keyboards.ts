@@ -17,6 +17,10 @@ export function createMainMenuKeyboard(): InlineKeyboard {
         { text: "🔍 Search", callback_data: "menu_search" },
       ],
       [
+        { text: "✨ New Arrivals", callback_data: "browse_new_1" },
+        { text: "🔥 Best Sellers", callback_data: "browse_best_1" },
+      ],
+      [
         { text: "🛒 My Cart", callback_data: "menu_cart" },
         { text: "📦 My Orders", callback_data: "menu_orders" },
       ],
@@ -110,15 +114,22 @@ export function createBrowseKeyboard(options: {
   firstIndex: number;
   /** Absolute storefront URL for this listing, when one can be linked. */
   websiteUrl?: string;
+  /**
+   * Skip the per-product number buttons. Used when each product was already
+   * sent as its own photo card carrying its own Add to Cart / View Details.
+   */
+  navigationOnly?: boolean;
 }): InlineKeyboard {
   const rows: InlineKeyboardButton[][] = [];
 
   // Numbered shortcuts to each product on this page.
-  const numberRow: InlineKeyboardButton[] = options.productIds.map((id, i) => ({
-    text: String(options.firstIndex + i),
-    callback_data: `product_view_${id}`,
-  }));
-  if (numberRow.length > 0) rows.push(numberRow);
+  if (!options.navigationOnly) {
+    const numberRow: InlineKeyboardButton[] = options.productIds.map((id, i) => ({
+      text: String(options.firstIndex + i),
+      callback_data: `product_view_${id}`,
+    }));
+    if (numberRow.length > 0) rows.push(numberRow);
+  }
 
   if (options.totalPages > 1) {
     const nav: InlineKeyboardButton[] = [];
@@ -150,6 +161,93 @@ export function createBrowseKeyboard(options: {
   }
 
   rows.push([{ text: "🔙 Categories", callback_data: "menu_products" }]);
+
+  return { inline_keyboard: rows };
+}
+
+/**
+ * Buttons under a product photo card inside a listing.
+ *
+ * Deliberately compact — five of these appear per page, so it stays to a single
+ * row and omits the navigation, which the page's own footer message carries.
+ */
+export function createProductCardKeyboard(
+  productId: string,
+  inStock: boolean,
+): InlineKeyboard {
+  if (!inStock) {
+    return {
+      inline_keyboard: [
+        [{ text: "🔍 View Details", callback_data: `product_view_${productId}` }],
+      ],
+    };
+  }
+
+  return {
+    inline_keyboard: [
+      [
+        { text: "➕ Add to Cart", callback_data: `product_add_${productId}` },
+        { text: "🔍 Details", callback_data: `product_view_${productId}` },
+      ],
+    ],
+  };
+}
+
+/**
+ * Colour picker for adding a product to the cart.
+ *
+ * Carries the variant's **index** rather than its id or colour name: colour names
+ * are owner-entered and may be non-Latin, and callback_data is capped at 64
+ * bytes. The index is resolved against a fresh product read on the next step.
+ */
+export function createColourPickKeyboard(
+  productId: string,
+  variants: Array<{ color: string; stock: number }>,
+): InlineKeyboard {
+  const buttons: InlineKeyboardButton[] = variants
+    .map((variant, index) => ({ variant, index }))
+    .filter(({ variant }) => variant.stock > 0)
+    .map(({ variant, index }) => ({
+      text: variant.color || `Option ${index + 1}`,
+      callback_data: `pick_${productId}_${index}`,
+    }));
+
+  const rows: InlineKeyboardButton[][] = [];
+  for (let i = 0; i < buttons.length; i += 2) {
+    rows.push(buttons.slice(i, i + 2));
+  }
+
+  rows.push([
+    { text: "🔙 Back", callback_data: `product_view_${productId}` },
+  ]);
+
+  return { inline_keyboard: rows };
+}
+
+/**
+ * Size picker for a chosen colour variant. `padd_` commits to the cart.
+ */
+export function createSizePickKeyboard(
+  productId: string,
+  variantIndex: number,
+  sizes: Array<{ size: string; quantity: number }>,
+): InlineKeyboard {
+  const buttons: InlineKeyboardButton[] = sizes
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry.quantity > 0)
+    .map(({ entry, index }) => ({
+      text: `${entry.size} (${entry.quantity})`,
+      callback_data: `padd_${productId}_${variantIndex}_${index}`,
+    }));
+
+  const rows: InlineKeyboardButton[][] = [];
+  for (let i = 0; i < buttons.length; i += 3) {
+    rows.push(buttons.slice(i, i + 3));
+  }
+
+  rows.push([
+    { text: "🔙 Back", callback_data: `product_add_${productId}` },
+  ]);
 
   return { inline_keyboard: rows };
 }

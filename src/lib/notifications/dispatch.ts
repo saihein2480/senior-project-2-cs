@@ -41,6 +41,25 @@ export interface NotifyCustomerInput {
 }
 
 /**
+ * Point the price formatter at the owner's configured exchange rate.
+ *
+ * Shared by `notifyCustomer` and the broadcaster. Never throws: an unprimed rate
+ * falls back to `NEXT_PUBLIC_MMK_RATE`, which is a stale price rather than a
+ * failed notification.
+ */
+export async function primeNotificationCurrency(): Promise<void> {
+  try {
+    const [{ getMmkRate }, { setMmkRate }] = await Promise.all([
+      import("../storeSettings"),
+      import("../telegram/formatters"),
+    ]);
+    setMmkRate(await getMmkRate());
+  } catch (error) {
+    console.error("Could not prime notification currency rate:", error);
+  }
+}
+
+/**
  * Is a preference flag on?
  *
  * Absent means on. Customers who registered before a flag existed — and
@@ -188,6 +207,11 @@ export async function notifyCustomer(
   input: NotifyCustomerInput,
 ): Promise<DispatchResult> {
   const { customerId, event } = input;
+
+  // Money in these messages is formatted by the shared telegram formatter, which
+  // holds the THB -> MMK rate in module state. Prime it from the owner's settings
+  // so a notification quotes the same figure the storefront shows.
+  await primeNotificationCurrency();
   const result: DispatchResult = {
     customerId,
     type: event.type,

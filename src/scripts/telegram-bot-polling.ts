@@ -109,6 +109,22 @@ async function startPolling() {
     console.error("❌ Failed to delete webhook:", error);
   }
 
+  // Publish the command menu so newly added commands show up in the Telegram UI.
+  try {
+    const { BOT_COMMANDS } = await import("../lib/telegram/commands");
+    const response = await fetch(`${API_BASE}/setMyCommands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands: BOT_COMMANDS }),
+    });
+    const data = await response.json();
+    if (data.ok) {
+      console.log(`✅ Registered ${BOT_COMMANDS.length} bot commands`);
+    }
+  } catch (error) {
+    console.error("❌ Failed to register commands:", error);
+  }
+
   // Get bot info
   try {
     const response = await fetch(`${API_BASE}/getMe`);
