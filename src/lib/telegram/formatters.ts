@@ -28,7 +28,7 @@ export function formatPrice(priceThb: number): string {
 export function formatProduct(product: SearchProduct): string {
   const parts: string[] = [];
 
-  parts.push(`🛍️ *${escapeMarkdown(product.name)}*\n`);
+  parts.push(`🛍️ *${escapeMarkdown(product.displayName || product.name)}*\n`);
   parts.push(`💰 Price: *${escapeMarkdown(formatPrice(product.price))}*`);
 
   if (product.category) {
@@ -56,32 +56,123 @@ export function formatProduct(product: SearchProduct): string {
   return parts.join("\n");
 }
 
+/** How many products fit comfortably in one chat message. */
+export const PRODUCTS_PER_PAGE = 5;
+
+export interface ProductPage {
+  /** Products on this page, in order. */
+  items: SearchProduct[];
+  /** 1-based, already clamped into range. */
+  page: number;
+  totalPages: number;
+  total: number;
+  /** 1-based index of the first item, for "showing 6-10 of 34". */
+  firstIndex: number;
+}
+
 /**
- * Format product list for Telegram
+ * Slice a result set into a page, clamping the requested page into range.
+ *
+ * Shared by the renderer and by the caller that builds the pagination keyboard,
+ * so the buttons can never disagree with the text about how many pages there are.
  */
-export function formatProductList(products: SearchProduct[], page: number = 1, pageSize: number = 5): string {
-  if (products.length === 0) {
+export function paginateProducts(
+  products: SearchProduct[],
+  page: number,
+  pageSize: number = PRODUCTS_PER_PAGE,
+): ProductPage {
+  const total = products.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(Math.max(1, Math.floor(page) || 1), totalPages);
+  const start = (safePage - 1) * pageSize;
+
+  return {
+    items: products.slice(start, start + pageSize),
+    page: safePage,
+    totalPages,
+    total,
+    firstIndex: start + 1,
+  };
+}
+
+/** Distinct sizes that are actually in stock, e.g. ["S","M","L"]. */
+function inStockSizes(product: SearchProduct): string[] {
+  const sizes = new Set<string>();
+  for (const variant of product.colorVariants || []) {
+    for (const sq of variant.sizeQuantities || []) {
+      if (Number(sq.quantity) > 0 && sq.size) sizes.add(String(sq.size));
+    }
+  }
+  return [...sizes];
+}
+
+/**
+ * Format one page of products.
+ *
+ * Mirrors what a product card shows on the website — name, price, colours,
+ * sizes, stock state and the NEW badge — because this list is the customer's
+ * only view of the catalogue inside Telegram.
+ */
+export function formatProductPage(
+  pageData: ProductPage,
+  heading?: string,
+): string {
+  if (pageData.total === 0) {
     return "❌ No products found. Try a different search or browse our categories.";
   }
 
-  const start = (page - 1) * pageSize;
-  const end = start + pageSize;
-  const pageProducts = products.slice(start, end);
-  const totalPages = Math.ceil(products.length / pageSize);
-
+  const lastIndex = pageData.firstIndex + pageData.items.length - 1;
   const parts: string[] = [];
-  parts.push(`🛍️ *Found ${products.length} product${products.length !== 1 ? 's' : ''}*\n`);
-  parts.push(`📄 Page ${page} of ${totalPages}\n`);
 
-  pageProducts.forEach((product, index) => {
-    const num = start + index + 1;
-    parts.push(`${num}\\. *${escapeMarkdown(product.name)}*`);
+  if (heading) parts.push(`🛍️ *${escapeMarkdown(heading)}*`);
+  parts.push(
+    escapeMarkdown(
+      `Showing ${pageData.firstIndex}-${lastIndex} of ${pageData.total} product${pageData.total !== 1 ? "s" : ""}`,
+    ),
+  );
+  parts.push("");
+
+  pageData.items.forEach((product, index) => {
+    const num = pageData.firstIndex + index;
+    const title = product.displayName || product.name;
+
+    parts.push(`${num}\\. *${escapeMarkdown(title)}*`);
     parts.push(`   💰 ${escapeMarkdown(formatPrice(product.price))}`);
+
+    const colours = product.colorVariants?.length || product.colors?.length || 0;
+    if (colours > 1) {
+      parts.push(`   🎨 ${colours} colours`);
+    }
+
+    const sizes = inStockSizes(product);
+    if (sizes.length > 0) {
+      parts.push(`   📐 ${escapeMarkdown(sizes.join(", "))}`);
+    }
+
+    if (product.stock > 0) {
+      parts.push(`   📦 ${product.stock} in stock`);
+    } else {
+      parts.push(`   ❌ Out of stock`);
+    }
+
     if (product.isNew) parts.push(`   ✨ NEW`);
     parts.push("");
   });
 
+  parts.push(escapeMarkdown("Tap a number below to see details."));
+
   return parts.join("\n");
+}
+
+/**
+ * Format product list for Telegram.
+ *
+ * @deprecated Use `paginateProducts` + `formatProductPage`, which keep the page
+ * text and the pagination buttons derived from the same numbers. This wrapper
+ * printed "Page 1 of 7" with no way to reach page 2.
+ */
+export function formatProductList(products: SearchProduct[], page: number = 1, pageSize: number = 5): string {
+  return formatProductPage(paginateProducts(products, page, pageSize));
 }
 
 /**

@@ -94,6 +94,67 @@ export function createCategoriesKeyboard(categories: string[]): InlineKeyboard {
 }
 
 /**
+ * Keyboard under a page of browse results.
+ *
+ * One numbered button per product on the page, then Prev/Next, then a way back
+ * to the category list. `selector` is the category index or "all", matching the
+ * `browse_<selector>_<page>` callback the handler parses.
+ */
+export function createBrowseKeyboard(options: {
+  selector: string;
+  page: number;
+  totalPages: number;
+  /** Product ids on this page, in display order. */
+  productIds: string[];
+  /** 1-based number of the first product, so labels match the text. */
+  firstIndex: number;
+  /** Absolute storefront URL for this listing, when one can be linked. */
+  websiteUrl?: string;
+}): InlineKeyboard {
+  const rows: InlineKeyboardButton[][] = [];
+
+  // Numbered shortcuts to each product on this page.
+  const numberRow: InlineKeyboardButton[] = options.productIds.map((id, i) => ({
+    text: String(options.firstIndex + i),
+    callback_data: `product_view_${id}`,
+  }));
+  if (numberRow.length > 0) rows.push(numberRow);
+
+  if (options.totalPages > 1) {
+    const nav: InlineKeyboardButton[] = [];
+
+    if (options.page > 1) {
+      nav.push({
+        text: "⬅️ Prev",
+        callback_data: `browse_${options.selector}_${options.page - 1}`,
+      });
+    }
+
+    nav.push({
+      text: `📄 ${options.page}/${options.totalPages}`,
+      callback_data: "noop",
+    });
+
+    if (options.page < options.totalPages) {
+      nav.push({
+        text: "Next ➡️",
+        callback_data: `browse_${options.selector}_${options.page + 1}`,
+      });
+    }
+
+    rows.push(nav);
+  }
+
+  if (options.websiteUrl && isTelegramLinkableUrl(options.websiteUrl)) {
+    rows.push([{ text: "🌐 View on website", url: options.websiteUrl }]);
+  }
+
+  rows.push([{ text: "🔙 Categories", callback_data: "menu_products" }]);
+
+  return { inline_keyboard: rows };
+}
+
+/**
  * Create product detail keyboard
  */
 export function createProductKeyboard(

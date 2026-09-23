@@ -51,7 +51,13 @@ type FirestoreStockDoc = {
 
 export type SearchProduct = {
   id: string;
+  /**
+   * Lowercased name, used for the case-insensitive keyword and category
+   * matching below. Not for display — use `displayName`.
+   */
   name: string;
+  /** Name exactly as the owner entered it in the POS. Use this in any UI. */
+  displayName: string;
   price: number;
   description?: string;
   category?: string;
@@ -126,9 +132,14 @@ function mapStockDocToSearchProduct(
     .map((v) => v.color)
     .filter((c): c is string => !!c);
 
+  // Keep both casings: everything downstream matches on the lowercased form,
+  // but showing a customer "w9939" when the catalogue says "W9939" looks broken.
+  const rawName = String(data.groupName || data.name || "").trim();
+
   return {
     id,
-    name: (data.groupName || data.name || "").toLowerCase(),
+    name: rawName.toLowerCase(),
+    displayName: rawName,
     price: typeof data.unitPrice === "number" ? data.unitPrice : data.price || 0,
     description: (data.description || "").toLowerCase(),
     category: (data.category || "").toLowerCase(),

@@ -21,12 +21,16 @@ import {
   formatPrice,
   formatOrderList,
   formatOrder,
+  formatProductPage,
+  paginateProducts,
 } from "./formatters";
 import {
   createMainMenuKeyboard,
   createCategoriesKeyboard,
+  createBrowseKeyboard,
   createProductKeyboard,
   createBackButton,
+  storefrontBaseUrl,
 } from "./keyboards";
 import { searchProducts } from "../productSearch";
 import { findOrderByRef } from "../orderSupport";
@@ -704,6 +708,8 @@ async function handleCallbackQuery(query: any): Promise<void> {
       await handleMenuCallback(ctx, callbackData);
     } else if (callbackData.startsWith("category_")) {
       await handleCategoryCallback(ctx, callbackData);
+    } else if (callbackData.startsWith("browse_")) {
+      await handleBrowseCallback(ctx, callbackData);
     } else if (callbackData.startsWith("product_")) {
       await handleProductCallback(ctx, callbackData);
     } else if (callbackData.startsWith("cart_")) {
@@ -748,12 +754,46 @@ async function handleMenuCallback(ctx: BotContext, data: string): Promise<void> 
  * Handle category callbacks
  */
 async function handleCategoryCallback(ctx: BotContext, data: string): Promise<void> {
-  const selector = data.replace("category_", "");
+  // Entry point from the categories keyboard: always page 1.
+  await renderBrowsePage(ctx, data.replace("category_", ""), 1);
+}
 
+/**
+ * Handle browse pagination callbacks: `browse_<selector>_<page>`.
+ */
+async function handleBrowseCallback(ctx: BotContext, data: string): Promise<void> {
+  const rest = data.replace("browse_", "");
+  const separator = rest.lastIndexOf("_");
+
+  if (separator === -1) {
+    await renderBrowsePage(ctx, rest, 1);
+    return;
+  }
+
+  const selector = rest.slice(0, separator);
+  const page = Number(rest.slice(separator + 1));
+  await renderBrowsePage(ctx, selector, Number.isFinite(page) ? page : 1);
+}
+
+/**
+ * Render one page of a category listing.
+ *
+ * `selector` is a category index, or "all". Held as an index rather than a name
+ * because callback_data is capped at 64 bytes and category names are
+ * owner-entered; see `createCategoriesKeyboard`.
+ *
+ * Paging edits the existing message rather than sending a new one, so browsing
+ * does not bury the chat in near-identical lists.
+ */
+async function renderBrowsePage(
+  ctx: BotContext,
+  selector: string,
+  page: number,
+): Promise<void> {
   await sendChatAction(ctx.chatId, "typing");
 
   try {
-    // Re-read the list so the index resolves against what the POS holds *now*.
+    // Re-read so the index resolves against what the POS holds *now*.
     const categories = await loadCategories();
 
     let category: string | null = null;
@@ -789,27 +829,43 @@ async function handleCategoryCallback(ctx: BotContext, data: string): Promise<vo
       return;
     }
 
-    // Name the category explicitly: the button label is truncated, and it makes
-    // a stale-index mismatch obvious instead of silently confusing.
-    const heading = category
-      ? `${escapeMarkdown(category)}\n\n`
-      : `🛍️ *All Products*\n\n`;
-    const listText = heading + formatProductList(products);
-    await sendMessage({
-      chat_id: ctx.chatId,
-      text: listText,
+    const pageData = paginateProducts(products, page);
+    const heading = category || "All Products";
+    const text = formatProductPage(pageData, heading);
+
+    const keyboard = createBrowseKeyboard({
+      selector,
+      page: pageData.page,
+      totalPages: pageData.totalPages,
+      productIds: pageData.items.map((p) => p.id),
+      firstIndex: pageData.firstIndex,
+      websiteUrl: category
+        ? `${storefrontBaseUrl()}/view-all?category=${encodeURIComponent(category)}`
+        : `${storefrontBaseUrl()}/view-all`,
     });
 
-    // Show first product with image
-    const firstProduct = products[0];
-    if (firstProduct.image) {
-      await sendPhoto({
-        chat_id: ctx.chatId,
-        photo: firstProduct.image,
-        caption: formatProduct(firstProduct),
-        reply_markup: createProductKeyboard(firstProduct.id, firstProduct.stock > 0),
-      });
+    // Paging from an existing listing edits it in place; a fresh entry sends a
+    // new message. Editing can fail harmlessly (e.g. identical content), so fall
+    // back to sending rather than leaving the customer with nothing.
+    if (ctx.messageId && ctx.callbackData?.startsWith("browse_")) {
+      try {
+        await editMessageText({
+          chat_id: ctx.chatId,
+          message_id: ctx.messageId,
+          text,
+          reply_markup: keyboard,
+        });
+        return;
+      } catch (editError) {
+        console.error("Could not edit browse message, sending a new one:", editError);
+      }
     }
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text,
+      reply_markup: keyboard,
+    });
   } catch (error) {
     console.error("Category error:", error);
     await sendMessage({
