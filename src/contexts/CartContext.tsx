@@ -1,5 +1,20 @@
 "use client";
 
+/**
+ * Shopping cart state.
+ *
+ * For a signed-in customer, Firestore is the single source of truth:
+ * `customers/{uid}.cartItems` is watched with `onSnapshot`, so the cart is the
+ * same in every browser, on every device, and updates live when it changes
+ * elsewhere — including from the Telegram bot, which writes the same field.
+ * Mutations write straight to Firestore; nothing is cached in `localStorage`,
+ * because a per-browser copy is exactly what made carts diverge and let a stale
+ * device overwrite a cart that had been emptied somewhere else.
+ *
+ * `localStorage` survives only for **guests**, who have no document to write to.
+ * That cart is folded into the customer's cart the first time they sign in.
+ */
+
 import React, {
   createContext,
   useContext,
@@ -8,7 +23,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { doc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "../lib/firebase";
 import { useCustomerAuth } from "./CustomerAuthContext";
 
@@ -32,10 +47,9 @@ type CartContextType = {
   /**
    * True until the cart is known to be complete.
    *
-   * `localStorage` resolves immediately but the signed-in customer's server cart
-   * is fetched asynchronously, so `items` is briefly empty even when it is not.
-   * Without this flag a consumer renders its empty state during that gap — which
-   * is what made the cart look empty for a moment after arriving from Telegram.
+   * For a signed-in customer the cart arrives from Firestore after mount, so
+   * `items` is briefly empty even when it is not. Consumers must check this
+   * before rendering an empty state, or the cart flashes "empty" on load.
    */
   isLoading: boolean;
   addItem: (item: CartItem) => void;
@@ -44,203 +58,220 @@ type CartContextType = {
   clearCart: () => void;
 };
 
+/** Guest-only cart storage. Signed-in carts live in Firestore. */
 const CART_STORAGE_KEY = "sth_cart_v1";
 
+const CartContext = createContext<CartContextType | null>(null);
+
+/** Drop anything malformed; the cart is written by several clients. */
+function sanitizeCartItems(input: unknown): CartItem[] {
+  if (!Array.isArray(input)) return [];
+  const sanitized: CartItem[] = [];
+
+  input.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    const record = item as Partial<CartItem>;
+    if (!record.id || !record.productId || !record.name) return;
+
+    const quantity = Math.max(1, Math.floor(Number(record.quantity) || 1));
+    const maxQuantity =
+      typeof record.maxQuantity === "number"
+        ? Math.max(1, Math.floor(record.maxQuantity))
+        : undefined;
+
+    sanitized.push({
+      id: String(record.id),
+      productId: String(record.productId),
+      name: String(record.name),
+      image: String(record.image || ""),
+      variantId: record.variantId ? String(record.variantId) : undefined,
+      color: record.color ? String(record.color) : undefined,
+      size: record.size ? String(record.size) : undefined,
+      unitPriceTHB: Number(record.unitPriceTHB) || 0,
+      quantity,
+      maxQuantity,
+    });
+  });
+
+  return sanitized;
+}
+
 /**
- * Locally persisted cart plus when it last changed.
+ * Read the guest cart.
  *
- * The timestamp is what lets a signed-in customer's remote cart and this device's
- * cart be reconciled by recency. Without it, whichever side loaded last silently
- * won — and because an empty remote cart was treated as "nothing to load", a cart
- * cleared from Telegram was immediately overwritten by stale local items.
+ * Tolerates the two historical shapes: a bare array, and the `{ items,
+ * updatedAt }` wrapper used while carts were reconciled by recency.
  */
-type StoredCart = { items: CartItem[]; updatedAt: number };
-
-function readStoredCart(raw: string | null): StoredCart {
-  if (!raw) return { items: [], updatedAt: 0 };
-
+function readGuestCart(): CartItem[] {
   try {
+    const raw = localStorage.getItem(CART_STORAGE_KEY);
+    if (!raw) return [];
+
     const parsed = JSON.parse(raw);
-
-    // Pre-timestamp format was a bare array. Treat it as infinitely old so the
-    // remote cart wins, which is the safer direction on upgrade.
-    if (Array.isArray(parsed)) {
-      return { items: parsed as CartItem[], updatedAt: 0 };
-    }
-
+    if (Array.isArray(parsed)) return sanitizeCartItems(parsed);
     if (parsed && Array.isArray(parsed.items)) {
-      return {
-        items: parsed.items as CartItem[],
-        updatedAt: Number(parsed.updatedAt) || 0,
-      };
+      return sanitizeCartItems(parsed.items);
     }
   } catch {
-    // fall through to an empty cart
+    // corrupt payload: start empty
   }
-
-  return { items: [], updatedAt: 0 };
+  return [];
 }
-const CartContext = createContext<CartContextType | null>(null);
+
+function writeGuestCart(items: CartItem[]) {
+  try {
+    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function clearGuestCart() {
+  try {
+    localStorage.removeItem(CART_STORAGE_KEY);
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+/** Fold a guest cart into the customer's, stacking matching lines. */
+function mergeCarts(base: CartItem[], incoming: CartItem[]): CartItem[] {
+  const merged = [...base];
+
+  incoming.forEach((item) => {
+    const index = merged.findIndex((existing) => existing.id === item.id);
+
+    if (index === -1) {
+      merged.push(item);
+      return;
+    }
+
+    const existing = merged[index];
+    const total = existing.quantity + item.quantity;
+    const cap = existing.maxQuantity ?? item.maxQuantity;
+    merged[index] = {
+      ...existing,
+      quantity: typeof cap === "number" ? Math.min(total, cap) : total,
+    };
+  });
+
+  return merged;
+}
 
 export function CartProvider({ children }: { children: React.ReactNode }) {
   const { user, loading: authLoading } = useCustomerAuth();
   const [items, setItems] = useState<CartItem[]>([]);
-  const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
-  const [hasLoadedRemoteCart, setHasLoadedRemoteCart] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
   /**
-   * When this device's cart last changed, in epoch ms.
+   * Mirror of `items` for mutations.
    *
-   * A ref rather than state: it is only ever compared during reconciliation, and
-   * making it state would retrigger the effects that maintain it.
+   * Handlers are recreated every render and would otherwise close over a stale
+   * array; reading the ref means a rapid sequence of taps composes correctly.
    */
-  const localUpdatedAtRef = useRef(0);
+  const itemsRef = useRef<CartItem[]>([]);
 
-  const sanitizeCartItems = (input: unknown): CartItem[] => {
-    if (!Array.isArray(input)) return [];
-    const sanitized: CartItem[] = [];
-
-    input.forEach((item) => {
-      if (!item || typeof item !== "object") return;
-      const record = item as Partial<CartItem>;
-      if (!record.id || !record.productId || !record.name) return;
-
-      const quantity = Math.max(1, Math.floor(Number(record.quantity) || 1));
-      const maxQuantity =
-        typeof record.maxQuantity === "number"
-          ? Math.max(1, Math.floor(record.maxQuantity))
-          : undefined;
-
-      sanitized.push({
-        id: String(record.id),
-        productId: String(record.productId),
-        name: String(record.name),
-        image: String(record.image || ""),
-        variantId: record.variantId ? String(record.variantId) : undefined,
-        color: record.color ? String(record.color) : undefined,
-        size: record.size ? String(record.size) : undefined,
-        unitPriceTHB: Number(record.unitPriceTHB) || 0,
-        quantity,
-        maxQuantity,
-      });
-    });
-
-    return sanitized;
+  const setCart = (next: CartItem[]) => {
+    itemsRef.current = next;
+    setItems(next);
   };
 
-  useEffect(() => {
-    try {
-      const stored = readStoredCart(localStorage.getItem(CART_STORAGE_KEY));
-      setItems(stored.items);
-      localUpdatedAtRef.current = stored.updatedAt;
-    } catch {
-      // ignore invalid persisted cart data
-      setItems([]);
-    } finally {
-      setHasLoadedStorage(true);
-    }
-  }, []);
+  /** uid whose guest-cart handoff has already happened. */
+  const mergedForUidRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (!hasLoadedStorage || authLoading) return;
+  const remote = !!(user && db && isFirebaseConfigured);
 
-    if (!user || !db || !isFirebaseConfigured) {
-      setHasLoadedRemoteCart(true);
+  /** Persist to whichever store backs this session. */
+  const persist = (next: CartItem[]) => {
+    if (user && db && isFirebaseConfigured) {
+      void setDoc(
+        doc(db, "customers", user.uid),
+        {
+          cartItems: next,
+          cartUpdatedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      ).catch((error) => {
+        // Surfaced rather than swallowed: a failed write means the optimistic
+        // state below is now ahead of the server, and the next snapshot will
+        // visibly roll it back.
+        console.error("Failed to save cart:", error);
+      });
       return;
     }
 
-    const firestore = db;
+    writeGuestCart(next);
+  };
+
+  // Guest session: hydrate from localStorage. Skipped entirely once signed in,
+  // where the Firestore subscription below is authoritative.
+  useEffect(() => {
+    if (authLoading) return;
+    if (remote) return;
+
+    setCart(readGuestCart());
+    setIsLoading(false);
+  }, [authLoading, remote]);
+
+  // Signed-in session: live subscription. This is what makes the cart update
+  // across browsers and react to Telegram writes without a refresh.
+  useEffect(() => {
+    if (authLoading || !user || !db || !isFirebaseConfigured) return;
+
     const uid = user.uid;
+    const firestore = db;
 
-    const loadRemoteCart = async () => {
-      try {
-        const customerDocRef = doc(firestore, "customers", uid);
-        const customerDoc = await getDoc(customerDocRef);
-        const data = customerDoc.data();
+    // Captured before the first snapshot replaces local state.
+    const guestCart =
+      mergedForUidRef.current === uid ? [] : readGuestCart();
 
-        // A cart the Telegram bot emptied is an explicit empty array, not a
-        // missing field — so "has the field" and "has items" are different
-        // questions. Conflating them meant a remote clear was never adopted, and
-        // the sync effect below then wrote the stale local items straight back.
-        const hasRemoteCart = Array.isArray(data?.cartItems);
-        if (!hasRemoteCart) {
-          // Never had a cart on the server: keep whatever this device holds and
-          // let the sync effect upload it.
-          return;
+    setIsLoading(true);
+
+    const unsubscribe = onSnapshot(
+      doc(firestore, "customers", uid),
+      (snapshot) => {
+        const serverItems = sanitizeCartItems(snapshot.data()?.cartItems);
+
+        // One-time handoff: anything added before signing in joins the account
+        // cart, then the browser copy is discarded so it can never resurrect.
+        if (mergedForUidRef.current !== uid) {
+          mergedForUidRef.current = uid;
+          clearGuestCart();
+
+          if (guestCart.length > 0) {
+            const merged = mergeCarts(serverItems, guestCart);
+            setCart(merged);
+            setIsLoading(false);
+            persist(merged);
+            return;
+          }
         }
 
-        const remoteItems = sanitizeCartItems(data?.cartItems);
-        const remoteUpdatedAt =
-          data?.cartUpdatedAt?.toMillis?.() ??
-          (data?.cartUpdatedAt ? new Date(data.cartUpdatedAt).getTime() : 0);
+        setCart(serverItems);
+        setIsLoading(false);
+      },
+      (error) => {
+        console.error("Cart subscription failed:", error);
+        setIsLoading(false);
+      },
+    );
 
-        // Last write wins. That way a clear or an add from Telegram is adopted
-        // here, while a guest cart built on this device just before signing in is
-        // not thrown away.
-        if (remoteUpdatedAt >= localUpdatedAtRef.current) {
-          setItems(remoteItems);
-          localUpdatedAtRef.current = remoteUpdatedAt;
-        }
-      } catch {
-        // keep local cart if remote fetch fails
-      } finally {
-        setHasLoadedRemoteCart(true);
-      }
-    };
-
-    setHasLoadedRemoteCart(false);
-    void loadRemoteCart();
-  }, [user, authLoading, hasLoadedStorage]);
-
-  useEffect(() => {
-    if (!hasLoadedStorage) return;
-    try {
-      const payload: StoredCart = {
-        items,
-        updatedAt: localUpdatedAtRef.current,
-      };
-      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // ignore storage write failures
-    }
-  }, [items, hasLoadedStorage]);
-
-  useEffect(() => {
-    if (!hasLoadedStorage || authLoading || !hasLoadedRemoteCart) return;
-    if (!user || !db || !isFirebaseConfigured) return;
-
-    const firestore = db;
-    const uid = user.uid;
-
-    const syncRemoteCart = async () => {
-      try {
-        const customerDocRef = doc(firestore, "customers", uid);
-        await setDoc(
-          customerDocRef,
-          {
-            cartItems: items,
-            cartUpdatedAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true },
-        );
-      } catch {
-        // ignore remote sync failures to avoid blocking cart UX
-      }
-    };
-
-    void syncRemoteCart();
-  }, [items, user, authLoading, hasLoadedStorage, hasLoadedRemoteCart]);
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, authLoading]);
 
   /**
-   * Apply a local cart change and stamp it as the newest.
+   * Apply a change optimistically, then persist it.
    *
-   * Every mutation goes through here so the recency comparison on the next load
-   * knows this device is ahead of the server.
+   * The local update keeps the UI instant; for a signed-in customer the snapshot
+   * that follows confirms it (Firestore replays pending writes from its own cache,
+   * so there is no flicker).
    */
   const mutate = (next: (prev: CartItem[]) => CartItem[]) => {
-    localUpdatedAtRef.current = Date.now();
-    setItems(next);
+    const updated = next(itemsRef.current);
+    setCart(updated);
+    persist(updated);
   };
 
   const addItem = (item: CartItem) => {
@@ -288,12 +319,6 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   const clearCart = () => mutate(() => []);
 
-  // Still settling while auth is unresolved (we do not yet know whether there is
-  // a server cart to wait for), while localStorage is unread, or while a
-  // signed-in customer's server cart is in flight.
-  const isLoading =
-    authLoading || !hasLoadedStorage || (!!user && !hasLoadedRemoteCart);
-
   const value = useMemo<CartContextType>(() => {
     const itemCount = items.reduce((total, item) => total + item.quantity, 0);
     const subtotalTHB = items.reduce(
@@ -311,6 +336,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       removeItem,
       clearCart,
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, isLoading]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
