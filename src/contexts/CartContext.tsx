@@ -29,6 +29,15 @@ type CartContextType = {
   items: CartItem[];
   itemCount: number;
   subtotalTHB: number;
+  /**
+   * True until the cart is known to be complete.
+   *
+   * `localStorage` resolves immediately but the signed-in customer's server cart
+   * is fetched asynchronously, so `items` is briefly empty even when it is not.
+   * Without this flag a consumer renders its empty state during that gap — which
+   * is what made the cart look empty for a moment after arriving from Telegram.
+   */
+  isLoading: boolean;
   addItem: (item: CartItem) => void;
   updateQuantity: (id: string, quantity: number) => void;
   removeItem: (id: string) => void;
@@ -279,6 +288,12 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   const clearCart = () => mutate(() => []);
 
+  // Still settling while auth is unresolved (we do not yet know whether there is
+  // a server cart to wait for), while localStorage is unread, or while a
+  // signed-in customer's server cart is in flight.
+  const isLoading =
+    authLoading || !hasLoadedStorage || (!!user && !hasLoadedRemoteCart);
+
   const value = useMemo<CartContextType>(() => {
     const itemCount = items.reduce((total, item) => total + item.quantity, 0);
     const subtotalTHB = items.reduce(
@@ -290,12 +305,13 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       items,
       itemCount,
       subtotalTHB,
+      isLoading,
       addItem,
       updateQuantity,
       removeItem,
       clearCart,
     };
-  }, [items]);
+  }, [items, isLoading]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }

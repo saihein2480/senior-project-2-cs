@@ -9,7 +9,7 @@ import { applyBestPromotionToLine } from "../../lib/onlinePromotion";
 
 export default function CartPage() {
   const router = useRouter();
-  const { items, subtotalTHB, removeItem, updateQuantity, clearCart } =
+  const { items, subtotalTHB, isLoading, removeItem, updateQuantity, clearCart } =
     useCart();
   const { rate: mmkRate } = useCurrencyRate();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
@@ -45,6 +45,56 @@ export default function CartPage() {
   const subtotalMMK = Math.round(subtotalTHB * mmkRate);
 
   const totalUnits = items.reduce((sum, item) => sum + item.quantity, 0);
+
+  // Checked before the empty state: a signed-in customer's cart is fetched from
+  // Firestore after the page mounts, so `items` is momentarily empty even when it
+  // is not. Arriving from a Telegram checkout link made that gap obvious — the
+  // cart you had just filled in chat flashed "empty" first.
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
+        <div className="mx-auto max-w-6xl px-4 py-5 md:py-8">
+          <div className="h-4 w-40 animate-pulse rounded-full bg-rose-100/70" />
+
+          <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_360px]">
+            <div className="space-y-4">
+              {Array.from({ length: 2 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="flex gap-4 rounded-2xl border border-rose-100 bg-white p-4 shadow-sm"
+                >
+                  <div className="h-24 w-20 shrink-0 animate-pulse rounded-xl bg-rose-100/60" />
+                  <div className="flex-1 space-y-3 py-1">
+                    <div className="h-4 w-1/2 animate-pulse rounded-full bg-rose-100/70" />
+                    <div className="h-3 w-1/3 animate-pulse rounded-full bg-gray-100" />
+                    <div className="h-8 w-28 animate-pulse rounded-full bg-gray-100" />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-2xl border border-rose-100 bg-white p-6 shadow-sm">
+              <div className="h-4 w-28 animate-pulse rounded-full bg-rose-100/70" />
+              <div className="mt-5 space-y-3">
+                <div className="h-3 animate-pulse rounded-full bg-gray-100" />
+                <div className="h-3 w-2/3 animate-pulse rounded-full bg-gray-100" />
+              </div>
+              <div className="mt-6 h-11 animate-pulse rounded-full bg-rose-100/70" />
+            </div>
+          </div>
+
+          <p
+            className="mt-6 flex items-center justify-center gap-2 text-xs font-medium text-gray-500"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-rose-200 border-t-rose-500" />
+            Loading your cart...
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (items.length === 0) {
     return (

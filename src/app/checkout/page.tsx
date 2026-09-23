@@ -49,7 +49,13 @@ export default function CheckoutPage() {
   const { rate: mmkRate } = useCurrencyRate();
   const { taxRate, taxRatePercent, hasTaxRate } = useTaxRate();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
-  const { items: cartItems, subtotalTHB, clearCart } = useCart();
+  const {
+    items: cartItems,
+    subtotalTHB,
+    clearCart,
+    // Aliased: `isLoading` below already refers to the product query.
+    isLoading: cartLoading,
+  } = useCart();
 
   const productId = params.get("productId") || "";
   const selectedVariantId = params.get("variant") || "";
@@ -669,7 +675,9 @@ export default function CheckoutPage() {
     };
   }, [onlineOrderId, qrValue, qrExpired, router, productId, clearCart]);
 
-  if (!productId && cartItems.length === 0) {
+  // `!cartLoading` guards against announcing an empty cart before the signed-in
+  // customer's server cart has arrived — the skeleton below covers that gap.
+  if (!productId && !cartLoading && cartItems.length === 0) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
         <div className="mx-auto flex max-w-6xl items-center justify-center px-4 py-16 md:py-24">
@@ -708,7 +716,7 @@ export default function CheckoutPage() {
     );
   }
 
-  if ((productId && isLoading) || loading) {
+  if ((productId && isLoading) || loading || (!productId && cartLoading)) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
         <div className="mx-auto max-w-6xl px-4 py-5 md:py-8">
