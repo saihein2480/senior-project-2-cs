@@ -240,6 +240,34 @@ export async function POST(request: NextRequest) {
       // Don't fail order creation if the notification fails to be created
     }
 
+    // Confirm the order to the customer by email, Telegram and the in-app bell.
+    // Best-effort: the order exists either way, so nothing here may throw.
+    if (customer.uid) {
+      try {
+        const { notifyCustomer } = await import("@/lib/notifications/dispatch");
+        await notifyCustomer({
+          customerId: customer.uid,
+          fallbackEmail: customer.email,
+          fallbackDisplayName: customer.displayName,
+          event: {
+            type: "order_placed",
+            order: {
+              orderRef: orderId,
+              totalAmount: Number(total || 0),
+              paymentMethod: "cod",
+              paymentStatus: "pending",
+              items: items.map((item: any) => ({
+                name: item.productName,
+                quantity: item.quantity,
+              })),
+            },
+          },
+        });
+      } catch (notifyError) {
+        console.error("Error sending COD order confirmation to customer:", notifyError);
+      }
+    }
+
     console.log(
       "COD transaction and online order created successfully:",
       transactionId,

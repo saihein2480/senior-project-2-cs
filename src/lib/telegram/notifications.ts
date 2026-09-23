@@ -1,6 +1,24 @@
 /**
  * Telegram Notification System
  * Send automated notifications to customers via Telegram
+ *
+ * @deprecated Use `notifyCustomer` from `lib/notifications/dispatch` instead.
+ *
+ * These senders only reach Telegram, so a customer who has not linked the bot —
+ * which today is all of them — gets nothing at all. The dispatcher sends the
+ * same event by email, by Telegram and to the in-app bell from one call, with
+ * the wording shared between channels in `lib/notifications/content`.
+ *
+ * Two further reasons not to add callers here:
+ *  - every function below treats a missing `notificationPreferences` map as
+ *    "opted out" (`!customer.notificationPreferences?.orderUpdates`), but the
+ *    map is only written when a customer links Telegram, so existing customers
+ *    are silently skipped. The dispatcher defaults an absent flag to on.
+ *  - the bodies are hand-escaped MarkdownV2; one unescaped `.` or `!` makes the
+ *    Telegram API reject the message and `sendMessageSafe` swallow it as
+ *    `false`. The dispatcher uses HTML, which only needs `&`, `<` and `>`.
+ *
+ * Kept because documents/TELEGRAM_API_REFERENCE.md describes them.
  */
 
 import { sendMessageSafe, sendPhotoSafe } from "./api-client";

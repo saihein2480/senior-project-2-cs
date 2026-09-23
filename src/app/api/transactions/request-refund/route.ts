@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
+import { exceedsDocBudget } from "@/lib/documentBudget";
 
 export async function POST(request: NextRequest) {
   try {
@@ -171,25 +172,43 @@ export async function POST(request: NextRequest) {
         groupName: item.groupName || "",
       }));
 
+    // Firestore caps a document at 1MiB, and this request embeds the QR image
     // Sanitize item photos array - ensure all are strings
     const sanitizedPhotos = Array.isArray(itemPhotos) 
       ? itemPhotos.filter((photo: any) => typeof photo === 'string')
       : [];
 
+    const refundRequest = {
+      type: refundType, // "cancellation" or "return"
+      status: "pending",
+      reason: reason || "Customer requested refund",
+      items: sanitizedItems,
+      requestedAt: new Date().toISOString(),
+      requestedBy: customerUid,
+      customerEmail: transaction.customer?.email || "",
+      customerName: transaction.customer?.displayName || "",
+      qrCodeImage: qrCodeImage || null, // Store QR code image
+      itemPhotos: sanitizedPhotos, // Store item photos for return requests
+    };
+
+    // This request embeds a QR image plus up to five item photos as base64 on
+    // the transaction document, which Firestore caps at 1MiB. Counting the
+    // already-stored fields matters because an order can also carry a
+    // cancellation request with its own image. Without this the write fails as
+    // "Property refundRequest contains an invalid nested entity".
+    if (exceedsDocBudget(transaction, "refundRequest", refundRequest)) {
+      return NextResponse.json(
+        {
+          error:
+            "The uploaded photos are too large to attach to this order. Please upload fewer or smaller photos.",
+        },
+        { status: 413 }
+      );
+    }
+
     // Create refund request
     await transactionsRef.doc(transactionDoc.id).update({
-      refundRequest: {
-        type: refundType, // "cancellation" or "return"
-        status: "pending",
-        reason: reason || "Customer requested refund",
-        items: sanitizedItems,
-        requestedAt: new Date().toISOString(),
-        requestedBy: customerUid,
-        customerEmail: transaction.customer?.email || "",
-        customerName: transaction.customer?.displayName || "",
-        qrCodeImage: qrCodeImage || null, // Store QR code image
-        itemPhotos: sanitizedPhotos, // Store item photos for return requests
-      },
+      refundRequest,
       updatedAt: FieldValue.serverTimestamp(),
     });
 
@@ -211,6 +230,29 @@ export async function POST(request: NextRequest) {
     } catch (notifError) {
       console.error("Error creating owner notification for refund request:", notifError);
       // Don't fail the request if the notification fails to be created
+    }
+
+    // Acknowledge the request to the customer so they are not left wondering
+    // whether it went through. Best-effort; the request is already saved.
+    try {
+      const { notifyCustomer } = await import("@/lib/notifications/dispatch");
+      await notifyCustomer({
+        customerId: customerUid,
+        event: {
+          type: "refund_requested",
+          order: {
+            orderRef: transactionId,
+            totalAmount: Number(transaction.total || 0),
+            paymentMethod: transaction.paymentMethod || "",
+            paymentStatus: transaction.paymentStatus || "",
+          },
+          // No figure yet: the amount is settled when the owner inspects the
+          // returned items and approves the refund.
+          reason: typeof reason === "string" ? reason : undefined,
+        },
+      });
+    } catch (notifyError) {
+      console.error("Error acknowledging return request to customer:", notifyError);
     }
 
     return NextResponse.json({

@@ -1,0 +1,104 @@
+
+> clothing-store-web@0.1.0 build
+> next build
+
+▲ Next.js 16.1.1 (Turbopack)
+- Environments: .env.local
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 6.3s
+  Running TypeScript ...
+  Collecting page data using 15 workers ...
+(node:4100) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:18772) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:9880) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:6932) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:18476) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:11224) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:1764) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:15828) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:19088) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:18440) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:25864) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:22460) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:7316) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:832) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:4812) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+  Generating static pages using 15 workers (0/31) ...
+  Generating static pages using 15 workers (7/31) 
+  Generating static pages using 15 workers (15/31) 
+  Generating static pages using 15 workers (23/31) 
+✓ Generating static pages using 15 workers (31/31) in 341.2ms
+  Finalizing page optimization ...
+
+Route (app)
+┌ ƒ /
+├ ƒ /_not-found
+├ ƒ /account
+├ ƒ /account/link-telegram
+├ ƒ /account/membership
+├ ƒ /account/notifications
+├ ƒ /account/profile
+├ ƒ /account/purchases
+├ ƒ /api/admin/fix-cod-orders
+├ ƒ /api/admin/fix-customer-points
+├ ƒ /api/admin/fix-payment-methods
+├ ƒ /api/admin/fix-used-coupon-points
+├ ƒ /api/ai-chat
+├ ƒ /api/auth/send-verification
+├ ƒ /api/auth/verify-email
+├ ƒ /api/categories
+├ ƒ /api/loyalty/active-coupon
+├ ƒ /api/loyalty/join
+├ ƒ /api/loyalty/redeem-package
+├ ƒ /api/loyalty/settings
+├ ƒ /api/loyalty/summary
+├ ƒ /api/loyalty/use-coupon
+├ ƒ /api/mmpay/create-order
+├ ƒ /api/mmpay/order-status
+├ ƒ /api/mmpay/test-complete
+├ ƒ /api/mmpay/webhook
+├ ƒ /api/new-items
+├ ƒ /api/notifications/customer-campaign
+├ ƒ /api/settings
+├ ƒ /api/shops
+├ ƒ /api/telegram/link-account
+├ ƒ /api/telegram/send-notification
+├ ƒ /api/telegram/setup-webhook
+├ ƒ /api/telegram/webhook
+├ ƒ /api/test/add-coupon-to-order
+├ ƒ /api/top-selling
+├ ƒ /api/transactions/create-cod
+├ ƒ /api/transactions/request-cancel
+├ ƒ /api/transactions/request-refund
+├ ƒ /api/user/purchases
+├ ƒ /auth/login
+├ ƒ /auth/register
+├ ƒ /auth/verify-email
+├ ƒ /best-sellers
+├ ƒ /cart
+├ ƒ /checkout
+├ ƒ /membership
+├ ƒ /new-arrivals
+├ ƒ /product/[id]
+├ ƒ /terms-and-conditions
+└ ƒ /view-all
+
+
+ƒ  (Dynamic)  server-rendered on demand
+

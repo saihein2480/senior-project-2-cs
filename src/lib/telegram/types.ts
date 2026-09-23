@@ -76,6 +76,22 @@ export interface AccountLinkToken {
   createdAt: Date;
   expiresAt: Date;
   used: boolean;
+  /**
+   * Which side started the link, and therefore which half of the pair is
+   * already known and trusted:
+   *  - "telegram": the bot issued it into a chat via /link, so `telegramChatId`
+   *    is trusted and `customerId` is filled in once the customer authenticates
+   *    on the storefront.
+   *  - "web": the storefront issued it to a signed-in customer, so `customerId`
+   *    is trusted and `telegramChatId` is filled in when the bot receives the
+   *    deep-link /start.
+   *
+   * The two are not interchangeable: consuming a "web" token through the
+   * storefront route would link an empty chat id, and consuming a "telegram"
+   * token through the bot would link an empty customer id. Absent means
+   * "telegram" for tokens created before this field existed.
+   */
+  direction?: "telegram" | "web";
 }
 
 export interface BotCommand {

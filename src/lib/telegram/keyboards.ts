@@ -215,12 +215,64 @@ export function createConfirmationKeyboard(
   };
 }
 
+/** Storefront base URL with any trailing slashes removed. */
+export function storefrontBaseUrl(): string {
+  return (process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001").replace(
+    /\/+$/,
+    "",
+  );
+}
+
 /**
- * Create account link keyboard
+ * Can Telegram accept this URL on an inline keyboard button?
+ *
+ * Telegram validates button URLs server-side and rejects anything that is not
+ * publicly resolvable with `Bad Request: ... is invalid: Wrong HTTP URL`. That
+ * rejection fails the whole `sendMessage`, so a localhost URL does not merely
+ * produce a dead button — it means the message never arrives at all.
+ *
+ * Local development therefore cannot use a URL button, and callers need to fall
+ * back to putting the link in the message text (which is not validated).
  */
-export function createAccountLinkKeyboard(token: string): InlineKeyboard {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001";
-  const linkUrl = `${appUrl}/account/link-telegram?token=${token}`;
+export function isTelegramLinkableUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.protocol === "https:") return true;
+
+    // Plain http is only accepted for a real public host.
+    const host = parsed.hostname.toLowerCase();
+    const isLocal =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      host.endsWith(".local") ||
+      host.endsWith(".localhost");
+    return !isLocal && host.includes(".");
+  } catch {
+    return false;
+  }
+}
+
+/** Absolute URL a customer opens to finish linking their Telegram account. */
+export function accountLinkUrl(token: string): string {
+  return `${storefrontBaseUrl()}/account/link-telegram?token=${token}`;
+}
+
+/**
+ * Create account link keyboard.
+ *
+ * Returns `null` when the storefront URL is not something Telegram will accept
+ * on a button, so the caller can degrade to a text link instead of having the
+ * whole message rejected.
+ */
+export function createAccountLinkKeyboard(token: string): InlineKeyboard | null {
+  const linkUrl = accountLinkUrl(token);
+
+  if (!isTelegramLinkableUrl(linkUrl)) {
+    return null;
+  }
 
   return {
     inline_keyboard: [

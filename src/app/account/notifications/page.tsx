@@ -6,7 +6,31 @@ import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
 import { db } from "../../../lib/firebase";
 import { collection, query, where, getDocs, orderBy } from "firebase/firestore";
 
-type NotificationType = "refund_completed" | "refund_approved" | "refund_rejected" | "cancellation_approved" | "cancellation_rejected" | "order_delivered";
+/**
+ * Types this page knows how to style.
+ *
+ * The first group is derived from transaction documents below; the rest are
+ * written into the `notifications` collection by the cross-channel dispatcher
+ * in `lib/notifications/dispatch`, alongside the email and Telegram message.
+ * Keep this in sync with the `inAppType` values in `lib/notifications/content`.
+ */
+type NotificationType =
+  | "refund_completed"
+  | "refund_approved"
+  | "refund_rejected"
+  | "refund_requested"
+  | "cancellation_approved"
+  | "cancellation_rejected"
+  | "cancellation_requested"
+  | "order_placed"
+  | "payment_received"
+  | "order_packaging"
+  | "order_shipped"
+  | "order_delivered"
+  | "order_cancelled"
+  | "promotion"
+  | "coupon_package"
+  | "loyalty_coupon_earned";
 
 type Notification = {
   id: string;
@@ -17,6 +41,8 @@ type Notification = {
   orderRef?: string;
   amount?: number;
   currency?: string;
+  /** Storefront path to open on click; falls back to the purchases page. */
+  link?: string;
   timestamp: Date;
   read: boolean;
 };
@@ -63,6 +89,17 @@ const PackageIcon = ({ size = 24, className = "" }: { size?: number; className?:
     <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
     <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
     <line x1="12" y1="22.08" x2="12" y2="12" />
+  </svg>
+);
+
+/** Used for promotion and loyalty-reward notifications. */
+const GiftIcon = ({ size = 24, className = "" }: { size?: number; className?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <polyline points="20 12 20 22 4 22 4 12" />
+    <rect x="2" y="7" width="20" height="5" />
+    <line x1="12" y1="22" x2="12" y2="7" />
+    <path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z" />
+    <path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z" />
   </svg>
 );
 
@@ -121,6 +158,7 @@ export default function NotificationsPage() {
               message: data.message || "",
               orderId: data.orderId || data.transactionId || "",
               orderRef: data.onlineOrderId,
+              link: typeof data.link === "string" ? data.link : undefined,
               timestamp: timestamp,
               read: data.read || false,
             });
@@ -307,12 +345,21 @@ export default function NotificationsPage() {
         return <DollarSignIcon className="text-green-600" size={24} />;
       case "refund_approved":
       case "cancellation_approved":
+      case "payment_received":
+      case "order_placed":
         return <CheckCircleIcon className="text-green-600" size={24} />;
       case "refund_rejected":
       case "cancellation_rejected":
+      case "order_cancelled":
         return <XCircleIcon className="text-red-600" size={24} />;
       case "order_delivered":
+      case "order_shipped":
+      case "order_packaging":
         return <PackageIcon className="text-blue-600" size={24} />;
+      case "promotion":
+      case "coupon_package":
+      case "loyalty_coupon_earned":
+        return <GiftIcon className="text-rose-600" size={24} />;
       default:
         return <BellIcon className="text-gray-600" size={24} />;
     }
@@ -324,17 +371,31 @@ export default function NotificationsPage() {
       case "refund_approved":
       case "cancellation_approved":
       case "order_delivered":
+      case "order_placed":
+      case "payment_received":
         return "border-green-200 bg-green-50";
       case "refund_rejected":
       case "cancellation_rejected":
+      case "order_cancelled":
         return "border-red-200 bg-red-50";
+      case "order_shipped":
+      case "order_packaging":
+        return "border-blue-200 bg-blue-50";
+      case "promotion":
+      case "coupon_package":
+      case "loyalty_coupon_earned":
+        return "border-rose-200 bg-rose-50";
       default:
         return "border-gray-200 bg-white";
     }
   };
 
   const handleNotificationClick = (notification: Notification) => {
-    router.push(`/account/purchases?branch=${branch}&currency=${currency}`);
+    // Promotion and loyalty notifications carry their own destination; order
+    // ones fall back to the purchases list, which is where they all used to go.
+    const target = notification.link || "/account/purchases";
+    const separator = target.includes("?") ? "&" : "?";
+    router.push(`${target}${separator}branch=${branch}&currency=${currency}`);
   };
 
   const filteredNotifications =

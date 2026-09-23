@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import ProductsList from "../../../components/ProductsList";
 import { useProduct } from "../../../hooks/useProducts";
+import { recordProductView } from "../../../lib/recommendations/signals";
 import { useCurrencyRate } from "../../../hooks/useSettings";
 import { useCart } from "../../../contexts/CartContext";
 import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
@@ -43,6 +44,19 @@ export default function ProductDetailPage() {
       ? queryError.message
       : String(queryError)
     : null;
+
+  // Remember this view so the homepage can suggest similar pieces later. Signed
+  // in, this writes to the account and streams to their other devices; as a
+  // guest it stays on this device. The category is read from `description`,
+  // which is where the catalogue actually keeps it.
+  useEffect(() => {
+    if (loading || !product?.id) return;
+    recordProductView(user?.uid, {
+      id: product.id,
+      name: product.name,
+      category: product.description,
+    });
+  }, [loading, product?.id, product?.name, product?.description, user?.uid]);
 
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(
     null,
@@ -603,7 +617,7 @@ export default function ProductDetailPage() {
               </div>
 
               {/* Price */}
-              <div className=" via-white to-white p-4 md:p-5">
+              <div className=" via-white to-white">
                 {displayPrice !== null ? (
                   <div className="flex flex-wrap items-end gap-x-3 gap-y-1">
                     <span className="bg-gradient-to-r from-rose-500 to-pink-500 bg-clip-text text-3xl md:text-4xl font-bold text-transparent">
@@ -714,19 +728,21 @@ export default function ProductDetailPage() {
               </div>
 
               {/* Sizes */}
+              {/* Sizes belong to a specific colour variant, so the whole
+                  section stays hidden until a colour is chosen. */}
+              {selectedVariantId && (
               <div>
                 <div className="mb-3 flex items-baseline justify-between gap-3">
                   <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">
                     Size
                   </span>
+                  <span className="text-sm font-semibold text-gray-900">
+                    {selectedSize || "Select a size"}
+                  </span>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
-                  {!selectedVariantId ? (
-                    <div className="w-full rounded-xl border border-dashed border-rose-200 bg-rose-50/40 px-4 py-3 text-xs text-gray-500">
-                      Pick a colour first to see available sizes
-                    </div>
-                  ) : (sizesToShow || []).length === 0 ? (
+                  {(sizesToShow || []).length === 0 ? (
                     <div className="w-full rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-500">
                       No sizes available for this colour
                     </div>
@@ -758,6 +774,7 @@ export default function ProductDetailPage() {
                   })}
                 </div>
               </div>
+              )}
 
                 {/* Selected item summary */}
                 {canPurchase && (

@@ -33,16 +33,17 @@ function LinkTelegramContent() {
       }
 
       try {
-        // Call API to link Telegram account
+        // The route derives the account from this ID token, so a signed-in
+        // customer can only ever link Telegram to their own account.
+        const idToken = await user.getIdToken();
+
         const response = await fetch("/api/telegram/link-account", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            Authorization: `Bearer ${idToken}`,
           },
-          body: JSON.stringify({
-            token,
-            customerId: user.uid,
-          }),
+          body: JSON.stringify({ token }),
         });
 
         const data = await response.json();

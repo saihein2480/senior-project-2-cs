@@ -10,6 +10,7 @@ import { useShops } from "../hooks/useShops";
 import { useOnlinePromotions } from "../hooks/useOnlinePromotions";
 import { applyBestPromotionToLine } from "../lib/onlinePromotion";
 import { useCurrency, formatPrice } from "../hooks/useCurrency";
+import { productImageProps } from "../lib/productImage";
 
 type SizeQuantity = {
   size?: string;
@@ -549,20 +550,18 @@ export default function ProductsList({
     setSelectedSizes((prev) => ({ ...prev, [productId]: size }));
   };
 
-  const getCurrentImage = (p: Product) => {
-    // prefer color variant image -> group image -> product image
+  /**
+   * Image props for a card, honouring the colour the shopper picked.
+   *
+   * Returns a candidate list rather than a single URL so a dead image URL
+   * fails over to the next option instead of rendering broken.
+   */
+  const getImageProps = (p: Product) => {
     const variantImg = p.colorVariants?.find(
       (v: ColorVariant, i: number) =>
         (v.id ?? `${p.id}-v-${i}`) === selectedColors[p.id],
     )?.image;
-    return (
-      variantImg ||
-      p.groupImage ||
-      p.image ||
-      `https://via.placeholder.com/400x500/E5E7EB/6B7280?text=${encodeURIComponent(
-        p.name || "Product",
-      )}`
-    );
+    return productImageProps(p, variantImg);
   };
 
   // removed old getColorCode helper — colors now include codes
@@ -914,7 +913,7 @@ export default function ProductsList({
                   <div className="w-full aspect-[3/4] overflow-hidden bg-gray-50 flex items-center justify-center p-3">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src={getCurrentImage(p)}
+                      {...getImageProps(p)}
                       alt={p.name}
                       className={`w-full h-full object-contain block transition-transform duration-300 group-hover:scale-105 ${
                         isOutOfStock ? "opacity-50" : ""

@@ -8,6 +8,7 @@ import { useCustomerAuth } from "../contexts/CustomerAuthContext";
 import { useCart } from "../contexts/CartContext";
 import { useShops } from "../hooks/useShops";
 import { useCategories } from "../hooks/useCategories";
+import { recordSearch } from "../lib/recommendations/signals";
 
 function NavBarContent() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -41,20 +42,18 @@ function NavBarContent() {
   const branchDropdownRef = useRef<HTMLDivElement | null>(null);
   const currencyDropdownRef = useRef<HTMLDivElement | null>(null);
   const languageDropdownRef = useRef<HTMLDivElement | null>(null);
-  const searchDropdownRef = useRef<HTMLDivElement | null>(null);
-  const mobileSearchBarRef = useRef<HTMLDivElement | null>(null);
 
-  // Get only first two branches (Main Branch should be first)
-  // Sort by name to ensure "Main Branch" comes first if it exists by name
+  // Every branch the owner has created is selectable. The list is ordered so
+  // "Main Branch" leads — `availableBranches[0]` is also the fallback branch
+  // used when the URL carries no valid `branch` param.
   const availableBranches = React.useMemo(() => {
-    const sorted = [...shops].sort((a, b) => {
-      // Prioritize "Main Branch" by name
-      if (a.name.toLowerCase().includes("main")) return -1;
-      if (b.name.toLowerCase().includes("main")) return 1;
-      // Otherwise sort alphabetically
+    const isMain = (name: string) => name.toLowerCase().includes("main");
+    return [...shops].sort((a, b) => {
+      const aMain = isMain(a.name);
+      const bMain = isMain(b.name);
+      if (aMain !== bMain) return aMain ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
-    return sorted.slice(0, 2);
   }, [shops]);
 
   // Check membership status when user changes
@@ -168,22 +167,44 @@ function NavBarContent() {
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
+  /**
+   * Current page URL with the search term applied.
+   *
+   * Built from the existing params rather than from scratch: writing
+   * `${pathname}?q=...` dropped `branch` and `currency`, which knocked the
+   * shopper back to the default branch whenever the query changed.
+   *
+   * Changing or clearing the term changes the result set, so the page position
+   * is discarded too.
+   */
+  const buildSearchUrl = (term: string) => {
+    const base = pathname || "/";
+    const params = new URLSearchParams(searchParams?.toString() || "");
+    if (term) params.set("q", term);
+    else params.delete("q");
+    params.delete("page");
+    const queryString = params.toString();
+    return queryString ? `${base}?${queryString}` : base;
+  };
+
+  /** Tell any listening product grid what the active query is. */
+  const broadcastSearch = (term: string) => {
+    if (typeof window === "undefined") return;
+    try {
+      window.dispatchEvent(new CustomEvent("app:search", { detail: term }));
+    } catch {
+      // ignore
+    }
+  };
+
   // Update URL query without closing UI (used for live typing)
   const updateUrlQuery = (term: string) => {
     try {
       if (supportsInlineSearch(pathname)) {
-        const lg = pathname || "/";
-        const newUrl = term ? `${lg}?q=${encodeURIComponent(term)}` : lg;
         // replace history state without triggering navigation
         if (typeof window !== "undefined") {
-          window.history.replaceState(null, "", newUrl);
-          try {
-            window.dispatchEvent(
-              new CustomEvent("app:search", { detail: term }),
-            );
-          } catch (e) {
-            // ignore
-          }
+          window.history.replaceState(null, "", buildSearchUrl(term));
+          broadcastSearch(term);
         }
       } else {
         // don't auto-redirect to home when live-typing with an empty query
@@ -195,25 +216,45 @@ function NavBarContent() {
     }
   };
 
+  /**
+   * Close the search UI and clear the search.
+   *
+   * Deliberately different from committing a search: submitting keeps the
+   * results on screen, whereas closing is an abandon, so the term, the `q`
+   * param and any listening grid all return to the unfiltered view.
+   */
+  const closeSearch = () => {
+    setSearchQuery("");
+    setSearchOpen(false);
+
+    if (!supportsInlineSearch(pathname)) return;
+
+    // router.replace rather than history.replaceState: the grid resolves its
+    // filter as `localQuery || urlQuery`, so clearing only the broadcast would
+    // leave a stale `?q=` in the URL still driving the filter. A real
+    // navigation clears both.
+    try {
+      router.replace(buildSearchUrl(""));
+    } finally {
+      broadcastSearch("");
+    }
+  };
+
   // Commit search (Enter or explicit click) — navigate and close UI
   const commitSearch = (q?: string) => {
     const term = (q ?? searchQuery).trim();
+
+    // Only committed searches feed recommendations. The 350ms live-typing path
+    // (updateUrlQuery) fires for every keystroke, which would fill the history
+    // with prefixes of a single word.
+    recordSearch(user?.uid, term);
+
     try {
       if (supportsInlineSearch(pathname)) {
-        const lg = pathname || "/";
-        const newUrl = term ? `${lg}?q=${encodeURIComponent(term)}` : lg;
         try {
-          router.replace(newUrl);
+          router.replace(buildSearchUrl(term));
         } finally {
-          if (typeof window !== "undefined") {
-            try {
-              window.dispatchEvent(
-                new CustomEvent("app:search", { detail: term }),
-              );
-            } catch (e) {
-              // ignore
-            }
-          }
+          broadcastSearch(term);
         }
       } else {
         if (!term) router.push("/");
@@ -239,6 +280,36 @@ function NavBarContent() {
     const onScroll = () => setScrolled(window.scrollY > 8);
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // While the mobile drawer is open, freeze the page behind it so the drawer
+  // scrolls on its own, and let Escape dismiss it.
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
+
+  // Close the drawer once the viewport is wide enough to show the desktop nav,
+  // otherwise it stays stuck open (and scroll-locked) after a rotate/resize.
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 768px)");
+    const onChange = (event: MediaQueryListEvent) => {
+      if (event.matches) setMenuOpen(false);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
   }, []);
 
   // Auto-expand categories when on respective pages
@@ -493,29 +564,18 @@ function NavBarContent() {
       ) {
         setShowLanguageDropdown(false);
       }
-      if (searchDropdownRef.current || mobileSearchBarRef.current) {
-        const clickedInsideDesktopSearch =
-          searchDropdownRef.current?.contains(event.target as Node) ?? false;
-        const clickedInsideMobileSearch =
-          mobileSearchBarRef.current?.contains(event.target as Node) ?? false;
-        if (!clickedInsideDesktopSearch && !clickedInsideMobileSearch) {
-          setSearchOpen(false);
-        }
-      }
+      // Search is deliberately NOT closed on an outside click: a shopper
+      // clicking into the results while typing would lose the field. It closes
+      // via its own X button, Escape, or on submitting a search.
     };
 
-    if (
-      showBranchDropdown ||
-      showCurrencyDropdown ||
-      showLanguageDropdown ||
-      searchOpen
-    ) {
+    if (showBranchDropdown || showCurrencyDropdown || showLanguageDropdown) {
       document.addEventListener("mousedown", handleClickOutside);
     }
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
     };
-  }, [showBranchDropdown, showCurrencyDropdown, showLanguageDropdown, searchOpen]);
+  }, [showBranchDropdown, showCurrencyDropdown, showLanguageDropdown]);
 
   // Handle branch filter
   const handleBranchClick = (branchId: string) => {
@@ -596,14 +656,16 @@ function NavBarContent() {
         }`}
         aria-label="Main navigation"
       >
-        <div className="mx-auto max-w-7xl flex items-center justify-between px-4 md:px-8 py-3.5 relative">
+        <div className="mx-auto max-w-7xl flex items-center justify-between gap-2 px-3 sm:px-4 md:px-8 py-3 md:py-3.5 relative">
           {/* Left: mobile hamburger + desktop search & nav links */}
-          <div className="flex items-center gap-6 flex-shrink-0">
+          <div className="flex items-center gap-1 sm:gap-2 md:gap-6 flex-shrink-0">
             {/* Mobile hamburger */}
             <button
               aria-label="Toggle menu"
+              aria-expanded={menuOpen}
+              aria-controls="mobile-menu"
               onClick={() => setMenuOpen((s) => !s)}
-              className="p-1 -ml-1 text-pink-600 hover:text-pink-700 transition-colors md:hidden"
+              className="inline-flex h-10 w-10 items-center justify-center -ml-1.5 rounded-full text-pink-600 hover:bg-pink-50 hover:text-pink-700 transition-colors md:hidden"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -618,11 +680,12 @@ function NavBarContent() {
             </button>
 
             {/* Search icon with dropdown search box */}
-            <div className="relative" ref={searchDropdownRef}>
+            <div className="relative">
               <button
                 aria-label="Toggle search"
-                onClick={() => setSearchOpen((s) => !s)}
-                className="inline-flex text-pink-600 hover:text-pink-700 transition-colors"
+                aria-expanded={searchOpen}
+                onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full text-pink-600 hover:bg-pink-50 hover:text-pink-700 transition-colors md:h-auto md:w-auto md:rounded-none md:hover:bg-transparent"
               >
                 <svg
                   className="h-5 w-5"
@@ -639,8 +702,11 @@ function NavBarContent() {
                 </svg>
               </button>
 
+              {/* Desktop-only: on small screens the full-width bar under the
+                  header handles search, so this dropdown must stay hidden or
+                  both would appear at once. */}
               {searchOpen && (
-                <div className="absolute top-full left-0 mt-3 w-72 bg-white rounded-lg shadow-lg border border-gray-200 p-3 z-50">
+                <div className="hidden md:block absolute top-full left-0 mt-3 w-72 bg-white rounded-lg shadow-lg border border-gray-200 p-3 z-50">
                   <div className="flex items-center gap-2 border-b border-gray-200 pb-2">
                     <input
                       ref={searchInputRef}
@@ -652,7 +718,7 @@ function NavBarContent() {
                           commitSearch();
                         }
                         if (e.key === "Escape") {
-                          setSearchOpen(false);
+                          closeSearch();
                         }
                       }}
                       placeholder={t("search_placeholder")}
@@ -661,7 +727,7 @@ function NavBarContent() {
                     <button
                       aria-label="Search"
                       onClick={() => commitSearch()}
-                      className="text-gray-500 hover:text-gray-800"
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-gray-500 transition-colors hover:bg-rose-50 hover:text-rose-600"
                     >
                       <svg
                         className="h-4 w-4"
@@ -674,6 +740,27 @@ function NavBarContent() {
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"
+                        />
+                      </svg>
+                    </button>
+                    {/* Explicit close, since clicking outside no longer
+                        dismisses the search box. */}
+                    <button
+                      aria-label="Close search"
+                      onClick={closeSearch}
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-rose-50 hover:text-rose-600"
+                    >
+                      <svg
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={1.9}
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M18 6 6 18M6 6l12 12"
                         />
                       </svg>
                     </button>
@@ -726,15 +813,15 @@ function NavBarContent() {
           {/* Center: Brand name */}
           <Link
             href={buildUrlWithBranch("/")}
-            className="flex items-center md:absolute md:left-1/2 md:-translate-x-1/2"
+            className="flex min-w-0 items-center justify-center md:absolute md:left-1/2 md:-translate-x-1/2"
           >
-            <span className="text-lg md:text-2xl font-semibold tracking-[0.2em] uppercase text-transparent bg-clip-text bg-gray-900">
+            <span className="truncate text-sm sm:text-base md:text-2xl font-semibold tracking-[0.12em] sm:tracking-[0.16em] md:tracking-[0.2em] uppercase text-gray-900">
               {t("brand")}
             </span>
           </Link>
 
           {/* Right: filters + icons */}
-          <div className="flex items-center gap-3 md:gap-4 flex-shrink-0">
+          <div className="flex items-center gap-0.5 sm:gap-1 md:gap-4 flex-shrink-0">
             {/* Branch Dropdown Filter - Desktop */}
             <div className="hidden md:block relative" ref={branchDropdownRef}>
               <button
@@ -893,7 +980,7 @@ function NavBarContent() {
                 user ? buildUrlWithBranch("/account/profile") : "/auth/login"
               }
               aria-label="Account"
-              className="text-pink-600 hover:text-pink-700 transition-colors"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-full text-pink-600 hover:bg-pink-50 hover:text-pink-700 transition-colors md:h-auto md:w-auto md:rounded-none md:hover:bg-transparent"
             >
               <svg
                 className="h-5 w-5"
@@ -914,7 +1001,7 @@ function NavBarContent() {
             <Link
               href={buildUrlWithBranch("/cart")}
               aria-label="Cart"
-              className="relative text-pink-600 hover:text-pink-700 transition-colors"
+              className="relative inline-flex h-10 w-10 items-center justify-center rounded-full text-pink-600 hover:bg-pink-50 hover:text-pink-700 transition-colors md:h-auto md:w-auto md:rounded-none md:hover:bg-transparent"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -932,7 +1019,7 @@ function NavBarContent() {
                 <circle cx="17" cy="20" r="1.5" />
               </svg>
               {itemCount > 0 && (
-                <span className="absolute -right-2 -top-2 min-w-4 rounded-full bg-rose-500 px-1 text-center text-[10px] font-semibold text-white">
+                <span className="absolute right-0.5 top-0.5 min-w-4 rounded-full bg-rose-500 px-1 text-center text-[10px] font-semibold leading-4 text-white md:-right-2 md:-top-2">
                   {itemCount > 99 ? "99+" : itemCount}
                 </span>
               )}
@@ -947,20 +1034,31 @@ function NavBarContent() {
           aria-hidden
         />
 
+        {/* `invisible` when closed keeps the off-screen panel out of the tab
+            order, otherwise keyboard focus disappears into a hidden drawer. */}
         <div
-          className={`fixed inset-y-0 left-0 z-50 w-80 max-w-[85vw] bg-white shadow-xl transform transition-transform duration-300 flex flex-col ${menuOpen ? "translate-x-0" : "-translate-x-full"}`}
+          id="mobile-menu"
+          aria-hidden={!menuOpen}
+          className={`fixed inset-y-0 left-0 z-50 flex w-[19rem] max-w-[86vw] flex-col bg-white shadow-xl transition-transform duration-300 ${
+            menuOpen
+              ? "translate-x-0"
+              : "-translate-x-full invisible pointer-events-none"
+          }`}
         >
-          <div className="px-5 pt-5 pb-2 flex items-center flex-shrink-0">
+          <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-rose-100 px-5 py-4">
+            <span className="truncate text-xs font-semibold uppercase tracking-[0.18em] text-gray-900">
+              {t("brand")}
+            </span>
             <button
               aria-label="Close menu"
               onClick={() => setMenuOpen(false)}
-              className="text-gray-300 hover:text-gray-500 transition-colors"
+              className="-mr-2 inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-rose-50 hover:text-rose-600"
             >
               <svg
-                className="w-6 h-6"
+                className="w-5 h-5"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth={1.25}
+                strokeWidth={1.6}
                 viewBox="0 0 24 24"
               >
                 <path
@@ -972,14 +1070,11 @@ function NavBarContent() {
             </button>
           </div>
 
-          <nav
-            className="flex-1 overflow-y-auto"
-            style={{ maxHeight: "calc(100vh - 60px)" }}
-          >
+          <nav className="flex-1 overflow-y-auto overscroll-contain">
             <div className="px-5">
               <Link
                 href={buildUrlWithBranch("/")}
-                className={`flex items-center justify-between py-4 border-b border-gray-100 text-xl transition-colors ${
+                className={`flex items-center justify-between gap-3 py-3.5 border-b border-gray-100 text-base md:text-lg transition-colors ${
                   isActive("/")
                     ? "text-rose-500"
                     : "text-gray-900 hover:text-rose-500"
@@ -1007,7 +1102,7 @@ function NavBarContent() {
                 <button
                   onClick={() => setShowViewAllCategories((s) => !s)}
                   aria-expanded={showViewAllCategories}
-                  className={`flex items-center justify-between w-full py-4 text-xl transition-colors ${
+                  className={`flex items-center justify-between gap-3 w-full py-3.5 text-base md:text-lg transition-colors ${
                     isActive("/view-all")
                       ? "text-rose-500"
                       : "text-gray-900 hover:text-rose-500"
@@ -1039,7 +1134,7 @@ function NavBarContent() {
                         handleCategoryClick("all", "/view-all");
                         setMenuOpen(false);
                       }}
-                      className={`block w-full text-left py-2 text-sm transition-colors ${
+                      className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
                         isActive("/view-all") && selectedCategory === "all"
                           ? "text-rose-600 font-medium"
                           : "text-gray-500 hover:text-gray-800"
@@ -1054,7 +1149,7 @@ function NavBarContent() {
                           handleCategoryClick(cat, "/view-all");
                           setMenuOpen(false);
                         }}
-                        className={`block w-full text-left py-2 text-sm transition-colors ${
+                        className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
                           isActive("/view-all") && selectedCategory === cat
                             ? "text-rose-600 font-medium"
                             : "text-gray-500 hover:text-gray-800"
@@ -1072,7 +1167,7 @@ function NavBarContent() {
                 <button
                   onClick={() => setShowNewArrivalsCategories((s) => !s)}
                   aria-expanded={showNewArrivalsCategories}
-                  className={`flex items-center justify-between w-full py-4 text-xl transition-colors ${
+                  className={`flex items-center justify-between gap-3 w-full py-3.5 text-base md:text-lg transition-colors ${
                     isActive("/new-arrivals")
                       ? "text-rose-500"
                       : "text-gray-900 hover:text-rose-500"
@@ -1102,7 +1197,7 @@ function NavBarContent() {
                         handleCategoryClick("all", "/new-arrivals");
                         setMenuOpen(false);
                       }}
-                      className={`block w-full text-left py-2 text-sm transition-colors ${
+                      className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
                         isActive("/new-arrivals") && selectedCategory === "all"
                           ? "text-rose-600 font-medium"
                           : "text-gray-500 hover:text-gray-800"
@@ -1117,7 +1212,7 @@ function NavBarContent() {
                           handleCategoryClick(cat, "/new-arrivals");
                           setMenuOpen(false);
                         }}
-                        className={`block w-full text-left py-2 text-sm transition-colors ${
+                        className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
                           isActive("/new-arrivals") && selectedCategory === cat
                             ? "text-rose-600 font-medium"
                             : "text-gray-500 hover:text-gray-800"
@@ -1135,7 +1230,7 @@ function NavBarContent() {
                 <button
                   onClick={() => setShowBestSellersCategories((s) => !s)}
                   aria-expanded={showBestSellersCategories}
-                  className={`flex items-center justify-between w-full py-4 text-xl transition-colors ${
+                  className={`flex items-center justify-between gap-3 w-full py-3.5 text-base md:text-lg transition-colors ${
                     isActive("/best-sellers")
                       ? "text-rose-500"
                       : "text-gray-900 hover:text-rose-500"
@@ -1165,7 +1260,7 @@ function NavBarContent() {
                         handleCategoryClick("all", "/best-sellers");
                         setMenuOpen(false);
                       }}
-                      className={`block w-full text-left py-2 text-sm transition-colors ${
+                      className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
                         isActive("/best-sellers") && selectedCategory === "all"
                           ? "text-rose-600 font-medium"
                           : "text-gray-500 hover:text-gray-800"
@@ -1180,7 +1275,7 @@ function NavBarContent() {
                           handleCategoryClick(cat, "/best-sellers");
                           setMenuOpen(false);
                         }}
-                        className={`block w-full text-left py-2 text-sm transition-colors ${
+                        className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
                           isActive("/best-sellers") && selectedCategory === cat
                             ? "text-rose-600 font-medium"
                             : "text-gray-500 hover:text-gray-800"
@@ -1195,7 +1290,7 @@ function NavBarContent() {
 
               <Link
                 href={buildUrlWithBranch("/cart")}
-                className={`flex items-center justify-between py-4 border-b border-gray-100 text-xl transition-colors ${
+                className={`flex items-center justify-between gap-3 py-3.5 border-b border-gray-100 text-base md:text-lg transition-colors ${
                   isActive("/cart")
                     ? "text-rose-500"
                     : "text-gray-900 hover:text-rose-500"
@@ -1227,7 +1322,7 @@ function NavBarContent() {
 
               <Link
                 href={buildUrlWithBranch("/membership")}
-                className={`flex items-center justify-between py-4 border-b border-gray-100 text-xl transition-colors ${
+                className={`flex items-center justify-between gap-3 py-3.5 border-b border-gray-100 text-base md:text-lg transition-colors ${
                   isActive("/membership")
                     ? "text-rose-500"
                     : "text-gray-900 hover:text-rose-500"
@@ -1321,28 +1416,85 @@ function NavBarContent() {
                 </>
               )}
 
-              <div className="flex items-center gap-3 pt-1">
-                <button
-                  onClick={() => setLanguage("EN")}
-                  className={`text-sm transition-colors ${
-                    lang === "EN"
-                      ? "text-rose-600 font-semibold"
-                      : "text-gray-500 hover:text-gray-800"
-                  }`}
-                >
-                  {t("EN")}
-                </button>
-                <span className="text-gray-300">/</span>
-                <button
-                  onClick={() => setLanguage("MM")}
-                  className={`text-sm transition-colors ${
-                    lang === "MM"
-                      ? "text-rose-600 font-semibold"
-                      : "text-gray-500 hover:text-gray-800"
-                  }`}
-                >
-                  {t("MM")}
-                </button>
+              {/* Branch and currency live in the desktop header bar, which is
+                  hidden below md. Without these the only way a phone shopper
+                  could change either was by hand-editing the URL. */}
+              {availableBranches.length > 0 && (
+                <div className="border-t border-gray-200 pt-4 md:hidden">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                    Branch
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {availableBranches.map((shop) => (
+                      <button
+                        key={shop.id}
+                        onClick={() => {
+                          handleBranchClick(shop.id);
+                          setMenuOpen(false);
+                        }}
+                        className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                          selectedBranch === shop.id
+                            ? "border-transparent bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-sm"
+                            : "border-rose-200 bg-white text-gray-600 hover:border-rose-300 hover:bg-rose-50"
+                        }`}
+                      >
+                        {shop.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="border-t border-gray-200 pt-4 md:hidden">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Currency
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(["THB", "MMK"] as const).map((code) => (
+                    <button
+                      key={code}
+                      onClick={() => {
+                        handleCurrencyClick(code);
+                        setMenuOpen(false);
+                      }}
+                      className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        selectedCurrency === code
+                          ? "border-transparent bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-sm"
+                          : "border-rose-200 bg-white text-gray-600 hover:border-rose-300 hover:bg-rose-50"
+                      }`}
+                    >
+                      {code === "THB" ? "฿ THB" : "Ks MMK"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t border-gray-200 pt-4">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Language
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setLanguage("EN")}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      lang === "EN"
+                        ? "border-transparent bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-sm"
+                        : "border-rose-200 bg-white text-gray-600 hover:border-rose-300 hover:bg-rose-50"
+                    }`}
+                  >
+                    {t("EN")}
+                  </button>
+                  <button
+                    onClick={() => setLanguage("MM")}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      lang === "MM"
+                        ? "border-transparent bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-sm"
+                        : "border-rose-200 bg-white text-gray-600 hover:border-rose-300 hover:bg-rose-50"
+                    }`}
+                  >
+                    {t("MM")}
+                  </button>
+                </div>
               </div>
             </div>
           </nav>
@@ -1350,11 +1502,8 @@ function NavBarContent() {
 
         {/* Mobile search bar */}
         {searchOpen && (
-          <div
-            className="md:hidden border-t border-pink-200/70 bg-white px-4 py-3"
-            ref={mobileSearchBarRef}
-          >
-            <div className="flex items-center space-x-2">
+          <div className="md:hidden border-t border-pink-200/70 bg-white px-3 py-2.5 sm:px-4">
+            <div className="flex items-center gap-2">
               <input
                 autoFocus
                 value={searchQuery}
@@ -1364,14 +1513,18 @@ function NavBarContent() {
                     e.preventDefault();
                     commitSearch();
                   }
+                  if (e.key === "Escape") {
+                    closeSearch();
+                  }
                 }}
                 placeholder={t("search_placeholder")}
-                className="w-full border rounded-full border-pink-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder-gray-400 outline-none"
+                enterKeyHint="search"
+                className="min-w-0 flex-1 rounded-full border border-rose-200 bg-rose-50/40 px-4 py-2.5 text-base text-gray-900 placeholder-gray-400 outline-none transition-colors focus:border-rose-400 focus:bg-white focus:ring-2 focus:ring-rose-200"
               />
               <button
                 aria-label="Close search"
-                onClick={() => setSearchOpen(false)}
-                className="p-2 rounded-md hover:bg-pink-100"
+                onClick={closeSearch}
+                className="inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full hover:bg-pink-50"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"

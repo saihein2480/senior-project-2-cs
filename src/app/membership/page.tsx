@@ -295,8 +295,8 @@ export default function MembershipPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-500"></div>
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-rose-50/40 via-white to-white">
+        <span className="h-9 w-9 animate-spin rounded-full border-[3px] border-rose-200 border-t-rose-500" />
       </div>
     );
   }
@@ -304,16 +304,16 @@ export default function MembershipPage() {
   // Not logged in - Show registration/login prompt
   if (!user) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-rose-50 via-white to-purple-50 py-12 px-4">
+      <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white py-12 px-4">
         <div className="max-w-4xl mx-auto">
           {/* Hero Section */}
           <div className="text-center mb-12">
-            {/* <div className="inline-block p-4 bg-gradient-to-br from-rose-500 to-purple-600 rounded-full mb-6">
+            {/* <div className="inline-block p-4 bg-gradient-to-br from-rose-500 to-pink-500 rounded-full mb-6">
               <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" />
               </svg>
             </div> */}
-            <h1 className="text-4xl md:text-5xl font-bold text-gray-900 mb-4">
+            <h1 className="text-4xl md:text-5xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 mb-4">
               Membership & Rewards
             </h1>
             <p className="text-lg text-gray-600 max-w-2xl mx-auto">
@@ -323,14 +323,14 @@ export default function MembershipPage() {
 
           {/* Program Benefits */}
           {loyaltySettings?.enabled && (
-            <div className="bg-white rounded-2xl shadow-xl p-8 mb-8 border-2 border-rose-100">
-              <h2 className="text-2xl font-bold text-gray-900 mb-6 text-center">
+            <div className="bg-white rounded-3xl shadow-sm p-8 mb-8 border border-rose-100">
+              <h2 className="text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 mb-6 text-center">
                 Program Benefits
               </h2>
               <div className="grid md:grid-cols-3 gap-6">
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-rose-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <div className="w-16 h-16 bg-gradient-to-br from-rose-50 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-rose-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
@@ -342,8 +342,8 @@ export default function MembershipPage() {
                 </div>
 
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-purple-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <div className="w-16 h-16 bg-gradient-to-br from-rose-50 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-rose-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
                     </svg>
                   </div>
@@ -358,8 +358,8 @@ export default function MembershipPage() {
                 </div>
 
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <div className="w-16 h-16 bg-gradient-to-br from-rose-50 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-rose-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
                     </svg>
                   </div>
@@ -377,8 +377,8 @@ export default function MembershipPage() {
           )}
 
           {/* Call to Action */}
-          <div className="bg-white rounded-2xl shadow-xl p-8 text-center border-2 border-purple-100">
-            <h2 className="text-2xl font-bold text-gray-900 mb-4">
+          <div className="bg-white rounded-3xl shadow-sm p-8 text-center border border-rose-100">
+            <h2 className="text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 mb-4">
               Ready to Start Earning Rewards?
             </h2>
             <p className="text-gray-600 mb-6">
@@ -387,13 +387,13 @@ export default function MembershipPage() {
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
               <Link
                 href="/auth/register"
-                className="px-8 py-3 bg-gradient-to-r from-rose-500 to-purple-600 text-white font-semibold rounded-lg hover:from-rose-600 hover:to-purple-700 transition-all shadow-md"
+                className="px-8 py-3 bg-gradient-to-r from-rose-500 to-pink-500 text-white font-semibold rounded-full hover:from-rose-600 hover:to-pink-600 transition-all shadow-md hover:shadow-lg"
               >
                 Register Now
               </Link>
               <Link
                 href="/auth/login"
-                className="px-8 py-3 border-2 border-rose-500 text-rose-600 font-semibold rounded-lg hover:bg-rose-50 transition-all"
+                className="px-8 py-3 border-2 border-rose-200 bg-white text-rose-600 font-semibold rounded-full hover:border-rose-300 hover:bg-rose-50 transition-all"
               >
                 Log In
               </Link>
@@ -402,7 +402,7 @@ export default function MembershipPage() {
 
           {/* How It Works */}
           <div className="mt-12 text-center">
-            <h3 className="text-xl font-bold text-gray-900 mb-6">How It Works</h3>
+            <h3 className="text-xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 mb-6">How It Works</h3>
             <div className="grid md:grid-cols-4 gap-6">
               <div className="flex flex-col items-center">
                 <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
@@ -411,19 +411,19 @@ export default function MembershipPage() {
                 <p className="text-sm text-gray-600">Create your account with email verification</p>
               </div>
               <div className="flex flex-col items-center">
-                <div className="w-12 h-12 bg-purple-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
+                <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3 shadow-md shadow-rose-500/30">
                   2
                 </div>
                 <p className="text-sm text-gray-600">Shop and automatically earn points</p>
               </div>
               <div className="flex flex-col items-center">
-                <div className="w-12 h-12 bg-indigo-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
+                <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3 shadow-md shadow-rose-500/30">
                   3
                 </div>
                 <p className="text-sm text-gray-600">Collect points to get discount coupons</p>
               </div>
               <div className="flex flex-col items-center">
-                <div className="w-12 h-12 bg-green-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
+                <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3 shadow-md shadow-rose-500/30">
                   4
                 </div>
                 <p className="text-sm text-gray-600">Redeem coupons on your next purchase</p>
@@ -438,17 +438,19 @@ export default function MembershipPage() {
   // Logged in but not a member - Show join membership option
   if (user && !isMember && !isLoadingLoyalty) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-rose-50 via-white to-purple-50 py-12 px-4">
+      <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white py-12 px-4">
         <div className="max-w-4xl mx-auto">
           {/* Success Message */}
           {joinSuccess && (
-            <div className="mb-6 bg-green-50 border-2 border-green-200 rounded-xl p-6 text-center">
-              <svg className="w-16 h-16 text-green-500 mx-auto mb-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <h3 className="text-2xl font-bold text-green-800 mb-2">Welcome to Our Membership Program!</h3>
-              <p className="text-green-700 mb-3">Your membership has been activated. Loading your dashboard...</p>
-              <div className="inline-block bg-white border-2 border-green-300 rounded-lg px-6 py-3">
+            <div className="mb-6 bg-white border border-emerald-200 rounded-3xl shadow-sm p-6 text-center">
+              <span className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-50">
+                <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </span>
+              <h3 className="text-2xl font-bold text-gray-900 mb-2">Welcome to Our Membership Program!</h3>
+              <p className="text-gray-600 mb-4">Your membership has been activated. Loading your dashboard...</p>
+              <div className="inline-block bg-rose-50/60 border border-rose-100 rounded-2xl px-6 py-3">
                 <p className="text-sm text-gray-600 mb-1">Your Member ID:</p>
                 <p className="text-xl font-mono font-bold text-rose-600">{user.uid.substring(0, 12).toUpperCase()}</p>
               </div>
@@ -457,12 +459,12 @@ export default function MembershipPage() {
 
           {/* Hero Section */}
           <div className="text-center mb-12">
-            <div className="inline-block p-4 bg-gradient-to-br from-rose-500 to-purple-600 rounded-full mb-6">
-              <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+            <div className="inline-flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-pink-500 shadow-lg shadow-rose-500/25 mb-6">
+              <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
               </svg>
             </div>
-            <h1 className="text-4xl md:text-5xl font-bold text-gray-900 mb-4">
+            <h1 className="text-4xl md:text-5xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 mb-4">
               Join Our Membership Program
             </h1>
             <p className="text-lg text-gray-600 max-w-2xl mx-auto mb-2">
@@ -474,15 +476,15 @@ export default function MembershipPage() {
           </div>
 
           {/* Member Benefits */}
-          <div className="bg-white rounded-2xl shadow-xl p-8 mb-8 border-2 border-rose-100">
-            <h2 className="text-2xl font-bold text-gray-900 mb-2 text-center">
+          <div className="bg-white rounded-3xl shadow-sm p-8 mb-8 border border-rose-100">
+            <h2 className="text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 mb-2 text-center">
               Your Account is Ready!
             </h2>
             <p className="text-gray-600 text-center mb-6">
               We'll use your existing account information to create your membership profile
             </p>
 
-            <div className="bg-gray-50 rounded-xl p-6 mb-6">
+            <div className="bg-rose-50/50 border border-rose-100 rounded-2xl p-6 mb-6">
               <h3 className="font-semibold text-gray-900 mb-3">Account Information:</h3>
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between">
@@ -499,8 +501,8 @@ export default function MembershipPage() {
             {loyaltySettings?.enabled && (
               <div className="grid md:grid-cols-3 gap-6 mb-6">
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-rose-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <div className="w-16 h-16 bg-gradient-to-br from-rose-50 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-rose-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
@@ -512,8 +514,8 @@ export default function MembershipPage() {
                 </div>
 
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-purple-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <div className="w-16 h-16 bg-gradient-to-br from-rose-50 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-rose-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
                     </svg>
                   </div>
@@ -528,8 +530,8 @@ export default function MembershipPage() {
                 </div>
 
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <div className="w-16 h-16 bg-gradient-to-br from-rose-50 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-rose-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
@@ -557,7 +559,7 @@ export default function MembershipPage() {
               <button
                 onClick={handleJoinMembership}
                 disabled={isJoining || joinSuccess}
-                className="px-12 py-4 bg-gradient-to-r from-rose-500 to-purple-600 text-white font-bold text-lg rounded-xl hover:from-rose-600 hover:to-purple-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-12 py-4 bg-gradient-to-r from-rose-500 to-pink-500 text-white font-bold text-lg rounded-full hover:from-rose-600 hover:to-pink-600 transition-all shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isJoining ? (
                   <span className="flex items-center gap-2">
@@ -580,8 +582,8 @@ export default function MembershipPage() {
           </div>
 
           {/* How It Works */}
-          <div className="bg-white rounded-2xl shadow-sm p-8 border border-gray-200">
-            <h3 className="text-xl font-bold text-gray-900 mb-6 text-center">What Happens Next?</h3>
+          <div className="bg-white rounded-3xl shadow-sm p-8 border border-rose-100">
+            <h3 className="text-xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 mb-6 text-center">What Happens Next?</h3>
             <div className="grid md:grid-cols-4 gap-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
@@ -591,21 +593,21 @@ export default function MembershipPage() {
                 <p className="text-sm text-gray-600">Your membership will be activated instantly with 0 points</p>
               </div>
               <div className="flex flex-col items-center text-center">
-                <div className="w-12 h-12 bg-purple-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
+                <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3 shadow-md shadow-rose-500/30">
                   2
                 </div>
                 <h4 className="font-semibold text-gray-900 mb-2">Shop & Earn</h4>
                 <p className="text-sm text-gray-600">Make purchases and automatically earn loyalty points</p>
               </div>
               <div className="flex flex-col items-center text-center">
-                <div className="w-12 h-12 bg-indigo-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
+                <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3 shadow-md shadow-rose-500/30">
                   3
                 </div>
                 <h4 className="font-semibold text-gray-900 mb-2">Collect Points</h4>
                 <p className="text-sm text-gray-600">Reach the points threshold to receive discount coupons</p>
               </div>
               <div className="flex flex-col items-center text-center">
-                <div className="w-12 h-12 bg-green-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3">
+                <div className="w-12 h-12 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-full flex items-center justify-center font-bold text-lg mb-3 shadow-md shadow-rose-500/30">
                   4
                 </div>
                 <h4 className="font-semibold text-gray-900 mb-2">Redeem Rewards</h4>
@@ -620,61 +622,79 @@ export default function MembershipPage() {
 
   // Logged in and is a member - Show loyalty dashboard
   return (
-    <div className="min-h-screen bg-gray-50 py-8 px-4">
+    <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white py-8 px-4">
       <div className="max-w-6xl mx-auto">
         {/* Header - Only show if actually a member with loyalty data */}
         {isMember && loyaltyData && (
-          <div className="bg-gradient-to-r from-rose-500 to-purple-600 rounded-2xl shadow-xl p-8 mb-8 text-white">
-            <div className="flex items-center justify-between flex-wrap gap-4">
-              <div>
-                <h1 className="text-3xl font-bold mb-2">Welcome, {user.displayName || "Member"}!</h1>
-                <p className="text-rose-100">Member ID: {loyaltyData.memberId || user.uid.substring(0, 12).toUpperCase()}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-sm text-rose-100 mb-1">Membership Status</p>
-                <span className="inline-block px-4 py-2 bg-white/20 backdrop-blur-sm rounded-lg font-semibold">
-                  Active
+          <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+            <div className="min-w-0">
+              <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">
+                Welcome, {user.displayName || "Member"}!
+              </h1>
+              <p className="mt-2 text-sm text-gray-500">
+                Member ID:{" "}
+                <span className="font-semibold text-gray-700">
+                  {loyaltyData.memberId || user.uid.substring(0, 12).toUpperCase()}
                 </span>
-              </div>
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                Membership
+              </span>
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-4 py-1.5 text-xs font-semibold text-white shadow-sm">
+                <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                Active
+              </span>
             </div>
           </div>
         )}
 
         {isLoadingLoyalty ? (
-          <div className="bg-white rounded-2xl shadow-sm p-12 text-center">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-500 mx-auto"></div>
-            <p className="text-gray-600 mt-4">Loading your rewards...</p>
+          <div className="bg-white rounded-2xl shadow-sm border border-rose-100 p-12 text-center">
+            <span className="mx-auto block h-9 w-9 animate-spin rounded-full border-[3px] border-rose-200 border-t-rose-500" />
+            <p className="text-sm font-medium text-gray-500 mt-4">Loading your rewards...</p>
           </div>
         ) : loyaltyData ? (
           <>
             {/* Points Summary */}
-            <div className="grid md:grid-cols-3 gap-6 mb-8">
+            <div className="grid md:grid-cols-3 gap-4 mb-8">
               {/* Total balance the customer has accumulated */}
-              <div className="bg-white rounded-2xl shadow-sm p-6 border-2 border-rose-100">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600 font-medium">Total Points</span>
-                  <svg className="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
+              <div className="bg-white rounded-2xl shadow-sm p-5 border border-rose-100 transition-shadow hover:shadow-md">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+                    <svg className="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" strokeWidth="1.7" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Total Points
+                    </p>
+                    <p className="text-2xl font-bold text-gray-900">{loyaltyData.currentPoints}</p>
+                  </div>
                 </div>
-                <p className="text-4xl font-bold text-gray-900">{loyaltyData.currentPoints}</p>
-                <p className="text-sm text-gray-500 mt-2">Your point balance</p>
+                <p className="text-xs text-gray-500 mt-3">Your point balance</p>
               </div>
 
               {/* Points not already promised to a coupon the customer holds */}
-              <div className="bg-white rounded-2xl shadow-sm p-6 border-2 border-purple-100">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600 font-medium">
-                    Points for Redeem
+              <div className="bg-white rounded-2xl shadow-sm p-5 border border-rose-100 transition-shadow hover:shadow-md">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+                    <svg className="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" strokeWidth="1.7" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                    </svg>
                   </span>
-                  <svg className="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-                  </svg>
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Points for Redeem
+                    </p>
+                    <p className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">
+                      {loyaltyData.availablePoints ?? loyaltyData.currentPoints}
+                    </p>
+                  </div>
                 </div>
-                <p className="text-4xl font-bold text-purple-700">
-                  {loyaltyData.availablePoints ?? loyaltyData.currentPoints}
-                </p>
-                <p className="text-sm text-gray-500 mt-2">
+                <p className="text-xs text-gray-500 mt-3">
                   {loyaltyData.reservedPoints > 0
                     ? `${loyaltyData.reservedPoints} reserved by your active coupon${loyaltyData.reservedPoints === 1 ? "" : "s"}`
                     : nextLockedPackage
@@ -683,28 +703,34 @@ export default function MembershipPage() {
                 </p>
               </div>
 
-              <div className="bg-white rounded-2xl shadow-sm p-6 border-2 border-green-100">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600 font-medium">Active Coupons</span>
-                  <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-                  </svg>
+              <div className="bg-white rounded-2xl shadow-sm p-5 border border-rose-100 transition-shadow hover:shadow-md">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+                    <svg className="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" strokeWidth="1.7" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                    </svg>
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Active Coupons
+                    </p>
+                    <p className="text-2xl font-bold text-gray-900">{loyaltyData.activeCoupons.length}</p>
+                  </div>
                 </div>
-                <p className="text-4xl font-bold text-gray-900">{loyaltyData.activeCoupons.length}</p>
-                <p className="text-sm text-gray-500 mt-2">Ready to use</p>
+                <p className="text-xs text-gray-500 mt-3">Ready to use</p>
               </div>
             </div>
 
             {/* Reward packages available for the customer's points */}
             {(loyaltyData.couponPackages?.length ?? 0) > 0 && (
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden mb-8">
-                <div className="bg-purple-50 border-b border-purple-100 px-6 py-4">
-                  <h2 className="text-xl font-bold text-gray-900">
+              <div className="bg-white rounded-2xl shadow-sm border border-rose-100 overflow-hidden mb-8">
+                <div className="bg-gradient-to-r from-rose-50 to-pink-50 border-b border-rose-100 px-6 py-4">
+                  <h2 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">
                     Available Rewards
                   </h2>
                   <p className="text-sm text-gray-600 mt-1">
                     Redeem with your{" "}
-                    <span className="font-semibold text-purple-700">
+                    <span className="font-semibold text-rose-600">
                       {loyaltyData.availablePoints ?? loyaltyData.currentPoints}{" "}
                       redeemable point
                       {(loyaltyData.availablePoints ??
@@ -726,9 +752,9 @@ export default function MembershipPage() {
                   {loyaltyData.couponPackages.map((pkg: AvailablePackage) => (
                     <div
                       key={pkg.id}
-                      className={`rounded-xl border p-4 flex flex-col ${
+                      className={`rounded-2xl border p-4 flex flex-col transition-shadow ${
                         pkg.affordable
-                          ? "border-purple-300 bg-purple-50"
+                          ? "border-rose-200 bg-rose-50/60 shadow-sm hover:shadow-md"
                           : "border-gray-200 bg-gray-50"
                       }`}
                     >
@@ -739,7 +765,7 @@ export default function MembershipPage() {
                         <span
                           className={`px-2.5 py-0.5 text-xs font-bold rounded-full ${
                             pkg.affordable
-                              ? "bg-purple-500 text-white"
+                              ? "bg-gradient-to-r from-rose-500 to-pink-500 text-white"
                               : "bg-gray-200 text-gray-700"
                           }`}
                         >
@@ -747,7 +773,7 @@ export default function MembershipPage() {
                         </span>
                       </div>
 
-                      <p className="text-lg font-semibold text-purple-700">
+                      <p className="text-lg font-semibold text-rose-600">
                         {pkg.discountType === "percentage"
                           ? `${pkg.discountValue}% off`
                           : `฿${pkg.discountValue} off`}
@@ -756,12 +782,12 @@ export default function MembershipPage() {
                         Valid {pkg.validityDays} days once redeemed
                       </p>
 
-                      <div className="mt-3 pt-3 border-t border-purple-200/60">
+                      <div className="mt-3 pt-3 border-t border-rose-200/60">
                         {pkg.affordable ? (
                           <button
                             onClick={() => handleRedeemPackage(pkg.id)}
                             disabled={redeemingPackageId === pkg.id}
-                            className="w-full px-4 py-2 bg-gradient-to-r from-purple-500 to-rose-600 text-white font-bold rounded-lg hover:from-purple-600 hover:to-rose-700 transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="w-full px-4 py-2.5 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-sm font-semibold rounded-full hover:from-rose-600 hover:to-pink-600 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {redeemingPackageId === pkg.id
                               ? "Redeeming..."
@@ -782,28 +808,28 @@ export default function MembershipPage() {
 
             {/* Active Coupons */}
             {loyaltyData.activeCoupons.length > 0 && (
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden mb-8">
-                <div className="bg-green-50 border-b border-green-100 px-6 py-4">
-                  <h2 className="text-xl font-bold text-gray-900">Your Active Coupons</h2>
-                  <p className="text-sm text-gray-600 mt-1">Click "Use" to activate a coupon for your next purchase</p>
+              <div className="bg-white rounded-2xl shadow-sm border border-rose-100 overflow-hidden mb-8">
+                <div className="bg-gradient-to-r from-rose-50 to-pink-50 border-b border-rose-100 px-6 py-4">
+                  <h2 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">Your Active Coupons</h2>
+                  <p className="text-sm text-gray-600 mt-1">Click &quot;Use&quot; to activate a coupon for your next purchase</p>
                 </div>
                 <div className="p-6 grid md:grid-cols-2 gap-4">
                   {loyaltyData.activeCoupons.map((coupon: any) => (
                     <div
                       key={coupon.id}
-                      className={`border-2 border-dashed rounded-xl p-4 transition-all ${
+                      className={`border-2 border-dashed rounded-2xl p-4 transition-all ${
                         coupon.inUse
-                          ? "border-purple-400 bg-purple-50"
-                          : "border-green-300 bg-green-50 hover:bg-green-100"
+                          ? "border-emerald-300 bg-emerald-50/70"
+                          : "border-rose-300 bg-rose-50/60 hover:bg-rose-50"
                       }`}
                     >
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-2xl font-bold text-gray-900">{coupon.code}</span>
+                        <span className="text-xl font-mono font-bold tracking-wider text-gray-900">{coupon.code}</span>
                         <span
                           className={`px-3 py-1 text-xs font-bold rounded-full ${
                             coupon.inUse
-                              ? "bg-purple-500 text-white"
-                              : "bg-green-500 text-white"
+                              ? "bg-emerald-500 text-white"
+                              : "bg-gradient-to-r from-rose-500 to-pink-500 text-white"
                           }`}
                         >
                           {coupon.inUse ? "IN USE" : "ACTIVE"}
@@ -814,7 +840,7 @@ export default function MembershipPage() {
                           {coupon.packageName}
                         </p>
                       )}
-                      <p className="text-lg font-semibold text-green-700 mb-2">
+                      <p className="text-lg font-bold text-rose-600 mb-2">
                         {coupon.discountType === "percentage"
                           ? `${coupon.discountValue}% OFF`
                           : `฿${coupon.discountValue} OFF`}
@@ -830,15 +856,15 @@ export default function MembershipPage() {
                       
                       {coupon.inUse ? (
                         <div className="space-y-2">
-                          <div className="bg-purple-100 border border-purple-300 rounded-lg p-3">
-                            <p className="text-xs text-purple-800 font-medium">
+                          <div className="bg-white border border-emerald-200 rounded-xl p-3">
+                            <p className="text-xs text-emerald-700 font-medium">
                               ✓ This coupon will be applied at checkout
                             </p>
                           </div>
                           <button
                             onClick={() => handleCancelCoupon(coupon.id)}
                             disabled={cancelingCouponId === coupon.id}
-                            className="w-full px-4 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                            className="w-full px-4 py-2.5 border-2 border-rose-200 bg-white text-rose-600 font-semibold rounded-full hover:border-rose-300 hover:bg-rose-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
                           >
                             {cancelingCouponId === coupon.id ? "Canceling..." : "Cancel"}
                           </button>
@@ -847,7 +873,7 @@ export default function MembershipPage() {
                         <button
                           onClick={() => handleUseCoupon(coupon.id)}
                           disabled={usingCouponId === coupon.id}
-                          className="w-full px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white font-bold rounded-lg hover:from-green-600 hover:to-emerald-700 transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="w-full px-4 py-2.5 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-sm font-semibold rounded-full hover:from-rose-600 hover:to-pink-600 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {usingCouponId === coupon.id ? (
                             <span className="flex items-center justify-center gap-2">
@@ -870,33 +896,33 @@ export default function MembershipPage() {
 
             {/* Points History */}
             {loyaltyData.pointsHistory.length > 0 && (
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="bg-blue-50 border-b border-blue-100 px-6 py-4">
-                  <h2 className="text-xl font-bold text-gray-900">Points History</h2>
+              <div className="bg-white rounded-2xl shadow-sm border border-rose-100 overflow-hidden">
+                <div className="bg-gradient-to-r from-rose-50 to-pink-50 border-b border-rose-100 px-6 py-4">
+                  <h2 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">Points History</h2>
                   <p className="text-sm text-gray-600 mt-1">Track how you earned your points</p>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="px-6 py-3 text-left text-xs font-bold text-gray-700 uppercase">Date</th>
-                        <th className="px-6 py-3 text-left text-xs font-bold text-gray-700 uppercase">Points</th>
-                        <th className="px-6 py-3 text-left text-xs font-bold text-gray-700 uppercase">Amount</th>
-                        <th className="px-6 py-3 text-left text-xs font-bold text-gray-700 uppercase">Description</th>
+                  <table className="min-w-full">
+                    <thead className="bg-gradient-to-r from-rose-50 to-pink-50">
+                      <tr className="text-[11px] font-semibold uppercase tracking-wide text-rose-600">
+                        <th className="px-6 py-3.5 text-left">Date</th>
+                        <th className="px-6 py-3.5 text-left">Points</th>
+                        <th className="px-6 py-3.5 text-left">Amount</th>
+                        <th className="px-6 py-3.5 text-left">Description</th>
                       </tr>
                     </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
+                    <tbody className="bg-white">
                       {loyaltyData.pointsHistory.slice(0, 10).map((history: any) => (
-                        <tr key={history.id} className="hover:bg-gray-50">
+                        <tr key={history.id} className="border-t border-rose-50 hover:bg-rose-50/40 transition-colors">
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                             {formatDate(history.earnedAt)}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-bold bg-purple-100 text-purple-800">
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-bold bg-rose-100 text-rose-600">
                               +{history.pointsEarned}
                             </span>
                           </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-gray-900">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">
                             ฿{history.transactionAmount.toFixed(2)}
                           </td>
                           <td className="px-6 py-4 text-sm text-gray-600">
@@ -911,15 +937,17 @@ export default function MembershipPage() {
             )}
           </>
         ) : (
-          <div className="bg-white rounded-2xl shadow-sm p-12 text-center">
-            <svg className="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" />
-            </svg>
+          <div className="bg-white rounded-2xl shadow-sm border border-rose-100 p-12 text-center">
+            <span className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-100">
+              <svg className="w-8 h-8 text-rose-500" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" />
+              </svg>
+            </span>
             <h3 className="text-xl font-bold text-gray-900 mb-2">Start Earning Points!</h3>
             <p className="text-gray-600 mb-6">Make your first purchase to start collecting loyalty points.</p>
             <Link
               href="/view-all"
-              className="inline-block px-6 py-3 bg-gradient-to-r from-rose-500 to-purple-600 text-white font-semibold rounded-lg hover:from-rose-600 hover:to-purple-700 transition-all"
+              className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-sm font-semibold rounded-full shadow-md hover:from-rose-600 hover:to-pink-600 hover:shadow-lg transition-all"
             >
               Shop Now
             </Link>

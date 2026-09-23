@@ -37,6 +37,11 @@ export type CustomerProfile = {
   phone?: string;
   address?: string;
   customerType?: "individual" | "retailer" | "wholesaler" | "other";
+  /**
+   * Set once the customer has entered the code we emailed them. Google
+   * sign-ins are trusted via the provider instead — see `isEmailVerified`.
+   */
+  emailVerified?: boolean;
 };
 
 type RegisterPayload = {
@@ -51,13 +56,29 @@ type CustomerAuthContextType = {
   profile: CustomerProfile | null;
   loading: boolean;
   error: string | null;
+  /**
+   * True when the signed-in customer's email address is confirmed, by either
+   * their identity provider or our own emailed code. False while unknown, so
+   * callers fail closed.
+   */
+  isEmailVerified: boolean;
   login: (email: string, password: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   updateCustomerProfile: (payload: Partial<CustomerProfile>) => Promise<void>;
+  /** Mail a fresh code to the signed-in customer. */
+  sendVerificationEmail: () => Promise<SendVerificationResult>;
+  /** Submit the emailed code; refreshes the profile on success. */
+  confirmEmailCode: (code: string) => Promise<void>;
   clearError: () => void;
+};
+
+export type SendVerificationResult = {
+  alreadyVerified?: boolean;
+  email?: string;
+  expiryMinutes?: number;
 };
 
 const CustomerAuthContext = createContext<CustomerAuthContextType | null>(null);
@@ -106,6 +127,29 @@ async function upsertCustomerDocuments(
   );
 }
 
+/**
+ * Ask the server to mail a verification code for the given user.
+ *
+ * The uid is not sent: the route derives it from this ID token, so a client
+ * cannot request mail for somebody else's account.
+ */
+async function requestVerificationEmail(
+  user: FirebaseUser,
+): Promise<SendVerificationResult> {
+  const idToken = await user.getIdToken();
+  const response = await fetch("/api/auth/send-verification", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error || "Failed to send verification email");
+  }
+
+  return data as SendVerificationResult;
+}
+
 export function CustomerAuthProvider({
   children,
 }: {
@@ -132,6 +176,7 @@ export function CustomerAuthProvider({
         phone: data.phone || "",
         address: data.address || "",
         customerType: data.customerType || "individual",
+        emailVerified: data.emailVerified === true,
       });
       return;
     }
@@ -144,6 +189,7 @@ export function CustomerAuthProvider({
       phone: "",
       address: "",
       customerType: "individual",
+      emailVerified: false,
     });
   };
 
@@ -189,6 +235,15 @@ export function CustomerAuthProvider({
       displayName: payload.displayName,
       phone: payload.phone || "",
     });
+
+    // Mail the first code straight away. A send failure must not roll back a
+    // successful registration — the verify page offers a Resend button — so
+    // this is deliberately swallowed rather than rethrown.
+    try {
+      await requestVerificationEmail(cred.user);
+    } catch (e) {
+      console.error("Could not send the initial verification email:", e);
+    }
   };
 
   const signInWithGoogle = async () => {
@@ -213,6 +268,39 @@ export function CustomerAuthProvider({
     await loadProfile(auth?.currentUser || null);
   };
 
+  const sendVerificationEmail = async () => {
+    if (!auth?.currentUser) throw new Error("Not authenticated");
+    setError(null);
+    return requestVerificationEmail(auth.currentUser);
+  };
+
+  const confirmEmailCode = async (code: string) => {
+    if (!auth?.currentUser) throw new Error("Not authenticated");
+    setError(null);
+
+    const idToken = await auth.currentUser.getIdToken();
+    const response = await fetch("/api/auth/verify-email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ code }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.error || "Verification failed");
+    }
+
+    // The route just flipped emailVerified on the auth user; force a token
+    // refresh so the local FirebaseUser reflects it, then re-read the profile.
+    await auth.currentUser.getIdToken(true);
+    await auth.currentUser.reload();
+    setUser(auth.currentUser);
+    await loadProfile(auth.currentUser);
+  };
+
   const updateCustomerProfile = async (payload: Partial<CustomerProfile>) => {
     if (!auth?.currentUser || !db) throw new Error("Not authenticated");
 
@@ -232,21 +320,29 @@ export function CustomerAuthProvider({
     await refreshProfile();
   };
 
+  // Verified if either the identity provider vouched for the address (Google,
+  // or Firebase's own flag once our route sets it) or our Firestore record
+  // says the customer entered the emailed code.
+  const isEmailVerified = !!user && (user.emailVerified || !!profile?.emailVerified);
+
   const value = useMemo<CustomerAuthContextType>(
     () => ({
       user,
       profile,
       loading,
       error,
+      isEmailVerified,
       login,
       signInWithGoogle,
       register,
       logout,
       refreshProfile,
       updateCustomerProfile,
+      sendVerificationEmail,
+      confirmEmailCode,
       clearError: () => setError(null),
     }),
-    [user, profile, loading, error],
+    [user, profile, loading, error, isEmailVerified],
   );
 
   return (

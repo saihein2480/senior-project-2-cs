@@ -7,6 +7,7 @@ import { useProduct } from "../../hooks/useProducts";
 import { useCurrencyRate, useTaxRate } from "../../hooks/useSettings";
 import { useCustomerAuth } from "../../contexts/CustomerAuthContext";
 import { useCart } from "../../contexts/CartContext";
+import { useLanguage } from "../../contexts/LanguageContext";
 import { useOnlinePromotions } from "../../hooks/useOnlinePromotions";
 import { applyBestPromotionToLine } from "../../lib/onlinePromotion";
 import { CouponService, type Coupon } from "../../lib/couponService";
@@ -29,10 +30,22 @@ type CheckoutItem = {
   quantity: number;
 };
 
+/** How long a generated MyanMyanPay QR stays scannable, in seconds. */
+const QR_VALIDITY_SECONDS = 180;
+
+/** Render a remaining-seconds count as m:ss. */
+function formatCountdown(totalSeconds: number) {
+  const safe = Math.max(0, totalSeconds);
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 export default function CheckoutPage() {
   const router = useRouter();
   const params = useSearchParams();
-  const { user, profile, loading } = useCustomerAuth();
+  const { user, profile, loading, isEmailVerified } = useCustomerAuth();
+  const { t } = useLanguage();
   const { rate: mmkRate } = useCurrencyRate();
   const { taxRate, taxRatePercent, hasTaxRate } = useTaxRate();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
@@ -49,6 +62,12 @@ export default function CheckoutPage() {
   const [qrValue, setQrValue] = useState<string>("");
   const [paymentUrl, setPaymentUrl] = useState<string>("");
   const [onlineOrderId, setOnlineOrderId] = useState<string>("");
+  // Countdown for the scan window. MyanMyanPay does not return an expiry with
+  // the QR payload, so this deadline is enforced on the client only: it stops
+  // our status polling and prompts for a fresh QR. The provider may still
+  // accept a late scan, which the callback would settle as normal.
+  const [qrDeadline, setQrDeadline] = useState<number | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
   const [completingTest, setCompletingTest] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<"scan" | "cod">("scan");
   const [activeCoupon, setActiveCoupon] = useState<any>(null);
@@ -251,6 +270,15 @@ export default function CheckoutPage() {
       return;
     }
 
+    // An unconfirmed address means order updates and refunds could not reach
+    // the customer, so block payment until it is verified.
+    if (!isEmailVerified) {
+      router.push(
+        `/auth/verify-email?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`,
+      );
+      return;
+    }
+
     if (!isProfileComplete) {
       setError(
         `Please complete your profile (${missingProfileFields.join(", ")}) before checkout.`,
@@ -273,6 +301,8 @@ export default function CheckoutPage() {
     setQrValue("");
     setPaymentUrl("");
     setOnlineOrderId("");
+    setQrDeadline(null);
+    setSecondsLeft(0);
 
     try {
       // The gateway itemisation must add up to the amount we actually charge.
@@ -415,6 +445,10 @@ export default function CheckoutPage() {
       // Prefer showing QR even if URL is available, to avoid auto-complete redirects.
       if (qr.length > 0) {
         setQrValue(qr);
+        // Seed the visible value alongside the deadline so the first paint
+        // shows the full window instead of briefly flashing "expired".
+        setQrDeadline(Date.now() + QR_VALIDITY_SECONDS * 1000);
+        setSecondsLeft(QR_VALIDITY_SECONDS);
         if (url.length > 0) setPaymentUrl(url);
         return;
       }
@@ -574,8 +608,33 @@ export default function CheckoutPage() {
     }
   };
 
+  // Tick the scan-window countdown once a second. The remaining time is
+  // recomputed from the deadline rather than decremented, so a throttled or
+  // backgrounded tab cannot drift the clock.
+  useEffect(() => {
+    if (qrDeadline === null) return;
+
+    const read = () =>
+      Math.max(0, Math.ceil((qrDeadline - Date.now()) / 1000));
+
+    setSecondsLeft(read());
+    if (read() === 0) return;
+
+    const intervalId = setInterval(() => {
+      const remaining = read();
+      setSecondsLeft(remaining);
+      if (remaining === 0) clearInterval(intervalId);
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [qrDeadline]);
+
+  const qrExpired = qrDeadline !== null && secondsLeft <= 0;
+
   useEffect(() => {
     if (!onlineOrderId || !qrValue) return;
+    // Once the window closes, stop asking the server about this order.
+    if (qrExpired) return;
 
     let mounted = true;
     const intervalId = setInterval(async () => {
@@ -608,58 +667,138 @@ export default function CheckoutPage() {
       mounted = false;
       clearInterval(intervalId);
     };
-  }, [onlineOrderId, qrValue, router, productId, clearCart]);
+  }, [onlineOrderId, qrValue, qrExpired, router, productId, clearCart]);
 
   if (!productId && cartItems.length === 0) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-12">
-        <p className="text-gray-700">No checkout item selected.</p>
-        <Link
-          href="/cart"
-          className="mt-3 inline-block text-rose-600 hover:text-rose-700"
-        >
-          Go to Cart
-        </Link>
+      <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-center px-4 py-16 md:py-24">
+          <div className="w-full max-w-md rounded-2xl border border-rose-100 bg-white p-8 text-center shadow-sm">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+              <svg
+                className="h-7 w-7 text-rose-500"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                viewBox="0 0 24 24"
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M3 3h2l.4 2M7 13h10l3-8H5.4M7 13 5.4 5M7 13l-.7 3.5h11.4M9 20a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm10 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"
+                />
+              </svg>
+            </div>
+            <h1 className="text-xl font-semibold text-gray-900">
+              No checkout item selected
+            </h1>
+            <p className="mt-2 text-sm text-gray-500">
+              Add something to your cart before checking out.
+            </p>
+            <Link
+              href="/cart"
+              className="mt-6 inline-flex items-center justify-center rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-6 py-2.5 text-sm font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg"
+            >
+              Go to Cart
+            </Link>
+          </div>
+        </div>
       </div>
     );
   }
 
   if ((productId && isLoading) || loading) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-12 text-gray-600">
-        Loading checkout...
+      <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
+        <div className="mx-auto max-w-6xl px-4 py-5 md:py-8">
+          <div className="h-4 w-48 animate-pulse rounded bg-gray-100" />
+          <div className="mt-6 h-9 w-64 animate-pulse rounded bg-gray-100" />
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8">
+            <div className="lg:col-span-2 space-y-5">
+              <div className="h-40 animate-pulse rounded-2xl bg-gray-100" />
+              <div className="h-56 animate-pulse rounded-2xl bg-gray-100" />
+            </div>
+            <div className="h-80 animate-pulse rounded-2xl bg-gray-100" />
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-12">
-      <h1 className="text-3xl font-semibold text-gray-900">Online Checkout</h1>
-      <p className="mt-2 text-sm text-gray-600">
-        Choose your payment method and complete your order.
-      </p>
+    <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
+    <div className="mx-auto max-w-6xl px-4 py-5 md:py-8">
+      {/* Breadcrumb */}
+      <nav
+        aria-label="Breadcrumb"
+        className="mb-5 flex items-center gap-2 text-xs md:text-sm text-gray-500"
+      >
+        <button
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-1.5 font-medium text-gray-600 transition-colors hover:text-rose-600"
+        >
+          <svg
+            className="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.8}
+            viewBox="0 0 24 24"
+            aria-hidden
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M19 12H5m0 0 6-6m-6 6 6 6"
+            />
+          </svg>
+          Back
+        </button>
+        <span className="text-gray-300">/</span>
+        <Link href="/cart" className="transition-colors hover:text-rose-600">
+          Cart
+        </Link>
+        <span className="text-gray-300">/</span>
+        <span className="font-medium text-gray-900">Checkout</span>
+      </nav>
 
+      {/* Header */}
+      <div className="mb-6">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-100 bg-rose-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-rose-600">
+          Secure Checkout
+        </span>
+        <h1 className="mt-3 text-2xl md:text-3xl lg:text-4xl font-semibold leading-tight tracking-tight text-gray-900">
+          Online Checkout
+        </h1>
+        <p className="mt-2 text-sm text-gray-500">
+          Choose your payment method and complete your order.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8 items-start">
+        {/* Left column */}
+        <div className="lg:col-span-2 space-y-5">
       {/* Payment Method Selection */}
-      <div className="mt-6 bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">
+      <div className="rounded-2xl border border-rose-100 bg-white p-5 shadow-sm">
+        <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-gray-500">
           Payment Method
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {/* Scan/QR Payment */}
           <button
             onClick={() => setPaymentMethod("scan")}
-            className={`p-4 border-2 rounded-xl transition-all ${
+            className={`rounded-xl border-2 p-4 text-left transition-all ${
               paymentMethod === "scan"
-                ? "border-rose-500 bg-rose-50"
-                : "border-gray-200 hover:border-gray-300"
+                ? "border-rose-500 bg-rose-50 shadow-sm"
+                : "border-gray-200 bg-white hover:border-rose-300 hover:bg-rose-50/40"
             }`}
           >
-            <div className="flex items-center space-x-3">
+            <div className="flex items-center gap-3">
               <div
-                className={`h-10 w-10 rounded-full flex items-center justify-center ${
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
                   paymentMethod === "scan"
-                    ? "bg-gradient-to-r from-rose-500 to-pink-500 text-white"
-                    : "bg-gray-100 text-gray-600"
+                    ? "bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-md"
+                    : "bg-gray-100 text-gray-500"
                 }`}
               >
                 <svg
@@ -688,18 +827,18 @@ export default function CheckoutPage() {
           {/* COD Payment */}
           <button
             onClick={() => setPaymentMethod("cod")}
-            className={`p-4 border-2 rounded-xl transition-all ${
+            className={`rounded-xl border-2 p-4 text-left transition-all ${
               paymentMethod === "cod"
-                ? "border-rose-500 bg-rose-50"
-                : "border-gray-200 hover:border-gray-300"
+                ? "border-rose-500 bg-rose-50 shadow-sm"
+                : "border-gray-200 bg-white hover:border-rose-300 hover:bg-rose-50/40"
             }`}
           >
-            <div className="flex items-center space-x-3">
+            <div className="flex items-center gap-3">
               <div
-                className={`h-10 w-10 rounded-full flex items-center justify-center ${
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
                   paymentMethod === "cod"
-                    ? "bg-gradient-to-r from-rose-500 to-pink-500 text-white"
-                    : "bg-gray-100 text-gray-600"
+                    ? "bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-md"
+                    : "bg-gray-100 text-gray-500"
                 }`}
               >
                 <svg
@@ -727,84 +866,142 @@ export default function CheckoutPage() {
         </div>
       </div>
 
-      <div className="mt-6 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+      {/* Items */}
+      <div className="rounded-2xl border border-rose-100 bg-white p-5 shadow-sm">
+        <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-gray-500">
+          Order Items
+        </h2>
         <div className="space-y-4">
           {checkoutItems.map((item) => (
             <div key={item.key} className="flex gap-4">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={
-                  item.image ||
-                  "https://via.placeholder.com/120x160?text=Product"
-                }
-                alt={item.name}
-                className="h-24 w-20 rounded-md object-cover"
-              />
-              <div className="flex-1">
-                <h2 className="text-lg font-semibold text-gray-900">
+              <div className="shrink-0 overflow-hidden rounded-xl border border-rose-100 bg-gradient-to-br from-rose-50/60 via-white to-white">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={
+                    item.image ||
+                    "https://via.placeholder.com/120x160?text=Product"
+                  }
+                  alt={item.name}
+                  className="h-28 w-24 object-cover"
+                />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base md:text-lg font-semibold leading-snug text-gray-900">
                   {item.name}
-                </h2>
-                <p className="text-sm text-gray-600">
-                  Color: {item.color || "Default"}
-                </p>
-                <p className="text-sm text-gray-600">
-                  Size: {item.size || "N/A"}
-                </p>
-                <p className="text-sm text-gray-600">Qty: {item.quantity}</p>
-                <p className="mt-1 text-sm text-gray-900">
-                  Unit Price: ฿ {item.unitPriceTHB.toFixed(2)}
-                </p>
+                </h3>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full border border-rose-100 bg-rose-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-rose-600">
+                    {item.color || "Default"}
+                  </span>
+                  <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-gray-600">
+                    Size {item.size || "N/A"}
+                  </span>
+                  <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-gray-600">
+                    Qty {item.quantity}
+                  </span>
+                </div>
+                <div className="mt-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+                    Unit price
+                  </div>
+                  <div className="mt-0.5 text-sm font-semibold text-gray-900">
+                    ฿ {item.unitPriceTHB.toFixed(2)}
+                  </div>
+                </div>
               </div>
             </div>
           ))}
         </div>
+      </div>
+        </div>
 
-        <div className="mt-6 border-t border-gray-100 pt-4 text-sm text-gray-700">
+        {/* Right column */}
+        <div className="lg:sticky lg:top-6 space-y-5">
+      <div className="rounded-2xl border border-rose-100 bg-gradient-to-br from-rose-50/70 via-white to-white p-5 shadow-sm">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+          Order Summary
+        </h2>
+
+        <div className="mt-4">
           {discountTHB > 0 ? (
-            <div className="mb-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-800">
-              {promotionTitle}
+            <div className="mb-3 flex items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2">
+              <svg
+                className="h-4 w-4 shrink-0 text-emerald-600"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+              <span className="text-xs font-semibold text-emerald-800">
+                {promotionTitle}
+              </span>
             </div>
           ) : null}
-          <div className="flex items-center justify-between py-1">
-            <span>Subtotal (THB)</span>
-            <span className="font-medium">฿ {baseTotalTHB.toFixed(2)}</span>
+          <div className="flex items-center justify-between gap-3 py-1">
+            <span className="text-xs font-medium text-gray-500">
+              Subtotal (THB)
+            </span>
+            <span className="text-sm font-semibold text-gray-900">
+              ฿ {baseTotalTHB.toFixed(2)}
+            </span>
           </div>
           {discountTHB > 0 ? (
-            <div className="flex items-center justify-between py-1 text-emerald-700">
-              <span>Promotion Discount (THB)</span>
-              <span className="font-medium">-฿ {discountTHB.toFixed(2)}</span>
+            <div className="flex items-center justify-between gap-3 py-1">
+              <span className="text-xs font-medium text-emerald-700">
+                Promotion Discount (THB)
+              </span>
+              <span className="text-sm font-semibold text-emerald-700">
+                -฿ {discountTHB.toFixed(2)}
+              </span>
             </div>
           ) : null}
           
           {/* Coupon Discount */}
           {activeCoupon && couponDiscount.discountAmount > 0 && (
-            <div className="flex items-center justify-between py-1 text-purple-700">
+            <div className="flex items-center justify-between gap-3 py-1">
               <div className="flex items-center gap-2">
-                <span>Coupon Discount</span>
-                <span className="text-xs bg-purple-100 px-2 py-0.5 rounded font-semibold">
+                <span className="text-xs font-medium text-purple-700">
+                  Coupon Discount
+                </span>
+                <span className="rounded bg-purple-100 px-2 py-0.5 text-[10px] font-bold text-purple-700">
                   {activeCoupon.code}
                 </span>
               </div>
-              <span className="font-medium">-฿ {couponDiscount.discountAmount.toFixed(2)}</span>
+              <span className="text-sm font-semibold text-purple-700">-฿ {couponDiscount.discountAmount.toFixed(2)}</span>
             </div>
           )}
           
-          <div className="flex items-center justify-between py-1">
-            <span>Tax ({taxRatePercent}%)</span>
-            <span className="font-medium">฿ {taxTHB.toFixed(2)}</span>
+          <div className="flex items-center justify-between gap-3 py-1">
+            <span className="text-xs font-medium text-gray-500">
+              Tax ({taxRatePercent}%)
+            </span>
+            <span className="text-sm font-semibold text-gray-900">
+              ฿ {taxTHB.toFixed(2)}
+            </span>
           </div>
-          <div className="flex items-center justify-between py-1 border-t border-gray-200 pt-2 mt-2">
-            <span className="font-semibold">Total (THB)</span>
-            <span className="font-semibold text-lg">฿ {totalTHB.toFixed(2)}</span>
-          </div>
-          <div className="flex items-center justify-between py-1">
-            <span className="font-semibold">Total (MMK)</span>
-            <span className="font-semibold text-lg">Ks {totalMMK.toLocaleString()}</span>
+
+          <div className="mt-4 border-t border-rose-100 pt-4">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+              Total (THB)
+            </div>
+            <div className="mt-1 bg-gradient-to-r from-rose-500 to-pink-500 bg-clip-text text-2xl md:text-3xl font-bold text-transparent">
+              ฿ {totalTHB.toFixed(2)}
+            </div>
+            <div className="mt-0.5 text-sm font-medium text-gray-500">
+              Ks {totalMMK.toLocaleString()}
+            </div>
           </div>
           
           {/* Applied coupon */}
           {activeCoupon && (
-            <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+            <div className="mt-4 rounded-xl border border-purple-100 bg-purple-50 p-3">
               <div className="flex items-start gap-2">
                 <svg className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
@@ -833,8 +1030,8 @@ export default function CheckoutPage() {
 
           {/* Coupons the customer owns but has not applied yet */}
           {!activeCoupon && availableCoupons.length > 0 && (
-            <div className="mt-3 rounded-lg border border-purple-200 bg-purple-50 p-3">
-              <p className="text-sm font-semibold text-purple-900">
+            <div className="mt-4 rounded-xl border border-purple-100 bg-purple-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wider text-purple-900">
                 You have {availableCoupons.length} coupon
                 {availableCoupons.length > 1 ? "s" : ""} available
               </p>
@@ -842,7 +1039,7 @@ export default function CheckoutPage() {
                 {availableCoupons.map((coupon) => (
                   <div
                     key={coupon.id}
-                    className="flex items-center justify-between gap-3 rounded-md border border-purple-200 bg-white px-3 py-2"
+                    className="flex items-center justify-between gap-3 rounded-xl border border-purple-100 bg-white px-3 py-2"
                   >
                     <div>
                       <p className="text-sm font-bold text-gray-900">
@@ -858,7 +1055,7 @@ export default function CheckoutPage() {
                       type="button"
                       onClick={() => applyCoupon(coupon.id)}
                       disabled={couponActionId === coupon.id || submitting}
-                      className="rounded-md bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-purple-700 disabled:opacity-50"
+                      className="shrink-0 rounded-full bg-purple-600 px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {couponActionId === coupon.id ? "Applying..." : "Apply"}
                     </button>
@@ -882,34 +1079,85 @@ export default function CheckoutPage() {
         </div>
 
         {qrValue && (
-          <div className="mt-6 rounded-md border border-blue-200 bg-blue-50 p-4">
-            <p className="text-sm font-medium text-blue-900">
-              Scan this QR code to complete payment
+          <div className="mt-5 rounded-xl border border-rose-100 bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+              Scan to pay
             </p>
-            <div className="mt-3 inline-block rounded bg-white p-3">
+            <div className="mt-3 flex justify-center rounded-xl border border-rose-100 bg-gradient-to-br from-rose-50/60 via-white to-white p-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(qrValue)}`}
                 alt="Payment QR"
-                className="h-[220px] w-[220px]"
+                className={`h-[200px] w-[200px] transition-opacity ${
+                  qrExpired ? "opacity-25" : ""
+                }`}
               />
             </div>
-            {paymentUrl && (
+
+            {/* Scan window countdown, directly beneath the QR. */}
+            {qrDeadline !== null && !qrExpired && (
+              <div
+                className="mt-3 flex items-center justify-center gap-2 rounded-full bg-rose-50 px-3 py-2"
+                aria-live="polite"
+              >
+                <svg
+                  className="h-4 w-4 shrink-0 text-rose-500"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.8}
+                  viewBox="0 0 24 24"
+                  aria-hidden
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 8v4l2.5 2.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
+                  />
+                </svg>
+                <span className="text-xs font-medium text-gray-600">
+                  {t("qr_expires_in")}
+                </span>
+                <span className="font-mono text-sm font-bold tabular-nums text-rose-600">
+                  {formatCountdown(secondsLeft)}
+                </span>
+              </div>
+            )}
+
+            {qrExpired && (
+              <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-center">
+                <p className="text-xs font-semibold text-amber-900">
+                  {t("qr_expired")}
+                </p>
+                <p className="mt-1 text-[11px] text-amber-800">
+                  {t("qr_expired_hint")}
+                </p>
+                <button
+                  type="button"
+                  onClick={createPayment}
+                  disabled={submitting}
+                  className="mt-3 inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-4 py-2.5 text-xs font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {submitting ? t("creating_payment") : t("generate_new_qr")}
+                </button>
+              </div>
+            )}
+
+            {paymentUrl && !qrExpired && (
               <a
                 href={paymentUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="mt-3 inline-block text-sm font-medium text-blue-700 underline"
+                className="mt-3 inline-block text-xs font-semibold text-rose-600 underline decoration-rose-300 underline-offset-4 transition-colors hover:text-rose-700"
               >
                 Open payment page instead
               </a>
             )}
-            {onlineOrderId && (
+            {onlineOrderId && !qrExpired && (
               <button
                 type="button"
                 onClick={completePaymentForTest}
                 disabled={completingTest}
-                className="mt-3 inline-flex rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                className="mt-3 inline-flex w-full items-center justify-center rounded-full border-2 border-rose-200 bg-white px-4 py-2.5 text-xs font-semibold text-rose-600 transition-all hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {paymentUrl
                   ? "Open MyanMyanPay Test Page"
@@ -922,13 +1170,25 @@ export default function CheckoutPage() {
         )}
 
         {!user && (
-          <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <p className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2.5 text-xs font-medium text-amber-800">
             Please login before continuing to payment.
           </p>
         )}
 
-        {user && !isProfileComplete && (
-          <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+        {user && !isEmailVerified && (
+          <p className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2.5 text-xs font-medium text-amber-800">
+            Please verify your email address before continuing to payment.{" "}
+            <Link
+              href={`/auth/verify-email?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`}
+              className="font-semibold underline"
+            >
+              Verify Email
+            </Link>
+          </p>
+        )}
+
+        {user && isEmailVerified && !isProfileComplete && (
+          <p className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2.5 text-xs font-medium text-amber-800">
             Please complete your profile ({missingProfileFields.join(", ")})
             before continuing to payment.{" "}
             <Link
@@ -941,16 +1201,22 @@ export default function CheckoutPage() {
         )}
 
         {error && (
-          <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <p className="mt-4 rounded-xl border border-red-100 bg-red-50 px-3 py-2.5 text-xs font-medium text-red-700">
             {error}
           </p>
         )}
 
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-5 space-y-2.5">
           <button
             onClick={createPayment}
-            disabled={submitting || !user || !isProfileComplete || !hasTaxRate}
-            className="rounded-md bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 px-5 py-2 text-white disabled:opacity-50"
+            disabled={
+              submitting ||
+              !user ||
+              !isEmailVerified ||
+              !isProfileComplete ||
+              !hasTaxRate
+            }
+            className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg disabled:cursor-not-allowed disabled:from-gray-300 disabled:to-gray-300 disabled:shadow-none"
           >
             {submitting
               ? paymentMethod === "cod"
@@ -958,7 +1224,9 @@ export default function CheckoutPage() {
                 : "Creating Payment..."
               : !user
                 ? "Login to Continue"
-                : !isProfileComplete
+                : !isEmailVerified
+                  ? "Verify Email to Continue"
+                  : !isProfileComplete
                   ? "Complete Profile to Continue"
                   : !hasTaxRate
                     ? "Loading tax settings..."
@@ -967,14 +1235,18 @@ export default function CheckoutPage() {
                       : "Pay with MyanMyanPay"}
           </button>
 
-          <button
-            onClick={() => router.back()}
-            className="rounded-md border border-gray-300 px-5 py-2 text-gray-700 hover:bg-gray-50"
+          <Link
+            href="/cart"
+            className="inline-flex w-full items-center justify-center rounded-full border-2 border-rose-200 bg-white px-5 py-3 text-sm font-semibold text-rose-600 transition-all hover:border-rose-300 hover:bg-rose-50"
           >
-            Back
-          </button>
+            Back to Cart
+          </Link>
         </div>
       </div>
+
+        </div>
+      </div>
+    </div>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
+import { exceedsDocBudget } from "@/lib/documentBudget";
 
 export async function POST(request: NextRequest) {
   try {
@@ -96,6 +97,20 @@ export async function POST(request: NextRequest) {
       cancellationRequest.qrCodeImage = qrCodeImage;
     }
 
+    // The embedded QR image can push the document past Firestore's 1MiB limit,
+    // which surfaces as "Property cancellationRequest contains an invalid
+    // nested entity" — meaningless to a customer. The client compresses first,
+    // so this only trips for very large uploads or callers that bypass it.
+    if (exceedsDocBudget(transaction, "cancellationRequest", cancellationRequest)) {
+      return NextResponse.json(
+        {
+          error:
+            "The uploaded image is too large to attach to this order. Please upload a smaller screenshot.",
+        },
+        { status: 413 }
+      );
+    }
+
     await transactionsRef.doc(transactionDoc.id).update({
       cancellationRequest,
       updatedAt: FieldValue.serverTimestamp(),
@@ -119,6 +134,27 @@ export async function POST(request: NextRequest) {
     } catch (notifError) {
       console.error("Error creating owner notification for cancellation request:", notifError);
       // Don't fail the request if the notification fails to be created
+    }
+
+    // Acknowledge the request to the customer so they are not left wondering
+    // whether it went through. Best-effort; the request is already saved.
+    try {
+      const { notifyCustomer } = await import("@/lib/notifications/dispatch");
+      await notifyCustomer({
+        customerId: customerUid,
+        event: {
+          type: "cancellation_requested",
+          order: {
+            orderRef: transactionId,
+            totalAmount: Number(transaction.total || 0),
+            paymentMethod: transaction.paymentMethod || "",
+            paymentStatus: transaction.paymentStatus || "",
+          },
+          reason: typeof reason === "string" ? reason : undefined,
+        },
+      });
+    } catch (notifyError) {
+      console.error("Error acknowledging cancellation request to customer:", notifyError);
     }
 
     return NextResponse.json({

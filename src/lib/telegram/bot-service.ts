@@ -103,7 +103,7 @@ async function handleCommand(ctx: BotContext): Promise<void> {
   const args = text.split(" ").slice(1).join(" ");
 
   const commandHandlers: Record<string, () => Promise<void>> = {
-    "/start": () => handleStartCommand(ctx),
+    "/start": () => handleStartCommand(ctx, args),
     "/help": () => handleHelpCommand(ctx),
     "/products": () => handleProductsCommand(ctx),
     "/search": () => handleSearchCommand(ctx, args),
@@ -128,9 +128,22 @@ async function handleCommand(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Handle /start command
+ * Handle /start command.
+ *
+ * Telegram passes deep-link payloads here: opening
+ * `https://t.me/<bot>?start=link_<token>` arrives as `/start link_<token>`.
+ * That is how the storefront-initiated linking flow completes — the customer
+ * gets the token while signed in on the website, and tapping through proves they
+ * also control this chat.
  */
-async function handleStartCommand(ctx: BotContext): Promise<void> {
+async function handleStartCommand(ctx: BotContext, args = ""): Promise<void> {
+  const payload = args.trim();
+
+  if (payload.startsWith("link_")) {
+    await completeWebLink(ctx, payload.slice("link_".length));
+    return;
+  }
+
   const welcomeMessage = formatWelcomeMessage(ctx.firstName);
 
   await sendMessage({
@@ -138,6 +151,103 @@ async function handleStartCommand(ctx: BotContext): Promise<void> {
     text: welcomeMessage,
     reply_markup: createMainMenuKeyboard(),
   });
+}
+
+/**
+ * Finish a storefront-initiated link.
+ *
+ * `ctx.chatId` comes from the Telegram update, so it is the one half of the pair
+ * the caller cannot influence; the token supplies the customer. Messages use
+ * HTML because emails and error text contain characters MarkdownV2 would choke
+ * on.
+ */
+async function completeWebLink(ctx: BotContext, token: string): Promise<void> {
+  const escape = (value: string) =>
+    value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  if (!token) {
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: "⚠️ <b>Link failed</b>\n\nThis link is not valid. Open your profile on our website and tap Connect Telegram again.",
+      parse_mode: "HTML",
+    });
+    return;
+  }
+
+  try {
+    const existing = await getCustomerByTelegramId(ctx.chatId);
+    if (existing) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text:
+          `✅ <b>Already linked</b>\n\nThis Telegram account is already connected to ` +
+          `<b>${escape(existing.email || "your account")}</b>.\n\n` +
+          `Use /profile to see your details.`,
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    const { claimWebLinkToken, linkTelegramToCustomer } = await import(
+      "./auth-service"
+    );
+
+    const claim = await claimWebLinkToken(token, ctx.chatId);
+
+    if (!claim.valid || !claim.customerId) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: `⚠️ <b>Link failed</b>\n\n${escape(claim.error || "This link is not valid.")}`,
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    const linked = await linkTelegramToCustomer(claim.customerId, {
+      chatId: ctx.chatId,
+      username: ctx.username,
+      firstName: ctx.firstName,
+    });
+
+    if (!linked) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: "⚠️ <b>Link failed</b>\n\nSomething went wrong on our side. Please request a new link and try again.",
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    // Best-effort: a failed cart merge must not make a successful link look
+    // broken to the customer.
+    try {
+      const { mergeTelegramCartWithCustomer } = await import("./cart-service");
+      await mergeTelegramCartWithCustomer(ctx.chatId, claim.customerId);
+    } catch (mergeError) {
+      console.error("Cart merge after web link failed:", mergeError);
+    }
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text:
+        `🎉 <b>Account linked!</b>\n\n` +
+        `You'll now get order updates, delivery alerts and promotions right here.\n\n` +
+        `Use /profile to view your account or /orders to track a purchase.`,
+      parse_mode: "HTML",
+      reply_markup: createMainMenuKeyboard(),
+    });
+
+    console.log(
+      `✅ Linked chat ${ctx.chatId} to customer ${claim.customerId} via web deep link`,
+    );
+  } catch (error) {
+    console.error("Web link completion error:", error);
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: "⚠️ <b>Link failed</b>\n\nSomething went wrong. Please try again.",
+      parse_mode: "HTML",
+    });
+  }
 }
 
 /**
@@ -411,19 +521,39 @@ async function handleLinkCommand(ctx: BotContext): Promise<void> {
     const { generateLinkToken } = await import("./auth-service");
     const token = await generateLinkToken(ctx.chatId);
 
-    const linkText = `🔗 *Link Your Account*\n\n` +
-      `To link your Telegram with your web account:\n\n` +
-      `1\\. Click the button below\n` +
-      `2\\. Log in to your account\n` +
-      `3\\. Confirm the linking\n\n` +
-      `⏰ Link expires in 15 minutes\\.`;
+    const { createAccountLinkKeyboard, accountLinkUrl } = await import(
+      "./keyboards"
+    );
 
-    const { createAccountLinkKeyboard } = await import("./keyboards");
+    const keyboard = createAccountLinkKeyboard(token);
+    const linkUrl = accountLinkUrl(token);
+
+    // HTML rather than MarkdownV2: the URL is full of characters MarkdownV2
+    // treats as syntax (`.`, `-`, `_`, `=`), and one missed escape makes
+    // Telegram reject the message outright.
+    const steps = keyboard
+      ? `1. Tap the button below\n` +
+        `2. Log in to your account\n` +
+        `3. Confirm the linking`
+      : `1. Open this link in your browser:\n` +
+        `<code>${linkUrl}</code>\n` +
+        `2. Log in to your account\n` +
+        `3. Confirm the linking`;
+
+    const linkText =
+      `🔗 <b>Link Your Account</b>\n\n` +
+      `To link your Telegram with your web account:\n\n` +
+      `${steps}\n\n` +
+      `⏰ Link expires in 15 minutes.`;
 
     await sendMessage({
       chat_id: ctx.chatId,
       text: linkText,
-      reply_markup: createAccountLinkKeyboard(token),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      // Omitted entirely when the storefront URL is not public — Telegram
+      // rejects the whole message for an unreachable button URL.
+      ...(keyboard ? { reply_markup: keyboard } : {}),
     });
   } catch (error) {
     console.error("Link error:", error);

@@ -158,6 +158,11 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
     timestamp: new Date().toISOString(),
     createdAt: new Date(),
     status: "completed",
+    // The POS refund/sales reports group by branch, so online orders have to
+    // carry one too. COD checkout already writes "Online Store"; match it, but
+    // prefer a real branch if the order ever starts recording one.
+    branchName: (order.branchName as string | undefined) || "Online Store",
+    ...(order.shopId ? { shopId: order.shopId as string } : {}),
     sellingCurrency: "THB",
     ...(hasExchangeRate ? { exchangeRate } : {}),
     amountMmk: Number(order.amountMmk || payload.amount || 0),
@@ -363,6 +368,45 @@ export async function POST(req: Request) {
         } catch (notifError) {
           console.error("Error creating owner notification for new online order:", notifError);
           // Don't fail the webhook if the notification fails to be created
+        }
+
+        // Tell the customer their payment landed, by email and Telegram.
+        // Best-effort: MyanMyanPay must still get its 200 either way, otherwise
+        // it retries a callback we have already processed.
+        try {
+          const orderData = orderDoc.exists ? orderDoc.data() : undefined;
+          const customerUid = orderData?.customer?.uid;
+
+          if (customerUid) {
+            const { notifyCustomer } = await import("@/lib/notifications/dispatch");
+            await notifyCustomer({
+              customerId: customerUid,
+              fallbackEmail: orderData?.customer?.email,
+              fallbackDisplayName: orderData?.customer?.displayName,
+              event: {
+                type: "payment_received",
+                order: {
+                  orderRef: payload.orderId,
+                  totalAmount: Number(orderData?.total || payload.amount || 0),
+                  paymentMethod: orderData?.paymentMethod || "MMPAY",
+                  paymentStatus: "paid",
+                  items: Array.isArray(orderData?.items)
+                    ? orderData.items.map(
+                        (item: { name?: string; quantity?: number }) => ({
+                          name: item.name || "Item",
+                          quantity: Number(item.quantity || 1),
+                        }),
+                      )
+                    : undefined,
+                },
+              },
+            });
+          }
+        } catch (notifyError) {
+          console.error(
+            "Error sending payment confirmation to customer:",
+            notifyError,
+          );
         }
       } catch (error) {
         const message =

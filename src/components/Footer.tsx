@@ -4,6 +4,9 @@ import React from "react";
 import Image from "next/image";
 import { useLanguage } from "../contexts/LanguageContext";
 
+/** Public link to the storefront's Telegram order-notification bot. */
+const TELEGRAM_BOT_URL = "https://t.me/SweTrendyHubBot";
+
 /** Pink map-pin used beside each branch name. */
 function PinIcon() {
   return (
@@ -120,8 +123,9 @@ export default function Footer() {
               {t("terms")}
             </a>
             <div className="mt-4 flex items-center gap-3">
-              <a
+              {/* <a
                 href="#"
+                target="_blank"
                 aria-label="Instagram"
                 className="w-9 h-9 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition-colors"
               >
@@ -138,9 +142,10 @@ export default function Footer() {
                   <circle cx="12" cy="12" r="3.5" />
                   <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
                 </svg>
-              </a>
+              </a> */}
               <a
-                href="#"
+                href="https://www.facebook.com/swetrendyhub"
+                target="_blank"
                 aria-label="Facebook"
                 className="w-9 h-9 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition-colors"
               >
@@ -155,7 +160,8 @@ export default function Footer() {
                 </svg>
               </a>
               <a
-                href="#"
+                href="https://www.tiktok.com/@swetrendyhub"
+                target="_blank"
                 aria-label="TikTok"
                 className="w-9 h-9 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition-colors"
               >
@@ -166,10 +172,49 @@ export default function Footer() {
                   viewBox="0 0 24 24"
                   fill="currentColor"
                 >
-                  <path d="M16.6 5.8a4.3 4.3 0 01-1-2.8h-2.8v11.1a2.3 2.3 0 11-1.6-2.2V9.1a5 5 0 101.6 3.7V8.2a6 6 0 003.8 1.3V6.7a3.4 3.4 0 01-.9-.9z" />
+                  <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 1 1-5.2-1.74 2.89 2.89 0 0 1 2.31-2.23V8.2a6.34 6.34 0 1 0 6.34 6.34V9.25a8.16 8.16 0 0 0 4.77 1.52V7.32a4.85 4.85 0 0 1-1-0.63z" />
+                </svg>
+              </a>
+              {/* Opens the order-notification bot. External target, so it needs
+                  noopener/noreferrer unlike the placeholder social links. */}
+              <a
+                href="https://t.me/swetrendyhub24"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={t("telegram_bot_aria")}
+                title={t("telegram_bot_aria")}
+                className="w-9 h-9 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition-colors"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
+                  <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 12.3 3.64 11c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 15.6l-2.1 2.04c-.23.23-.42.42-.72.42z" />
                 </svg>
               </a>
             </div>
+
+            <a
+              href={TELEGRAM_BOT_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-4 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-4 py-2 text-xs font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                aria-hidden
+              >
+                <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 12.3 3.64 11c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 15.6l-2.1 2.04c-.23.23-.42.42-.72.42z" />
+              </svg>
+              {t("telegram_bot_cta")}
+            </a>
           </div>
 
           {/* Boutique illustration */}

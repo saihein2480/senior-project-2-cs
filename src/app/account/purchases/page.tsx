@@ -6,6 +6,11 @@ import Link from "next/link";
 import { collection, onSnapshot, query, where, orderBy } from "firebase/firestore";
 import { db } from "../../../lib/firebase";
 import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
+import {
+  MAX_PHOTO_DATA_URL_BYTES,
+  MAX_QR_DATA_URL_BYTES,
+  fileToCompressedDataUrl,
+} from "../../../lib/imageCompression";
 
 type IconProps = {
   size?: number;
@@ -296,6 +301,8 @@ type Txn = {
     notes?: string;
   };
   cancelledAt?: { toDate: () => Date };
+  /** Written by the POS cancellation paths alongside `cancelledAt`. */
+  cancelReason?: string;
   customerUid?: string;
 };
 
@@ -361,7 +368,22 @@ function resolvePurchaseOrderStatus(
   row: Txn,
   orderStatusByOrderRef: Record<string, PurchaseOrderStatus>,
 ): PurchaseOrderStatus {
-  // First, check if the transaction has an explicit orderStatus field
+  // A cancelled order outranks every other signal. This has to be checked
+  // before `orderStatus` because the POS paid-cancellation path used to leave
+  // `orderStatus` on its previous value, and because confirming the refund
+  // overwrites `status` with "refunded" — so `cancelledAt` / `cancelReason` /
+  // `cancellationRefund` are the only durable evidence that the order was
+  // cancelled. Only the cancellation paths ever write these fields.
+  if (
+    row.cancelledAt ||
+    row.cancelReason ||
+    row.cancellationRefund ||
+    (row.status || "").toLowerCase() === "cancelled"
+  ) {
+    return "cancelled";
+  }
+
+  // Next, check if the transaction has an explicit orderStatus field
   if ((row as any).orderStatus) {
     const orderStatus = (row as any).orderStatus.toLowerCase();
     if (orderStatus === "pending") return "pending";
@@ -564,6 +586,178 @@ function getDefaultCustomDateRange() {
   };
 }
 
+/**
+ * The normal fulfilment path, in order. Exception states (cancelled, failed,
+ * returned) are not steps on this path — they are reported separately below.
+ */
+const FULFILMENT_STEPS: Array<{
+  status: PurchaseOrderStatus;
+  label: string;
+  /** Icon path drawn inside a 24x24 viewBox. */
+  path: string;
+}> = [
+  {
+    status: "pending",
+    label: "Placed",
+    path: "M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2Z",
+  },
+  {
+    status: "packaging",
+    label: "Packing",
+    path: "M20 7 12 3 4 7m16 0v10l-8 4m8-14-8 4m0 0L4 7m8 4v10M4 7v10l8 4",
+  },
+  {
+    status: "delivering",
+    label: "On the way",
+    path: "M3 16V6h11v10M14 9h4l3 3v4h-7M6.5 19a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm11 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z",
+  },
+  {
+    status: "delivered",
+    label: "Delivered",
+    path: "M5 13l4 4L19 7",
+  },
+];
+
+/** Statuses that end the order rather than advance it. */
+const EXCEPTION_NOTES: Partial<
+  Record<PurchaseOrderStatus, { tone: string; title: string; detail: string }>
+> = {
+  cancelled: {
+    tone: "border-gray-200 bg-gray-50 text-gray-700",
+    title: "Order cancelled",
+    detail: "This order was cancelled and will not be delivered.",
+  },
+  failed: {
+    tone: "border-red-200 bg-red-50 text-red-700",
+    title: "Order failed",
+    detail: "Something went wrong with this order. Please contact the store.",
+  },
+  fully_returned: {
+    tone: "border-purple-200 bg-purple-50 text-purple-700",
+    title: "Fully returned",
+    detail: "All items from this order were returned.",
+  },
+  partially_returned: {
+    tone: "border-violet-200 bg-violet-50 text-violet-700",
+    title: "Partially returned",
+    detail: "Some items from this order were returned.",
+  },
+};
+
+/**
+ * Visual progress of an order through fulfilment.
+ *
+ * Reads far quicker than a status word, and makes it obvious what happens next.
+ * Returned orders still show the completed path, because they were delivered
+ * before being sent back; cancelled and failed orders never travelled it, so
+ * they get the note on its own.
+ */
+function OrderStatusTracker({ status }: { status: PurchaseOrderStatus }) {
+  const exception = EXCEPTION_NOTES[status];
+  const wasDelivered =
+    status === "fully_returned" || status === "partially_returned";
+  const showPath = !exception || wasDelivered;
+
+  // Returned orders completed the whole path; otherwise position on it.
+  const activeIndex = wasDelivered
+    ? FULFILMENT_STEPS.length - 1
+    : FULFILMENT_STEPS.findIndex((step) => step.status === status);
+
+  return (
+    <div className="rounded-2xl border border-rose-100 bg-white p-4 shadow-sm">
+      <div className="flex items-center gap-2">
+        <span className="h-4 w-1 rounded-full bg-gradient-to-b from-rose-500 to-pink-500" />
+        <span className="text-sm font-bold text-gray-900">Order Status</span>
+        <span
+          className={`ml-auto inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize ${getStatusBadgeClass(
+            status,
+          )}`}
+        >
+          {getPurchaseOrderStatusLabel(status)}
+        </span>
+      </div>
+
+      {showPath && (
+        <ol className="mt-4 flex items-start" aria-label="Order progress">
+          {FULFILMENT_STEPS.map((step, index) => {
+            const isDone = index <= activeIndex;
+            const isCurrent = index === activeIndex && !wasDelivered;
+            const isLast = index === FULFILMENT_STEPS.length - 1;
+
+            return (
+              <li
+                key={step.status}
+                className="flex flex-1 flex-col items-center text-center"
+              >
+                <div className="flex w-full items-center">
+                  {/* Leading connector, hidden on the first step so the row
+                      stays visually centred. */}
+                  <span
+                    className={`h-0.5 flex-1 ${
+                      index === 0
+                        ? "bg-transparent"
+                        : isDone
+                          ? "bg-rose-400"
+                          : "bg-gray-200"
+                    }`}
+                  />
+                  <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 transition-colors ${
+                      isDone
+                        ? "border-transparent bg-gradient-to-r from-rose-500 to-pink-500 text-white shadow-sm"
+                        : "border-gray-200 bg-white text-gray-300"
+                    } ${isCurrent ? "ring-4 ring-rose-100" : ""}`}
+                  >
+                    <svg
+                      className="h-4 w-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      viewBox="0 0 24 24"
+                      aria-hidden
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d={step.path}
+                      />
+                    </svg>
+                  </span>
+                  <span
+                    className={`h-0.5 flex-1 ${
+                      isLast
+                        ? "bg-transparent"
+                        : index < activeIndex
+                          ? "bg-rose-400"
+                          : "bg-gray-200"
+                    }`}
+                  />
+                </div>
+                <span
+                  className={`mt-2 text-[10px] leading-tight sm:text-[11px] ${
+                    isDone ? "font-semibold text-gray-900" : "text-gray-400"
+                  }`}
+                >
+                  {step.label}
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      {exception && (
+        <div
+          className={`mt-4 rounded-xl border px-3 py-2.5 text-left ${exception.tone}`}
+        >
+          <p className="text-xs font-bold">{exception.title}</p>
+          <p className="mt-0.5 text-[11px] opacity-90">{exception.detail}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PurchaseDetailsModal({
   row,
   displayStatus,
@@ -585,28 +779,46 @@ function PurchaseDetailsModal({
         onClick={onClose}
       />
 
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col z-10">
-        <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">
-              Purchase Details
-            </h2>
-            <p className="text-xs text-gray-500 mt-0.5">
+      <div className="bg-white rounded-3xl shadow-2xl ring-1 ring-rose-100 w-full max-w-lg max-h-[85vh] flex flex-col z-10 overflow-hidden">
+        <div className="bg-white border-b border-rose-100 px-6 py-5 flex justify-between items-start gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+                <svg
+                  className="h-5 w-5 text-rose-500"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.7}
+                  viewBox="0 0 24 24"
+                  aria-hidden
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2Z"
+                  />
+                </svg>
+              </span>
+              <h2 className="text-lg font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">
+                Purchase Details
+              </h2>
+            </div>
+            <p className="mt-2 truncate text-[11px] font-medium text-gray-400">
               {row.transactionId || row.id}
             </p>
           </div>
           <button
             onClick={onClose}
-            className="p-2 hover:bg-gray-100 rounded-full text-gray-500 transition-colors"
+            className="shrink-0 p-2 rounded-full text-gray-400 hover:bg-rose-100 hover:text-rose-600 transition-colors"
           >
             <X size={20} />
           </button>
         </div>
 
-        <div className="px-6 py-4 overflow-y-auto flex-1 space-y-4">
+        <div className="px-6 py-5 overflow-y-auto flex-1 space-y-4 bg-gradient-to-b from-rose-50/40 via-white to-white">
           {/* Cancellation Request Status */}
           {cancelRequest && (
-            <div className={`rounded-md border p-3 ${
+            <div className={`rounded-2xl border p-4 shadow-sm ${
               cancelRequest.status === "pending"
                 ? "border-amber-200 bg-amber-50"
                 : cancelRequest.status === "approved"
@@ -651,9 +863,9 @@ function PurchaseDetailsModal({
 
           {/* Refund/Return Request Status */}
           {refundRequest && (
-            <div className={`rounded-md border p-3 ${
+            <div className={`rounded-2xl border p-4 shadow-sm ${
               refundRequest.status === "pending"
-                ? "border-blue-200 bg-blue-50"
+                ? "border-rose-200 bg-rose-50"
                 : refundRequest.status === "approved"
                 ? "border-green-200 bg-green-50"
                 : "border-red-200 bg-red-50"
@@ -689,8 +901,8 @@ function PurchaseDetailsModal({
                             </>
                           ) : (
                             <>
-                              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-blue-500 text-white font-medium">→</span>
-                              <span className="text-blue-700 font-medium">Please Return Items to Store</span>
+                              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 text-white font-medium">→</span>
+                              <span className="text-rose-700 font-medium">Please Return Items to Store</span>
                             </>
                           )}
                         </div>
@@ -732,7 +944,7 @@ function PurchaseDetailsModal({
                       
                       {/* Inspection Results Display */}
                       {refundRequest.inspectionCompleted && refundRequest.itemInspectionResults && (
-                        <div className="mt-3 p-2 bg-white/50 rounded border border-green-200">
+                        <div className="mt-3 p-2.5 bg-white/60 rounded-xl border border-green-200">
                           <p className="text-xs font-semibold text-gray-700 mb-1">Inspection Results:</p>
                           <div className="space-y-1">
                             {refundRequest.itemInspectionResults.map((result: any, idx: number) => {
@@ -754,8 +966,8 @@ function PurchaseDetailsModal({
                       
                       {/* Action Prompt */}
                       {!refundRequest.returnReceived && (
-                        <div className="mt-3 p-2 bg-blue-100 rounded border border-blue-300">
-                          <p className="text-xs text-blue-900 font-medium">
+                        <div className="mt-3 p-2.5 bg-rose-100 rounded-xl border border-rose-200">
+                          <p className="text-xs text-rose-900 font-medium">
                             📍 Please visit our store to return the items for inspection and refund processing.
                           </p>
                         </div>
@@ -765,7 +977,7 @@ function PurchaseDetailsModal({
                   
                   {/* Cancellation Type Info */}
                   {refundRequest.type === "cancellation" && refundRequest.status === "approved" && (
-                    <div className="mt-2 p-2 bg-amber-50 rounded border border-amber-200">
+                    <div className="mt-2 p-2.5 bg-amber-50 rounded-xl border border-amber-200">
                       <p className="text-xs text-amber-800">
                         💰 Your cancellation refund is being processed. Check refund details below.
                       </p>
@@ -818,7 +1030,7 @@ function PurchaseDetailsModal({
                 return (
                   <div 
                     key={index}
-                    className={`rounded-md border p-3 ${
+                    className={`rounded-2xl border p-4 shadow-sm ${
                       isRefundPending 
                         ? "border-amber-200 bg-amber-50"
                         : isRefundCompleted
@@ -924,7 +1136,7 @@ function PurchaseDetailsModal({
 
           {/* Show cancellation refund status for cancelled paid orders */}
           {row.status === "cancelled" && row.cancellationRefund && (
-            <div className={`rounded-md border p-3 ${
+            <div className={`rounded-2xl border p-4 shadow-sm ${
               row.cancellationRefund.status === "pending"
                 ? "border-amber-200 bg-amber-50"
                 : row.cancellationRefund.status === "completed"
@@ -994,48 +1206,60 @@ function PurchaseDetailsModal({
             </div>
           )}
 
-          <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
-            <div className="grid grid-cols-1 gap-1 text-sm text-gray-700">
-              <div>
-                <span className="font-medium text-gray-900">Order Ref: </span>
-                {row.onlineOrderId || "-"}
-              </div>
-              <div>
-                <span className="font-medium text-gray-900">
-                  Order Status:{" "}
+          {/* Fulfilment progress. Replaces the old plain-text Order Status row
+              below, which is why that row is no longer in the grid. */}
+          <OrderStatusTracker status={displayStatus} />
+
+          <div className="rounded-2xl border border-rose-100 bg-white p-4 shadow-sm">
+            <div className="grid grid-cols-1 gap-2.5 text-sm">
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Order Ref
                 </span>
-                {getPurchaseOrderStatusLabel(displayStatus)}
+                <span className="text-right font-medium text-gray-800">
+                  {row.onlineOrderId || "-"}
+                </span>
               </div>
-              <div>
-                <span className="font-medium text-gray-900">
-                  Payment Status:{" "}
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Payment Status
                 </span>
                 <span
-                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getPaymentBadgeClass(
+                  className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${getPaymentBadgeClass(
                     row.status,
                   )}`}
                 >
                   {getPaymentStatusLabel(row.status, row.paymentStatus)}
                 </span>
               </div>
-              <div>
-                <span className="font-medium text-gray-900">Payment Method: </span>
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Payment Method
+                </span>
+                <span className="text-right font-medium text-gray-800">
                 {row.paymentMethod === "cash" ? "💵 Cash" : 
                  row.paymentMethod === "scan" ? "📱 QR Scan" :
                  row.paymentMethod === "wallet" ? "📱 QR Scan" :
                  row.paymentMethod === "cod" ? "🚚 Cash on Delivery" :
                  row.paymentProvider || row.paymentMethod || "-"}
+                </span>
               </div>
-              <div>
-                <span className="font-medium text-gray-900">Date: </span>
-                {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
+              <div className="flex items-start justify-between gap-3">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Date
+                </span>
+                <span className="text-right font-medium text-gray-800">
+                  {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
+                </span>
               </div>
               {/* Applied Coupon Information */}
               {(row.couponCode || row.appliedCouponCode) && (
-                <div className="pt-2 border-t border-gray-300">
-                  <span className="font-medium text-gray-900">Applied Coupon: </span>
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="inline-block px-2.5 py-1 bg-purple-100 text-purple-800 rounded-md text-xs font-bold">
+                <div className="pt-3 border-t border-rose-100">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                    Applied Coupon
+                  </span>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    <span className="inline-block px-2.5 py-1 bg-purple-100 text-purple-800 rounded-full text-xs font-bold">
                       {row.couponCode || row.appliedCouponCode}
                     </span>
                     {(row.couponDiscountTHB || row.discount) && (
@@ -1050,15 +1274,21 @@ function PurchaseDetailsModal({
           </div>
 
           <div>
-            <div className="text-sm font-semibold text-gray-900 mb-2">
-              Items
+            <div className="mb-2 flex items-center gap-2">
+              <span className="h-4 w-1 rounded-full bg-gradient-to-b from-rose-500 to-pink-500" />
+              <span className="text-sm font-bold text-gray-900">Items</span>
+              {items.length > 0 && (
+                <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-600">
+                  {items.length}
+                </span>
+              )}
             </div>
             {items.length === 0 ? (
-              <div className="py-3 text-center text-sm text-gray-500 rounded-md border border-gray-200 bg-gray-50">
+              <div className="py-4 text-center text-sm text-gray-500 rounded-2xl border border-rose-100 bg-rose-50/40">
                 No items found
               </div>
             ) : (
-              <div className="rounded-md border border-gray-200 overflow-hidden">
+              <div className="rounded-2xl border border-rose-100 bg-white shadow-sm overflow-hidden">
                 {items.map((item, idx) => {
                   const details = [item.selectedColor, item.selectedSize]
                     .filter(Boolean)
@@ -1067,22 +1297,24 @@ function PurchaseDetailsModal({
                   return (
                     <div
                       key={`${row.id}-${idx}`}
-                      className="px-4 py-3 border-b border-gray-100 last:border-0 text-sm"
+                      className="px-4 py-3 border-b border-rose-50 last:border-0 text-sm transition-colors hover:bg-rose-50/40"
                     >
                       <div className="flex justify-between gap-3">
-                        <div>
-                          <div className="font-medium text-gray-900">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-gray-900">
                             {item.groupName || "Item"}
                           </div>
                           {details ? (
-                            <div className="text-gray-500 text-xs mt-0.5">
+                            <div className="mt-1 inline-flex rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600">
                               {details}
                             </div>
                           ) : null}
                         </div>
-                        <div className="text-right text-gray-700">
-                          <div>x{Number(item.quantity || 1)}</div>
-                          <div className="text-xs">
+                        <div className="shrink-0 text-right">
+                          <div className="text-xs font-medium text-gray-400">
+                            x{Number(item.quantity || 1)}
+                          </div>
+                          <div className="text-sm font-bold text-rose-600">
                             ฿ {Number(item.unitPrice || 0).toFixed(2)}
                           </div>
                         </div>
@@ -1095,11 +1327,13 @@ function PurchaseDetailsModal({
           </div>
 
           {/* Invoice Summary */}
-          <div className="rounded-md border border-gray-200 bg-white overflow-hidden">
-            <div className="bg-blue-50 px-4 py-2 border-b border-blue-100">
-              <h3 className="text-sm font-semibold text-gray-900">Order Summary</h3>
+          <div className="rounded-2xl border border-rose-100 bg-white shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-rose-50 to-pink-50 px-4 py-2.5 border-b border-rose-100">
+              <h3 className="text-[11px] font-bold uppercase tracking-wide text-rose-600">
+                Order Summary
+              </h3>
             </div>
-            <div className="px-4 py-3 space-y-2 text-sm">
+            <div className="px-4 py-3.5 space-y-2.5 text-sm">
               {/* Subtotal */}
               <div className="flex justify-between items-center">
                 <span className="text-gray-600">Subtotal</span>
@@ -1152,9 +1386,9 @@ function PurchaseDetailsModal({
               </div>
 
               {/* Total */}
-              <div className="flex justify-between items-center pt-2 border-t border-gray-300">
+              <div className="flex justify-between items-center pt-2.5 border-t border-dashed border-rose-200">
                 <span className="font-bold text-gray-900">Total</span>
-                <span className="font-bold text-lg text-gray-900">
+                <span className="text-lg font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">
                   ฿ {summary.total.toFixed(2)}
                 </span>
               </div>
@@ -1162,7 +1396,7 @@ function PurchaseDetailsModal({
               {/* MMK Total if available */}
               {(row.amountMmk || row.sellingTotal) && (
                 <div className="flex justify-between items-center text-sm">
-                  <span className="text-gray-600">Total (MMK)</span>
+                  <span className="text-gray-500">Total (MMK)</span>
                   <span className="font-semibold text-gray-900">
                     Ks {Number(row.amountMmk || row.sellingTotal || 0).toLocaleString()}
                   </span>
@@ -1172,10 +1406,10 @@ function PurchaseDetailsModal({
           </div>
         </div>
 
-        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 rounded-b-lg">
+        <div className="px-6 py-4 border-t border-rose-100 bg-white">
           <button
             onClick={onClose}
-            className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-medium transition-colors"
+            className="w-full rounded-full bg-gradient-to-r from-rose-500 to-pink-500 py-3 text-sm font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg"
           >
             Close
           </button>
@@ -1227,20 +1461,19 @@ function CancelRequestModal({
     setUploading(true);
 
     try {
-      // Convert to base64
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setQrCodeImage(reader.result as string);
-        setUploading(false);
-      };
-      reader.onerror = () => {
-        alert("Failed to read image");
-        setUploading(false);
-      };
-      reader.readAsDataURL(file);
+      // Downscale before encoding. A raw phone photo as base64 exceeds
+      // Firestore's ~1MiB field cap and the write fails with
+      // "Property cancellationRequest contains an invalid nested entity".
+      const compressed = await fileToCompressedDataUrl(file, {
+        maxBytes: MAX_QR_DATA_URL_BYTES,
+      });
+      setQrCodeImage(compressed);
     } catch (error) {
       console.error("Error uploading image:", error);
-      alert("Failed to upload image");
+      alert(
+        error instanceof Error ? error.message : "Failed to upload image",
+      );
+    } finally {
       setUploading(false);
     }
   };
@@ -1264,47 +1497,47 @@ function CancelRequestModal({
         onClick={onClose}
       />
 
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col z-10 overflow-hidden">
+      <div className="bg-white rounded-3xl shadow-2xl ring-1 ring-rose-100 w-full max-w-lg max-h-[90vh] flex flex-col z-10 overflow-hidden">
         {/* Header */}
-        <div className="px-6 py-5 bg-gradient-to-r from-red-50 to-orange-50 border-b border-red-100 flex-shrink-0">
-          <div className="flex items-start justify-between">
-            <div className="flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <div className="p-2 bg-red-100 rounded-lg">
-                  <X className="w-5 h-5 text-red-600" />
-                </div>
-                <h2 className="text-xl font-bold text-gray-900">
+        <div className="px-6 py-5 bg-white border-b border-rose-100 flex-shrink-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+                  <XCircle className="h-5 w-5 text-rose-500" />
+                </span>
+                <h2 className="text-lg font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">
                   {isPaidOrder ? "Cancellation & Refund Request" : "Cancel Order"}
                 </h2>
               </div>
-              <p className="text-sm text-gray-600 ml-11">
+              <p className="mt-2 truncate text-[11px] font-medium text-gray-400">
                 Order #{row.transactionId || row.id}
               </p>
             </div>
             <button
               onClick={onClose}
-              className="p-2 hover:bg-red-100 rounded-lg text-gray-500 hover:text-gray-700 transition-all ml-2"
+              className="shrink-0 p-2 rounded-full text-gray-400 hover:bg-rose-100 hover:text-rose-600 transition-colors"
             >
               <X size={20} />
             </button>
           </div>
         </div>
 
-        <div className="px-6 py-5 space-y-5 overflow-y-auto flex-1">
+        <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1 bg-gradient-to-b from-rose-50/40 via-white to-white">
           {/* QR Code Upload for Scan Payments */}
           {isScanPayment && (
-            <div className="rounded-xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-blue-100/50 p-5 space-y-4">
+            <div className="rounded-2xl border border-rose-100 bg-white p-5 space-y-4 shadow-sm">
               <div className="flex items-start gap-3">
-                <div className="p-2.5 bg-blue-500 rounded-xl">
-                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+                  <svg className="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
                   </svg>
-                </div>
+                </span>
                 <div className="flex-1">
-                  <h3 className="font-semibold text-blue-900 text-sm mb-1">
+                  <h3 className="font-bold text-gray-900 text-sm mb-1">
                     Payment Account Required
                   </h3>
-                  <p className="text-xs text-blue-700 leading-relaxed">
+                  <p className="text-xs text-gray-500 leading-relaxed">
                     Upload your payment QR code or account screenshot for refund processing
                   </p>
                 </div>
@@ -1312,7 +1545,7 @@ function CancelRequestModal({
 
               <div>
                 {!qrCodeImage ? (
-                  <div className="border-2 border-dashed border-blue-300 rounded-xl p-6 text-center bg-white/80 hover:bg-white hover:border-blue-400 transition-all cursor-pointer group">
+                  <div className="border-2 border-dashed border-rose-200 rounded-2xl p-6 text-center bg-rose-50/40 hover:bg-rose-50 hover:border-rose-300 transition-all cursor-pointer group">
                     <input
                       type="file"
                       accept="image/*"
@@ -1325,9 +1558,9 @@ function CancelRequestModal({
                       htmlFor="cancel-qr-upload"
                       className="cursor-pointer flex flex-col items-center"
                     >
-                      <div className="p-3 bg-blue-100 rounded-full mb-3 group-hover:bg-blue-200 transition-colors">
+                      <div className="p-3 bg-rose-100 rounded-full mb-3 group-hover:bg-rose-200 transition-colors">
                         <svg
-                          className="w-8 h-8 text-blue-600"
+                          className="w-8 h-8 text-rose-500"
                           fill="none"
                           stroke="currentColor"
                           viewBox="0 0 24 24"
@@ -1340,24 +1573,24 @@ function CancelRequestModal({
                           />
                         </svg>
                       </div>
-                      <span className="text-sm text-blue-700 font-semibold mb-1">
+                      <span className="text-sm text-rose-600 font-semibold mb-1">
                         {uploading ? "Uploading..." : "Click to upload screenshot"}
                       </span>
-                      <span className="text-xs text-blue-600">
+                      <span className="text-xs text-gray-400">
                         PNG or JPG • Max 5MB
                       </span>
                     </label>
                   </div>
                 ) : (
-                  <div className="relative border-2 border-blue-200 rounded-xl p-3 bg-white">
+                  <div className="relative border border-rose-100 rounded-2xl p-3 bg-white">
                     <img
                       src={qrCodeImage}
                       alt="Payment QR Code"
-                      className="w-full h-48 object-contain rounded-lg"
+                      className="w-full h-48 object-contain rounded-xl"
                     />
                     <button
                       onClick={() => setQrCodeImage("")}
-                      className="absolute -top-2 -right-2 p-2 bg-red-500 hover:bg-red-600 text-white rounded-full shadow-lg transition-colors"
+                      className="absolute -top-2 -right-2 p-2 bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white rounded-full shadow-lg transition-all"
                       type="button"
                     >
                       <X size={16} />
@@ -1370,25 +1603,27 @@ function CancelRequestModal({
 
           {/* Refund Summary for Paid Orders */}
           {isPaidOrder && (
-            <div className="rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 border-2 border-green-200 p-4">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="p-2 bg-green-500 rounded-lg">
-                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <h3 className="font-semibold text-green-900">Refund Summary</h3>
+            <div className="rounded-2xl border border-rose-100 bg-white shadow-sm overflow-hidden">
+              <div className="flex items-center gap-2 bg-gradient-to-r from-rose-50 to-pink-50 px-4 py-2.5 border-b border-rose-100">
+                <DollarSign size={14} className="text-rose-500" />
+                <h3 className="text-[11px] font-bold uppercase tracking-wide text-rose-600">
+                  Refund Summary
+                </h3>
               </div>
-              <div className="space-y-2 ml-11">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-green-700">Payment Method</span>
-                  <span className="text-sm font-medium text-green-900 capitalize">
+              <div className="space-y-2.5 px-4 py-3.5">
+                <div className="flex justify-between items-center gap-3">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                    Payment Method
+                  </span>
+                  <span className="text-sm font-medium text-gray-800 capitalize">
                     {row.paymentMethod === "cash" ? "💵 Cash" : "📱 Scan"}
                   </span>
                 </div>
-                <div className="flex justify-between items-center pt-2 border-t border-green-200">
-                  <span className="text-sm font-medium text-green-700">Refund Amount</span>
-                  <span className="text-lg font-bold text-green-900">
+                <div className="flex justify-between items-center gap-3 pt-2.5 border-t border-dashed border-rose-200">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                    Refund Amount
+                  </span>
+                  <span className="text-lg font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500">
                     {refundCurrency} {refundAmount.toLocaleString()}
                   </span>
                 </div>
@@ -1397,41 +1632,37 @@ function CancelRequestModal({
           )}
 
           {/* Important Information */}
-          <div className={`rounded-xl border-2 p-4 ${
-            isPaidOrder 
-              ? "border-amber-200 bg-gradient-to-br from-amber-50 to-yellow-50"
-              : "border-blue-200 bg-gradient-to-br from-blue-50 to-indigo-50"
-          }`}>
+          <div className="rounded-2xl border border-rose-100 bg-rose-50/50 p-4">
             <div className="flex items-start gap-3">
-              <div className={`p-2 rounded-lg ${isPaidOrder ? "bg-amber-500" : "bg-blue-500"}`}>
-                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white shadow-sm">
+                <svg className="w-4 h-4 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-              </div>
+              </span>
               <div className="flex-1">
-                <h3 className={`font-semibold text-sm mb-2 ${isPaidOrder ? "text-amber-900" : "text-blue-900"}`}>
+                <h3 className="font-bold text-sm mb-2 text-gray-900">
                   What happens next?
                 </h3>
-                <ul className={`space-y-1.5 text-xs ${isPaidOrder ? "text-amber-800" : "text-blue-800"}`}>
+                <ul className="space-y-1.5 text-xs text-gray-600">
                   <li className="flex items-start gap-2">
-                    <span className="mt-0.5">•</span>
+                    <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-rose-400" />
                     <span>Owner will review your cancellation request</span>
                   </li>
                   {isPaidOrder && (
                     <>
                       <li className="flex items-start gap-2">
-                        <span className="mt-0.5">•</span>
+                        <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-rose-400" />
                         <span>Full refund will be processed upon approval</span>
                       </li>
                       {row.paymentMethod === "cash" && (
                         <li className="flex items-start gap-2">
-                          <span className="mt-0.5">•</span>
+                          <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-rose-400" />
                           <span>Visit store to collect cash refund</span>
                         </li>
                       )}
                       {(row.paymentMethod === "scan") && (
                         <li className="flex items-start gap-2">
-                          <span className="mt-0.5">•</span>
+                          <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-rose-400" />
                           <span>Refund processed to your account within 3-5 days</span>
                         </li>
                       )}
@@ -1439,13 +1670,13 @@ function CancelRequestModal({
                   )}
                   {isCOD && (
                     <li className="flex items-start gap-2">
-                      <span className="mt-0.5">•</span>
+                      <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-rose-400" />
                       <span>No refund needed (payment not collected)</span>
                     </li>
                   )}
                   <li className="flex items-start gap-2">
-                    <span className="mt-0.5">•</span>
-                    <span>You'll receive notification once processed</span>
+                    <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-rose-400" />
+                    <span>You&apos;ll receive notification once processed</span>
                   </li>
                 </ul>
               </div>
@@ -1454,32 +1685,35 @@ function CancelRequestModal({
 
           {/* Cancellation Reason */}
           <div>
-            <label className="block text-sm font-semibold text-gray-900 mb-2">
-              Reason for Cancellation <span className="text-gray-400 font-normal">(Optional)</span>
+            <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
+              Reason for Cancellation{" "}
+              <span className="font-normal normal-case tracking-normal">
+                (Optional)
+              </span>
             </label>
             <textarea
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="Help us improve: Why are you cancelling this order?"
               rows={3}
-              className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent transition-all resize-none"
+              className="w-full px-4 py-3 border border-rose-200 bg-rose-50/40 text-gray-900 placeholder:text-gray-400 rounded-2xl text-sm transition-colors focus:border-rose-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 resize-none"
             />
           </div>
         </div>
 
         {/* Footer Actions */}
-        <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex gap-3 flex-shrink-0">
+        <div className="px-6 py-4 bg-white border-t border-rose-100 flex gap-3 flex-shrink-0">
           <button
             onClick={onClose}
             disabled={submitting}
-            className="flex-1 py-3 px-4 border-2 border-gray-300 text-gray-700 rounded-xl font-semibold hover:bg-gray-100 hover:border-gray-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-1 py-3 px-4 rounded-full border-2 border-rose-200 bg-white text-sm font-semibold text-rose-600 transition-all hover:border-rose-300 hover:bg-rose-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Go Back
           </button>
           <button
             onClick={handleSubmit}
             disabled={submitting || (isScanPayment && !qrCodeImage)}
-            className="flex-1 py-3 px-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white rounded-xl font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-500/30"
+            className="flex-1 py-3 px-4 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white text-sm font-semibold shadow-md transition-all hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-md"
           >
             {submitting ? (
               <span className="flex items-center justify-center gap-2">
@@ -1563,20 +1797,19 @@ function RefundRequestModal({
     setUploading(true);
 
     try {
-      // Convert to base64
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setQrCodeImage(reader.result as string);
-        setUploading(false);
-      };
-      reader.onerror = () => {
-        alert("Failed to read image");
-        setUploading(false);
-      };
-      reader.readAsDataURL(file);
+      // Downscale before encoding. A raw phone photo as base64 exceeds
+      // Firestore's ~1MiB field cap and the write fails with
+      // "Property cancellationRequest contains an invalid nested entity".
+      const compressed = await fileToCompressedDataUrl(file, {
+        maxBytes: MAX_QR_DATA_URL_BYTES,
+      });
+      setQrCodeImage(compressed);
     } catch (error) {
       console.error("Error uploading image:", error);
-      alert("Failed to upload image");
+      alert(
+        error instanceof Error ? error.message : "Failed to upload image",
+      );
+    } finally {
       setUploading(false);
     }
   };
@@ -1610,16 +1843,14 @@ function RefundRequestModal({
           continue;
         }
 
-        // Convert to base64
-        const reader = new FileReader();
-        const base64Promise = new Promise<string>((resolve, reject) => {
-          reader.onloadend = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        
-        const base64 = await base64Promise;
-        newPhotos.push(base64);
+        // Tighter budget than the QR image: up to 5 of these share a single
+        // Firestore document, which is capped at 1MiB in total.
+        newPhotos.push(
+          await fileToCompressedDataUrl(file, {
+            maxBytes: MAX_PHOTO_DATA_URL_BYTES,
+            maxDimension: 1024,
+          }),
+        );
       }
       
       setItemPhotos(prev => [...prev, ...newPhotos]);
@@ -2121,8 +2352,8 @@ function PurchaseRow({
   const hasAnyCompletedRefund = hasCompletedRefunds || hasCompletedCancellationRefund;
 
   return (
-    <tr className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
-      <td className="px-4 py-3 font-medium text-gray-900">
+    <tr className="border-t border-rose-50 hover:bg-rose-50/40 transition-colors">
+      <td className="px-4 py-3 font-semibold text-gray-900">
         {row.onlineOrderId || row.transactionId || row.id}
         {hasPendingCancellation && (
           <span className="ml-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
@@ -2200,7 +2431,7 @@ function PurchaseRow({
         <button
           ref={actionButtonRef}
           onClick={toggleDropdown}
-          className="p-1.5 rounded-md text-gray-500 hover:bg-gray-200 hover:text-gray-900 transition-colors"
+          className="p-1.5 rounded-full text-gray-400 hover:bg-rose-100 hover:text-rose-600 transition-colors"
         >
           <MoreVertical size={20} />
         </button>
@@ -2212,20 +2443,20 @@ function PurchaseRow({
               onClick={() => setDropdownOpen(false)}
             />
             <div
-              className="fixed w-52 bg-white border border-gray-200 shadow-lg rounded-md z-50 overflow-hidden"
+              className="fixed w-52 bg-white border border-rose-100 shadow-xl rounded-2xl z-50 overflow-hidden"
               style={{
                 top: menuPosition?.top ?? 8,
                 left: menuPosition?.left ?? 8,
               }}
             >
               <button
-                className="w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50 flex items-center gap-2 text-gray-700 transition-colors"
+                className="w-full text-left px-4 py-2.5 text-sm font-medium hover:bg-rose-50 flex items-center gap-2 text-gray-700 transition-colors"
                 onClick={() => {
                   setDropdownOpen(false);
                   onViewDetails(row);
                 }}
               >
-                <Eye size={16} /> View Details
+                <Eye size={16} className="text-rose-500" /> View Details
               </button>
               {hasAnyCompletedRefund && (
                 <button
@@ -2317,10 +2548,12 @@ function PurchaseCard({
   const hasAnyCompletedRefund = hasCompletedRefunds || hasCompletedCancellationRefund;
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+    <div className="rounded-2xl border border-rose-100 bg-white p-4 shadow-sm transition-shadow hover:shadow-md">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs text-gray-500">Order ID</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Order ID
+          </p>
           <p className="truncate text-sm font-semibold text-gray-900">
             {row.transactionId || row.id}
           </p>
@@ -2366,31 +2599,41 @@ function PurchaseCard({
         </span>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+      <div className="mt-4 grid grid-cols-2 gap-3 rounded-2xl bg-rose-50/40 p-3 text-sm">
         <div>
-          <p className="text-xs text-gray-500">Order Ref</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Order Ref
+          </p>
           <p className="text-gray-800">{row.onlineOrderId || "-"}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Date</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Date
+          </p>
           <p className="text-gray-800">
             {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
           </p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Amount (THB)</p>
-          <p className="font-medium text-gray-900">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Amount (THB)
+          </p>
+          <p className="font-bold text-rose-600">
             ฿ {Number(row.total || 0).toFixed(2)}
           </p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Amount (MMK)</p>
-          <p className="font-medium text-gray-900">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Amount (MMK)
+          </p>
+          <p className="font-semibold text-gray-900">
             Ks {Number(row.amountMmk || row.sellingTotal || 0).toLocaleString()}
           </p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Payment Method</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Payment Method
+          </p>
           <p className="text-gray-800">
             {row.paymentMethod === "cash" ? "💵 Cash" :
              row.paymentMethod === "scan" ? "📱 QR Scan" :
@@ -2400,7 +2643,9 @@ function PurchaseCard({
           </p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Payment Status</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Payment Status
+          </p>
           <p>
             <span
               className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getPaymentBadgeClass(
@@ -2412,7 +2657,9 @@ function PurchaseCard({
           </p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Order Status</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Order Status
+          </p>
           <p>
             <span
               className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize ${getStatusBadgeClass(
@@ -2425,17 +2672,17 @@ function PurchaseCard({
         </div>
       </div>
 
-      <div className="mt-4 flex gap-2">
+      <div className="mt-4 flex flex-wrap gap-2">
         <button
           onClick={() => onViewDetails(row)}
-          className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          className="flex-1 inline-flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-4 py-2.5 text-xs font-semibold text-white shadow-sm transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-md"
         >
           <Eye size={16} /> View Details
         </button>
         {hasAnyCompletedRefund && (
           <button
             onClick={() => onViewRefundDetails(row)}
-            className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-emerald-300 bg-white px-3 py-2 text-sm font-medium text-emerald-600 hover:bg-emerald-50"
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-full border border-emerald-200 bg-white px-4 py-2.5 text-xs font-semibold text-emerald-600 transition-all hover:border-emerald-300 hover:bg-emerald-50"
           >
             <DollarSign size={16} /> Refund
           </button>
@@ -2443,7 +2690,7 @@ function PurchaseCard({
         {canCancel && (
           <button
             onClick={() => onRequestCancel(row)}
-            className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-full border border-red-200 bg-white px-4 py-2.5 text-xs font-semibold text-red-600 transition-all hover:border-red-300 hover:bg-red-50"
           >
             <XCircle size={16} /> Cancel
           </button>
@@ -2451,7 +2698,7 @@ function PurchaseCard({
         {canRefund && (
           <button
             onClick={() => onRequestRefund(row)}
-            className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-blue-300 bg-white px-3 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50"
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-full border border-blue-200 bg-white px-4 py-2.5 text-xs font-semibold text-blue-600 transition-all hover:border-blue-300 hover:bg-blue-50"
             title={displayStatus === "cancelled" ? "Request refund for cancelled paid order" : "Request return for delivered order"}
           >
             <RotateCcw size={16} /> {displayStatus === "cancelled" ? "Refund" : "Return"}
@@ -3093,47 +3340,103 @@ export default function PurchaseHistoryPage() {
 
   if (loading || pageLoading) {
     return (
-      <div className="mx-auto max-w-5xl px-4 py-12 text-gray-600">
-        Loading purchase history...
+      <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-center px-4 py-20">
+          <div className="flex flex-col items-center gap-3">
+            <span className="h-9 w-9 animate-spin rounded-full border-[3px] border-rose-200 border-t-rose-500" />
+            <p className="text-sm font-medium text-gray-500">
+              Loading purchase history...
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8 md:py-12">
-      <h1 className="text-2xl font-semibold text-gray-900 md:text-3xl">
-        My Purchase History
-      </h1>
-      <p className="mt-2 text-sm text-gray-600">
-        Track your online transactions and order statuses.
-      </p>
+    <div className="min-h-screen bg-gradient-to-b from-rose-50/40 via-white to-white">
+      <div className="mx-auto max-w-6xl px-4 py-8 md:py-12">
+        {/* Header */}
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-pink-500 md:text-3xl">
+              My Purchase History
+            </h1>
+            <p className="mt-2 text-sm text-gray-500">
+              Track your online transactions and order statuses.
+            </p>
+          </div>
+          <Link
+            href="/account/profile"
+            className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-white px-4 py-2 text-xs font-semibold text-rose-600 transition-all hover:border-rose-300 hover:bg-rose-50"
+          >
+            <ChevronLeft size={14} />
+            Back to Profile
+          </Link>
+        </div>
 
-      <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-700 shadow-sm">
-        Total Orders: <span className="font-semibold">{rows.length}</span> |
-        Total Spent:
-        <span className="font-semibold">฿ {totalSpent.toFixed(2)}</span>
-      </div>
+        {/* Summary */}
+        <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="flex items-center gap-3 rounded-2xl border border-rose-100 bg-white p-4 shadow-sm">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+              <svg
+                className="h-5 w-5 text-rose-500"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.7}
+                viewBox="0 0 24 24"
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 2 4 6v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6l-2-4H6Zm-2 4h16M16 10a4 4 0 0 1-8 0"
+                />
+              </svg>
+            </span>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                Total Orders
+              </p>
+              <p className="text-lg font-bold text-gray-900">{rows.length}</p>
+            </div>
+          </div>
 
-      <div className="mt-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex items-center gap-3 rounded-2xl border border-rose-100 bg-white p-4 shadow-sm">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+              <DollarSign size={18} className="text-rose-500" />
+            </span>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                Total Spent
+              </p>
+              <p className="text-lg font-bold text-gray-900">
+                ฿ {totalSpent.toFixed(2)}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 rounded-2xl border border-rose-100 bg-white p-4 shadow-sm">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div className="relative">
             <Search
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-rose-400"
             />
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Search transaction or order ref..."
-              className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 placeholder:text-gray-400 pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full rounded-full border border-rose-200 bg-rose-50/40 text-gray-900 placeholder:text-gray-400 pl-9 pr-4 py-2.5 text-sm transition-colors focus:border-rose-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-200"
             />
           </div>
 
           <div className="relative">
             <Filter
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-rose-400"
             />
             <select
               value={filterStatus}
@@ -3151,7 +3454,7 @@ export default function PurchaseHistoryPage() {
                     | "partially_returned",
                 )
               }
-              className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none"
+              className="w-full rounded-full border border-rose-200 bg-rose-50/40 text-gray-900 pl-9 pr-8 py-2.5 text-sm transition-colors focus:border-rose-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 appearance-none"
             >
               <option value="all">All Order Status</option>
               <option value="pending">Pending</option>
@@ -3168,7 +3471,7 @@ export default function PurchaseHistoryPage() {
           <div className="relative">
             <Filter
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-rose-400"
             />
             <select
               value={filterPaymentStatus}
@@ -3184,7 +3487,7 @@ export default function PurchaseHistoryPage() {
                     | "partially_refunded",
                 )
               }
-              className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none"
+              className="w-full rounded-full border border-rose-200 bg-rose-50/40 text-gray-900 pl-9 pr-8 py-2.5 text-sm transition-colors focus:border-rose-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 appearance-none"
             >
               <option value="all">All Payment Status</option>
               <option value="paid">Paid</option>
@@ -3199,7 +3502,7 @@ export default function PurchaseHistoryPage() {
           <div className="relative">
             <Calendar
               size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-rose-400"
             />
             <select
               value={dateRange}
@@ -3214,7 +3517,7 @@ export default function PurchaseHistoryPage() {
                     | "custom",
                 )
               }
-              className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none"
+              className="w-full rounded-full border border-rose-200 bg-rose-50/40 text-gray-900 pl-9 pr-8 py-2.5 text-sm transition-colors focus:border-rose-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-200 appearance-none"
             >
               <option value="today">Today</option>
               <option value="7d">Last 7 days</option>
@@ -3232,13 +3535,13 @@ export default function PurchaseHistoryPage() {
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full rounded-full border border-rose-200 bg-rose-50/40 text-gray-900 px-4 py-2.5 text-sm transition-colors focus:border-rose-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-200"
             />
             <input
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full rounded-full border border-rose-200 bg-rose-50/40 text-gray-900 px-4 py-2.5 text-sm transition-colors focus:border-rose-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-200"
             />
           </div>
         )}
@@ -3246,8 +3549,29 @@ export default function PurchaseHistoryPage() {
 
       <div className="mt-6 space-y-3 md:hidden">
         {sortedFilteredRows.length === 0 ? (
-          <div className="rounded-lg border border-gray-200 bg-white px-4 py-8 text-center text-sm text-gray-500 shadow-sm">
-            No purchases yet.
+          <div className="rounded-2xl border border-rose-100 bg-white px-4 py-10 text-center shadow-sm">
+            <span className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+              <svg
+                className="h-6 w-6 text-rose-400"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                viewBox="0 0 24 24"
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 2 4 6v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6l-2-4H6Zm-2 4h16M16 10a4 4 0 0 1-8 0"
+                />
+              </svg>
+            </span>
+            <p className="text-sm font-semibold text-gray-900">
+              No purchases yet
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              Your orders will appear here once you check out.
+            </p>
           </div>
         ) : (
           currentRows.map((row) => (
@@ -3267,25 +3591,46 @@ export default function PurchaseHistoryPage() {
         )}
       </div>
 
-      <div className="mt-6 hidden overflow-x-auto overflow-y-visible rounded-lg border border-gray-200 bg-white shadow-sm md:block">
+      <div className="mt-6 hidden overflow-x-auto overflow-y-visible rounded-2xl border border-rose-100 bg-white shadow-sm md:block">
         <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-600">
-            <tr>
-              <th className="px-4 py-3">Order ID</th>
-              <th className="px-4 py-3">Amount (THB / MMK)</th>
-              <th className="px-4 py-3">Payment Method</th>
-              <th className="px-4 py-3">Payment Status</th>
-              <th className="px-4 py-3">Order Status</th>
-              <th className="px-4 py-3">Date</th>
-              <th className="px-4 py-3">Transaction ID</th>
-              <th className="px-4 py-3 text-right">Actions</th>
+          <thead className="bg-gradient-to-r from-rose-50 to-pink-50 text-left">
+            <tr className="text-[11px] font-semibold uppercase tracking-wide text-rose-600">
+              <th className="px-4 py-3.5">Order ID</th>
+              <th className="px-4 py-3.5">Amount (THB / MMK)</th>
+              <th className="px-4 py-3.5">Payment Method</th>
+              <th className="px-4 py-3.5">Payment Status</th>
+              <th className="px-4 py-3.5">Order Status</th>
+              <th className="px-4 py-3.5">Date</th>
+              <th className="px-4 py-3.5">Transaction ID</th>
+              <th className="px-4 py-3.5 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {sortedFilteredRows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
-                  No purchases yet.
+                <td colSpan={8} className="px-4 py-12 text-center">
+                  <span className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
+                    <svg
+                      className="h-6 w-6 text-rose-400"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.6}
+                      viewBox="0 0 24 24"
+                      aria-hidden
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M6 2 4 6v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6l-2-4H6Zm-2 4h16M16 10a4 4 0 0 1-8 0"
+                      />
+                    </svg>
+                  </span>
+                  <p className="text-sm font-semibold text-gray-900">
+                    No purchases yet
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Your orders will appear here once you check out.
+                  </p>
                 </td>
               </tr>
             ) : (
@@ -3308,13 +3653,13 @@ export default function PurchaseHistoryPage() {
         </table>
       </div>
 
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
-          <span>Rows per page:</span>
+      <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-rose-100 bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+          <span className="font-medium">Rows per page:</span>
           <select
             value={rowsPerPage}
             onChange={(e) => setRowsPerPage(Number(e.target.value))}
-            className="rounded-md border border-gray-300 bg-white text-gray-900 px-2 py-1 text-sm"
+            className="rounded-full border border-rose-200 bg-rose-50/40 text-gray-900 px-3 py-1.5 text-xs font-semibold focus:border-rose-400 focus:outline-none focus:ring-2 focus:ring-rose-200"
           >
             <option value={10}>10</option>
             <option value={20}>20</option>
@@ -3328,20 +3673,18 @@ export default function PurchaseHistoryPage() {
         </div>
 
         <div className="flex items-center justify-between gap-3 sm:justify-end">
-          <span className="text-sm text-gray-600">
-            Page {safeCurrentPage} of {totalPages}
+          <span className="text-xs font-medium text-gray-500">
+            Page <span className="text-rose-600">{safeCurrentPage}</span> of{" "}
+            {totalPages}
           </span>
-          <nav
-            className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px"
-            aria-label="Pagination"
-          >
+          <nav className="inline-flex items-center gap-2" aria-label="Pagination">
             <button
               title="Go to previous page"
               onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
               disabled={safeCurrentPage === 1}
-              className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-rose-200 bg-white text-rose-500 transition-all hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white"
             >
-              <ChevronLeft className="h-5 w-5" />
+              <ChevronLeft className="h-4 w-4" />
             </button>
             <button
               title="Go to next page"
@@ -3349,21 +3692,13 @@ export default function PurchaseHistoryPage() {
                 setCurrentPage((prev) => Math.min(totalPages, prev + 1))
               }
               disabled={safeCurrentPage === totalPages}
-              className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-rose-200 bg-white text-rose-500 transition-all hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white"
             >
-              <ChevronRight className="h-5 w-5" />
+              <ChevronRight className="h-4 w-4" />
             </button>
           </nav>
         </div>
       </div>
-
-      <div className="mt-5">
-        <Link
-          href="/account/profile"
-          className="text-sm font-medium text-rose-600 hover:text-rose-700"
-        >
-          Back to Profile
-        </Link>
       </div>
 
       {selectedRow && (

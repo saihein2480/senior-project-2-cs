@@ -22,6 +22,8 @@ export const translations: Record<string, Record<string, string>> = {
     phone2: "09758113774",
     legal: "Legal",
     copyright: "© 2026 Swe Trendy Hub. All rights reserved.",
+    telegram_bot_cta: "Telegram Bot",
+    telegram_bot_aria: "Open our Telegram bot for order updates",
     
     // Product Filters & Sort
     items: "items",
@@ -36,6 +38,10 @@ export const translations: Record<string, Record<string, string>> = {
     sort_name_desc: "Name: Z → A",
     out_of_stock: "OUT OF STOCK",
     new_label: "New",
+    recommended_eyebrow: "Picked For You",
+    recommended_title: "You May Like",
+    recommended_subtitle:
+      "Based on what you have viewed, searched and bought.",
     no_items_found_for: 'No items found for "{q}"',
     try_different_search: "Try a different search term or clear filters.",
     no_items_match_filters: "No items match the current filters.",
@@ -105,6 +111,10 @@ export const translations: Record<string, Record<string, string>> = {
     complete_profile_to_continue: "Complete Profile to Continue",
     scan_qr_to_complete: "Scan this QR code to complete payment",
     open_payment_page: "Open payment page instead",
+    qr_expires_in: "Expires in",
+    qr_expired: "This QR code has expired",
+    qr_expired_hint: "Generate a new QR code to continue your payment.",
+    generate_new_qr: "Generate New QR Code",
     complete_payment: "Complete payment in MyanMyanPay page to change provider status from PENDING to SUCCESS.",
     no_checkout_items: "No checkout items found",
     complete_profile_before_checkout: "Please complete your profile",
@@ -244,6 +254,8 @@ export const translations: Record<string, Record<string, string>> = {
     phone2: "09758113774",
     legal: "တရားဝင်",
     copyright: "© ၂၀၂၆ ဆွေ ထရန်ဒီ ဟပ်။ မူပိုင်ခွင့်များ လုံးဝ ရယူထားသည်။",
+    telegram_bot_cta: "Telegram တွင် စကားပြောမည်",
+    telegram_bot_aria: "အော်ဒါ အသိပေးချက်များအတွက် Telegram bot ဖွင့်မည်",
     
     // Product Filters & Sort
     items: "ပစ္စည်းများ",
@@ -258,6 +270,10 @@ export const translations: Record<string, Record<string, string>> = {
     sort_name_desc: "အမည်: Z → A",
     out_of_stock: "ကုန်ပစ္စည်း မရှိတော့ပါ",
     new_label: "အသစ်",
+    recommended_eyebrow: "သင့်အတွက် ရွေးချယ်ထားသည်",
+    recommended_title: "သင် သဘောကျနိုင်သည်",
+    recommended_subtitle:
+      "သင် ကြည့်ခဲ့သော၊ ရှာခဲ့သော၊ ဝယ်ခဲ့သော ပစ္စည်းများအပေါ် အခြေခံသည်။",
     no_items_found_for: '"{q}" အတွက် ပစ္စည်း မတွေ့ပါ။',
     try_different_search: "မတူညီသော စကားလုံးဖြင့် ထပ်မံ ရှာပါ။",
     no_items_match_filters: "စစ်ထုတ်ချက်များနှင့် ကိုက်ညီသော ပစ္စည်း မရှိပါ။",
@@ -327,6 +343,10 @@ export const translations: Record<string, Record<string, string>> = {
     complete_profile_to_continue: "ဆက်လုပ်ရန် ပရိုဖိုင် ဖြည့်စွက်ပါ",
     scan_qr_to_complete: "ငွေချေမှု ပြီးမြောက်ရန် ဤ QR ကုဒ်ကို စကန်ဖတ်ပါ",
     open_payment_page: "ငွေချေမှု စာမျက်နှာ ဖွင့်မည်",
+    qr_expires_in: "သက်တမ်းကုန်ဆုံးမည်",
+    qr_expired: "ဤ QR ကုဒ် သက်တမ်းကုန်ဆုံးပါပြီ",
+    qr_expired_hint: "ငွေချေမှု ဆက်လက်လုပ်ဆောင်ရန် QR ကုဒ် အသစ် ထုတ်ပါ။",
+    generate_new_qr: "QR ကုဒ် အသစ် ထုတ်မည်",
     complete_payment: "MyanMyanPay စာမျက်နှာတွင် ငွေချေမှု ပြီးမြောက်အောင် လုပ်ပါ။",
     no_checkout_items: "ငွေချေရန် ပစ္စည်း မရှိပါ",
     complete_profile_before_checkout: "သင်၏ ပရိုဖိုင် ဖြည့်စွက်ပါ",

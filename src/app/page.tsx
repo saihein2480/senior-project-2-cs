@@ -1,9 +1,10 @@
 "use client";
 import React, { useEffect, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import ProductsList from "../components/ProductsList";
+import RecommendedProducts from "../components/RecommendedProducts";
+import { productImageProps } from "../lib/productImage";
 import { useNewItems } from "../hooks/useNewItems";
 import { useTopSelling } from "../hooks/useTopSelling";
 
@@ -93,16 +94,18 @@ function HeroSection({ branch }: { branch?: string }) {
             stay visible either way. */}
         {items.length > 0 && (
         <div className="relative h-80 md:h-96">
-          <Image
-            src={
-              items[safeIndex]?.image ||
-              items[safeIndex]?.groupImage ||
-              "/fallback.png"
-            }
+          {/* Plain <img> rather than next/image: these are remote R2 objects
+              that can 404, and only a raw element gives us an onError hook to
+              swap in the local fallback. "/fallback.png" was referenced here
+              but does not exist in public/, so failures showed as broken. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            {...productImageProps({
+              image: items[safeIndex]?.image,
+              groupImage: items[safeIndex]?.groupImage,
+            })}
             alt={items[safeIndex]?.name || "Product"}
-            fill
-            className="object-contain drop-shadow-2xl"
-            priority
+            className="absolute inset-0 h-full w-full object-contain drop-shadow-2xl"
           />
 
           {/* Carousel controls */}
@@ -148,10 +151,12 @@ export default function Home() {
   const searchParams = useSearchParams();
   const branch = searchParams?.get("branch") || "";
 
-  // Fetch top-selling products for the best sellers section
+  // Fetch top-selling products for the best sellers section. The limit caps how
+  // many products that section can show, so it must not be lower than the
+  // section's page size (24).
   const { topSelling, loading: topSellingLoading } = useTopSelling({
     branch: branch || undefined,
-    limit: 20,
+    limit: 24,
     autoLoad: true,
   });
 
@@ -203,7 +208,7 @@ export default function Home() {
           </div>
           <ProductsList
             showOnlyNew={true}
-            itemsPerPageDefault={8}
+            itemsPerPageDefault={24}
             hideFilters={true}
             showLoadMoreButton={true}
             loadMoreLink="/new-arrivals"
@@ -238,7 +243,7 @@ export default function Home() {
           </div>
           <ProductsList
             showOnlyNew={false}
-            itemsPerPageDefault={8}
+            itemsPerPageDefault={24}
             hideFilters={true}
             showLoadMoreButton={true}
             loadMoreLink="/best-sellers"
@@ -249,6 +254,10 @@ export default function Home() {
             topSellingLoading={topSellingLoading}
           />
         </section>
+
+        {/* Personalised suggestions. Renders nothing until the shopper has
+            browsed, searched, or bought something. */}
+        <RecommendedProducts branch={branch} pageSize={24} />
       </div>
     </div>
   );
