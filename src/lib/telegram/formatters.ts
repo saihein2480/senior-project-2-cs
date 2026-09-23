@@ -145,6 +145,29 @@ export function paginateProducts(
   };
 }
 
+/**
+ * How many genuinely different colours a product offers.
+ *
+ * Counted on distinct names rather than `colorVariants.length`, because
+ * `searchProducts` merges same-named products and concatenates their variants —
+ * an unscoped search therefore reports "4 colours" for a product that has two,
+ * listed once per branch.
+ */
+function distinctColours(product: SearchProduct): number {
+  const names = new Set<string>();
+
+  for (const variant of product.colorVariants || []) {
+    const name = (variant.color || "").trim().toLowerCase();
+    if (name) names.add(name);
+  }
+
+  if (names.size > 0) return names.size;
+
+  return new Set(
+    (product.colors || []).map((c) => c.trim().toLowerCase()).filter(Boolean),
+  ).size;
+}
+
 /** Distinct sizes that are actually in stock, e.g. ["S","M","L"]. */
 function inStockSizes(product: SearchProduct): string[] {
   const sizes = new Set<string>();
@@ -194,7 +217,7 @@ export function formatProductPage(
     parts.push(`${num}\\. *${escapeMarkdown(title)}*`);
     parts.push(`   💰 ${escapeMarkdown(formatPrice(product.price))}`);
 
-    const colours = product.colorVariants?.length || product.colors?.length || 0;
+    const colours = distinctColours(product);
     if (colours > 1) {
       parts.push(`   🎨 ${colours} colours`);
     }
@@ -246,7 +269,7 @@ export function formatProductCard(
   parts.push(`🛍️ *${escapeMarkdown(title)}*`);
   parts.push(`💰 ${escapeMarkdown(formatPrice(product.price))}`);
 
-  const colours = product.colorVariants?.length || product.colors?.length || 0;
+  const colours = distinctColours(product);
   if (colours > 1) parts.push(`🎨 ${colours} colours`);
 
   const sizes = inStockSizes(product);

@@ -12,6 +12,7 @@
 export const BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: "start", description: "Start shopping and see main menu" },
   { command: "help", description: "Show help and available commands" },
+  { command: "branch", description: "Choose which branch you're shopping" },
   { command: "products", description: "Browse all products" },
   { command: "newarrivals", description: "See the latest arrivals" },
   { command: "bestsellers", description: "See our best selling products" },

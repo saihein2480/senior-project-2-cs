@@ -9,6 +9,7 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { variantMatchesColor } from "./colorFamily";
+import { productImageCandidates } from "./productImage";
 import { categoryMatches } from "./categorySynonyms";
 
 type SizeQuantity = {
@@ -58,6 +59,11 @@ export type SearchProduct = {
   name: string;
   /** Name exactly as the owner entered it in the POS. Use this in any UI. */
   displayName: string;
+  /**
+   * Every image URL worth trying, best first. Some records point at deleted R2
+   * objects, so `image` alone can be a valid string that 404s.
+   */
+  imageCandidates?: string[];
   price: number;
   description?: string;
   category?: string;
@@ -136,10 +142,20 @@ function mapStockDocToSearchProduct(
   // but showing a customer "w9939" when the catalogue says "W9939" looks broken.
   const rawName = String(data.groupName || data.name || "").trim();
 
+  // Some catalogue records point at R2 objects that no longer exist, so a
+  // non-empty URL can still 404. Carry every candidate in preference order and
+  // let the consumer fail over; `image` stays the first one for existing callers.
+  const imageCandidates = productImageCandidates({
+    groupImage: data.groupImage,
+    image: data.image,
+    colorVariants,
+  });
+
   return {
     id,
     name: rawName.toLowerCase(),
     displayName: rawName,
+    imageCandidates,
     price: typeof data.unitPrice === "number" ? data.unitPrice : data.price || 0,
     description: (data.description || "").toLowerCase(),
     category: (data.category || "").toLowerCase(),

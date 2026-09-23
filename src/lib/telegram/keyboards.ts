@@ -9,28 +9,67 @@ import type { OrderInfo } from "../orderSupport";
 /**
  * Create main menu keyboard
  */
-export function createMainMenuKeyboard(): InlineKeyboard {
-  return {
-    inline_keyboard: [
-      [
-        { text: "🛍️ Browse Products", callback_data: "menu_products" },
-        { text: "🔍 Search", callback_data: "menu_search" },
-      ],
-      [
-        { text: "✨ New Arrivals", callback_data: "browse_new_1" },
-        { text: "🔥 Best Sellers", callback_data: "browse_best_1" },
-      ],
-      [
-        { text: "🛒 My Cart", callback_data: "menu_cart" },
-        { text: "📦 My Orders", callback_data: "menu_orders" },
-      ],
-      [
-        { text: "🎁 Promotions", callback_data: "menu_promotions" },
-        { text: "👤 Profile", callback_data: "menu_profile" },
-      ],
-      [{ text: "❓ Help", callback_data: "menu_help" }],
+/**
+ * Main menu.
+ *
+ * `branchName` adds a row showing which branch the customer is shopping, with a
+ * way to switch. Everything below it is scoped to that branch, so leaving it
+ * unlabelled would make stock differences between branches look like bugs.
+ */
+export function createMainMenuKeyboard(branchName?: string): InlineKeyboard {
+  const rows: InlineKeyboardButton[][] = [
+    [
+      { text: "🛍️ Browse Products", callback_data: "menu_products" },
+      { text: "🔍 Search", callback_data: "menu_search" },
     ],
-  };
+    [
+      { text: "✨ New Arrivals", callback_data: "browse_new_1" },
+      { text: "🔥 Best Sellers", callback_data: "browse_best_1" },
+    ],
+    [
+      { text: "🛒 My Cart", callback_data: "menu_cart" },
+      { text: "📦 My Orders", callback_data: "menu_orders" },
+    ],
+    [
+      { text: "🎁 Promotions", callback_data: "menu_promotions" },
+      { text: "👤 Profile", callback_data: "menu_profile" },
+    ],
+  ];
+
+  if (branchName) {
+    rows.push([
+      {
+        text: `🏪 ${branchName} — change`,
+        callback_data: "menu_branch",
+      },
+    ]);
+  }
+
+  rows.push([{ text: "❓ Help", callback_data: "menu_help" }]);
+
+  return { inline_keyboard: rows };
+}
+
+/**
+ * Branch picker.
+ *
+ * Buttons carry the shop **id**, which is what `stocks.shop` stores, so the
+ * selection survives a branch being renamed. Ids are 20 characters, so
+ * `branch_<id>` sits well inside Telegram's 64-byte callback_data limit — unlike
+ * branch names, which are owner-entered and may be non-Latin.
+ */
+export function createBranchKeyboard(
+  shops: Array<{ id: string; name: string }>,
+  currentId?: string,
+): InlineKeyboard {
+  const rows: InlineKeyboardButton[][] = shops.map((shop) => [
+    {
+      text: `${shop.id === currentId ? "✅" : "🏪"} ${shop.name}`,
+      callback_data: `branch_${shop.id}`,
+    },
+  ]);
+
+  return { inline_keyboard: rows };
 }
 
 /**

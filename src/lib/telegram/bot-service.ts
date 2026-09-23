@@ -9,7 +9,6 @@ import {
   sendPhotoSafe,
   answerCallbackQuery,
   sendChatAction,
-  editMessageText,
 } from "./api-client";
 import {
   formatWelcomeMessage,
@@ -46,7 +45,7 @@ import { getCustomerByTelegramId } from "./customer-service";
 import { linkTelegramToCustomer } from "./auth-service";
 import { getTelegramCart, addToTelegramCart } from "./cart-service";
 import { getProductById } from "../productInfo";
-import type { BotContext } from "./types";
+import type { BotContext, InlineKeyboard } from "./types";
 
 /**
  * Process incoming Telegram update
@@ -128,6 +127,7 @@ async function handleCommand(ctx: BotContext): Promise<void> {
     "/cancel": () => handleCancelOrderCommand(ctx, args),
     "/newarrivals": () => renderBrowsePage(ctx, "new", 1),
     "/bestsellers": () => renderBrowsePage(ctx, "best", 1),
+    "/branch": () => promptForBranch(ctx),
   };
 
   const handler = commandHandlers[command];
@@ -158,12 +158,24 @@ async function handleStartCommand(ctx: BotContext, args = ""): Promise<void> {
     return;
   }
 
-  const welcomeMessage = formatWelcomeMessage(ctx.firstName);
+  const branch = await currentBranch(ctx.chatId);
+
+  // A first-time customer picks a branch before seeing any products: stock and
+  // categories differ per branch, so an unscoped menu would promise items the
+  // branch cannot actually sell.
+  if (!branch) {
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatWelcomeMessage(ctx.firstName),
+    });
+    await promptForBranch(ctx);
+    return;
+  }
 
   await sendMessage({
     chat_id: ctx.chatId,
-    text: welcomeMessage,
-    reply_markup: createMainMenuKeyboard(),
+    text: formatWelcomeMessage(ctx.firstName),
+    reply_markup: createMainMenuKeyboard(branch.name),
   });
 }
 
@@ -288,6 +300,111 @@ async function loadCategories(): Promise<string[]> {
 }
 
 /**
+ * Categories that actually have stock in the given branch.
+ *
+ * The POS category list is shop-wide, but a branch rarely carries all of it —
+ * offering a category that returns nothing there is a dead button. The storefront
+ * derives its category filter from the branch-filtered products the same way.
+ *
+ * Order follows the POS list, so the index a keyboard hands out resolves to the
+ * same category on the way back provided the branch is unchanged (it comes from
+ * the session, so it is).
+ */
+async function loadBranchCategories(branchId: string): Promise<string[]> {
+  const [categories, products] = await Promise.all([
+    loadCategories(),
+    searchProducts({ branch: branchId }),
+  ]);
+
+  const stocked = new Set(
+    products
+      .map((product) => (product.category || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  return categories.filter((category) =>
+    stocked.has(category.trim().toLowerCase()),
+  );
+}
+
+/**
+ * The branch this chat is shopping, or null when they have not chosen one.
+ *
+ * Every product listing is scoped by this. A chat has no URL to carry it, so it
+ * lives in `telegramSessions/{chatId}`; see `session-service`.
+ */
+async function currentBranch(
+  chatId: string,
+): Promise<{ id: string; name: string } | null> {
+  const { resolveSessionBranch } = await import("./session-service");
+  return resolveSessionBranch(chatId);
+}
+
+/**
+ * Ask the customer which branch they are shopping.
+ *
+ * Stock, prices and categories all differ per branch, so this has to be answered
+ * before any product can be shown honestly.
+ */
+async function promptForBranch(ctx: BotContext, reason?: string): Promise<void> {
+  const { getActiveShops } = await import("../shops");
+  const { createBranchKeyboard } = await import("./keyboards");
+
+  const shops = await getActiveShops();
+
+  if (shops.length === 0) {
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("No branches are set up yet. Please try again later."),
+    });
+    return;
+  }
+
+  const session = await currentBranch(ctx.chatId);
+
+  await sendMessage({
+    chat_id: ctx.chatId,
+    text:
+      `🏪 *Choose a branch*\n\n` +
+      (reason ? `${escapeMarkdown(reason)}\n\n` : "") +
+      `Stock differs between our branches, so pick where you'd like to shop:`,
+    reply_markup: createBranchKeyboard(shops, session?.id),
+  });
+}
+
+/** Handle `branch_<shopId>`. */
+async function handleBranchCallback(ctx: BotContext, data: string): Promise<void> {
+  const shopId = data.replace("branch_", "");
+
+  const { getShopById } = await import("../shops");
+  const shop = await getShopById(shopId);
+
+  if (!shop) {
+    await promptForBranch(ctx, "That branch is no longer available.");
+    return;
+  }
+
+  const { setTelegramBranch } = await import("./session-service");
+  const saved = await setTelegramBranch(ctx.chatId, shop.id, shop.name);
+
+  if (!saved) {
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("Could not save your branch. Please try again."),
+    });
+    return;
+  }
+
+  await sendMessage({
+    chat_id: ctx.chatId,
+    text:
+      `✅ *${escapeMarkdown(shop.name)}*\n\n` +
+      `You're now shopping this branch\\. Everything below shows what's in stock here\\.`,
+    reply_markup: createMainMenuKeyboard(shop.name),
+  });
+}
+
+/**
  * Point the price formatter at the owner's configured THB -> MMK rate.
  *
  * Called before building any message that quotes a price. `formatPrice` is
@@ -304,6 +421,35 @@ async function primeCurrency(): Promise<void> {
     // uses, so a failure here shows a slightly stale rate rather than nothing.
     console.error("Could not prime currency rate:", error);
   }
+}
+
+/**
+ * Send a product card, trying each image candidate before giving up on photos.
+ *
+ * A handful of catalogue records point at deleted R2 objects, so the first URL
+ * can be a perfectly valid string that returns 404 — Telegram then refuses the
+ * whole `sendPhoto` and the product would appear without artwork. Walking the
+ * candidates recovers those, and a text card is the last resort so the product is
+ * never dropped entirely.
+ */
+async function sendProductCard(
+  chatId: string,
+  candidates: string[],
+  caption: string,
+  keyboard: InlineKeyboard,
+): Promise<void> {
+  for (const url of candidates) {
+    if (await sendPhotoSafe(chatId, url, caption, { reply_markup: keyboard })) {
+      return;
+    }
+    console.error(`Telegram rejected image ${url}; trying next candidate`);
+  }
+
+  await sendMessage({
+    chat_id: chatId,
+    text: caption,
+    reply_markup: keyboard,
+  });
 }
 
 /** A resolved product listing: what to show, what to call it, where it lives. */
@@ -323,20 +469,29 @@ interface Listing {
  * Returns null when a numeric index no longer matches the category list, which
  * happens when the owner edits categories while a keyboard is still open.
  */
-async function resolveListing(selector: string): Promise<Listing | null> {
+async function resolveListing(
+  selector: string,
+  branch: { id: string; name: string },
+): Promise<Listing | null> {
+  // Every query is branch-scoped. Without it `searchProducts` merges same-named
+  // products across branches and reports their combined stock, which is wrong
+  // for the branch the customer is actually shopping.
+  const branchFilter = { branch: branch.id };
+  const branchQuery = `?branch=${encodeURIComponent(branch.id)}`;
+
   if (selector === "all") {
     return {
-      products: await searchProducts({}),
+      products: await searchProducts(branchFilter),
       heading: "All Products",
-      websitePath: "/view-all",
+      websitePath: `/view-all${branchQuery}`,
     };
   }
 
   if (selector === "new") {
     return {
-      products: await searchProducts({ isNew: true }),
+      products: await searchProducts({ ...branchFilter, isNew: true }),
       heading: "New Arrivals",
-      websitePath: "/new-arrivals",
+      websitePath: `/new-arrivals${branchQuery}`,
     };
   }
 
@@ -344,20 +499,26 @@ async function resolveListing(selector: string): Promise<Listing | null> {
     const { getBestSellerProductIds } = await import("../bestSellers");
     const [ranking, catalogue] = await Promise.all([
       getBestSellerProductIds(),
-      searchProducts({}),
+      searchProducts(branchFilter),
     ]);
 
-    // Order the catalogue by the ranking, dropping products that never sold.
-    // Ranked ids can also point at deleted products, which the lookup skips.
+    // Order this branch's catalogue by the shop-wide ranking. Sales history is
+    // not reliably branch-tagged (`transactions.branchName` is absent on about
+    // half the records), so the ranking stays global and only the products shown
+    // are branch-scoped.
     const byId = new Map(catalogue.map((product) => [product.id, product]));
     const products = ranking
       .map((id) => byId.get(id))
       .filter((product): product is SearchProduct => !!product);
 
-    return { products, heading: "Best Sellers", websitePath: "/best-sellers" };
+    return {
+      products,
+      heading: "Best Sellers",
+      websitePath: `/best-sellers${branchQuery}`,
+    };
   }
 
-  const categories = await loadCategories();
+  const categories = await loadBranchCategories(branch.id);
   const index = Number(selector);
 
   if (!Number.isInteger(index) || index < 0 || index >= categories.length) {
@@ -366,9 +527,9 @@ async function resolveListing(selector: string): Promise<Listing | null> {
 
   const category = categories[index];
   return {
-    products: await searchProducts({ category }),
+    products: await searchProducts({ ...branchFilter, category }),
     heading: category,
-    websitePath: `/view-all?category=${encodeURIComponent(category)}`,
+    websitePath: `/view-all${branchQuery}&category=${encodeURIComponent(category)}`,
   };
 }
 
@@ -378,13 +539,22 @@ async function resolveListing(selector: string): Promise<Listing | null> {
 async function handleProductsCommand(ctx: BotContext): Promise<void> {
   await sendChatAction(ctx.chatId, "typing");
 
-  const categories = await loadCategories();
+  const branch = await currentBranch(ctx.chatId);
+
+  if (!branch) {
+    await promptForBranch(ctx, "First, which branch are you shopping?");
+    return;
+  }
+
+  // Only categories this branch actually stocks, so no button is a dead end.
+  const categories = await loadBranchCategories(branch.id);
 
   if (categories.length === 0) {
-    // No categories configured in the POS yet — still let them browse.
     await sendMessage({
       chat_id: ctx.chatId,
-      text: "🛍️ *Browse Products*\n\nNo categories are set up yet\\.",
+      text:
+        `🛍️ *Browse Products*\n\nNo categories have stock at ` +
+        `${escapeMarkdown(branch.name)} yet\\.`,
       reply_markup: createCategoriesKeyboard([]),
     });
     return;
@@ -392,7 +562,9 @@ async function handleProductsCommand(ctx: BotContext): Promise<void> {
 
   await sendMessage({
     chat_id: ctx.chatId,
-    text: "🛍️ *Browse Products*\n\nSelect a category to view products:",
+    text:
+      `🛍️ *Browse Products*\n🏪 ${escapeMarkdown(branch.name)}\n\n` +
+      `Select a category to view products:`,
     reply_markup: createCategoriesKeyboard(categories),
   });
 }
@@ -803,6 +975,8 @@ async function handleCallbackQuery(query: any): Promise<void> {
       await handleMenuCallback(ctx, callbackData);
     } else if (callbackData.startsWith("category_")) {
       await handleCategoryCallback(ctx, callbackData);
+    } else if (callbackData.startsWith("branch_")) {
+      await handleBranchCallback(ctx, callbackData);
     } else if (callbackData.startsWith("browse_")) {
       await handleBrowseCallback(ctx, callbackData);
     } else if (callbackData.startsWith("product_")) {
@@ -830,6 +1004,7 @@ async function handleMenuCallback(ctx: BotContext, data: string): Promise<void> 
 
   const menuHandlers: Record<string, () => Promise<void>> = {
     main: () => handleStartCommand(ctx),
+    branch: () => promptForBranch(ctx),
     products: () => handleProductsCommand(ctx),
     search: async () => {
       await sendMessage({
@@ -893,16 +1068,25 @@ async function renderBrowsePage(
   await sendChatAction(ctx.chatId, "typing");
 
   try {
+    const branch = await currentBranch(ctx.chatId);
+
+    if (!branch) {
+      await promptForBranch(ctx, "First, which branch are you shopping?");
+      return;
+    }
+
     await primeCurrency();
 
-    const listing = await resolveListing(selector);
+    const listing = await resolveListing(selector, branch);
 
     if (!listing) {
       // The owner changed the category list after this keyboard was sent.
       await sendMessage({
         chat_id: ctx.chatId,
         text: "🛍️ *Browse Products*\n\nOur categories have changed\\. Please pick again:",
-        reply_markup: createCategoriesKeyboard(await loadCategories()),
+        reply_markup: createCategoriesKeyboard(
+          await loadBranchCategories(branch.id),
+        ),
       });
       return;
     }
@@ -910,8 +1094,12 @@ async function renderBrowsePage(
     if (listing.products.length === 0) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: `No products in ${escapeMarkdown(listing.heading)} right now\\.`,
-        reply_markup: createCategoriesKeyboard(await loadCategories()),
+        text:
+          `No products in ${escapeMarkdown(listing.heading)} at ` +
+          `${escapeMarkdown(branch.name)} right now\\.`,
+        reply_markup: createCategoriesKeyboard(
+          await loadBranchCategories(branch.id),
+        ),
       });
       return;
     }
@@ -931,24 +1119,16 @@ async function renderBrowsePage(
       });
       const keyboard = createProductCardKeyboard(product.id, product.stock > 0);
 
-      // Fall back to a text card when a product has no artwork, rather than
-      // skipping it — sendPhoto with an empty URL fails the whole message.
-      if (product.image) {
-        const sent = await sendPhotoSafe(
-          ctx.chatId,
-          product.image,
-          caption,
-          { reply_markup: keyboard },
-        );
-        if (sent) continue;
-        console.error(`Photo failed for product ${product.id}, sending text`);
-      }
-
-      await sendMessage({
-        chat_id: ctx.chatId,
-        text: caption,
-        reply_markup: keyboard,
-      });
+      await sendProductCard(
+        ctx.chatId,
+        product.imageCandidates?.length
+          ? product.imageCandidates
+          : product.image
+            ? [product.image]
+            : [],
+        caption,
+        keyboard,
+      );
     }
 
     // Footer carries the page position and navigation. Sent after the cards so
@@ -958,7 +1138,7 @@ async function renderBrowsePage(
       chat_id: ctx.chatId,
       text: formatProductPage(
         pageData,
-        listing.heading,
+        `${listing.heading} · ${branch.name}`,
         pageData.totalPages > 1
           ? "Use Prev/Next to see more."
           : "Use the buttons on each item to add it to your cart.",
@@ -1036,19 +1216,16 @@ async function showProductDetail(ctx: BotContext, productId: string): Promise<vo
     const caption = formatProductDetail(product);
     const keyboard = createProductKeyboard(productId, product.totalStock > 0);
 
-    if (product.image) {
-      const sent = await sendPhotoSafe(ctx.chatId, product.image, caption, {
-        reply_markup: keyboard,
-      });
-      if (sent) return;
-      console.error(`Detail photo failed for ${productId}, sending text`);
-    }
-
-    await sendMessage({
-      chat_id: ctx.chatId,
-      text: caption,
-      reply_markup: keyboard,
-    });
+    const { productImageCandidates } = await import("../productImage");
+    await sendProductCard(
+      ctx.chatId,
+      productImageCandidates({
+        image: product.image,
+        colorVariants: product.colorVariants,
+      }),
+      caption,
+      keyboard,
+    );
   } catch (error) {
     console.error("View product error:", error);
     await sendMessage({
@@ -1100,16 +1277,16 @@ async function startAddToCart(ctx: BotContext, productId: string): Promise<void>
       return;
     }
 
-    if (stocked.length === 1) {
-      await promptForSize(ctx, productId, stocked[0].index);
-      return;
-    }
-
+    // The colour step is always shown, even for a single-colour product. It is
+    // one extra tap, but it means the customer always sees and confirms which
+    // colour they are buying rather than having one chosen for them silently.
     await sendMessage({
       chat_id: ctx.chatId,
       text:
         `🎨 *${escapeMarkdown(product.name)}*\n\n` +
-        `Which colour would you like?`,
+        (stocked.length === 1
+          ? `One colour is in stock \\- tap to continue:`
+          : `Which colour would you like?`),
       reply_markup: createColourPickKeyboard(
         productId,
         product.colorVariants.map((variant) => ({
