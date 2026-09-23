@@ -5,6 +5,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
@@ -35,6 +36,41 @@ type CartContextType = {
 };
 
 const CART_STORAGE_KEY = "sth_cart_v1";
+
+/**
+ * Locally persisted cart plus when it last changed.
+ *
+ * The timestamp is what lets a signed-in customer's remote cart and this device's
+ * cart be reconciled by recency. Without it, whichever side loaded last silently
+ * won — and because an empty remote cart was treated as "nothing to load", a cart
+ * cleared from Telegram was immediately overwritten by stale local items.
+ */
+type StoredCart = { items: CartItem[]; updatedAt: number };
+
+function readStoredCart(raw: string | null): StoredCart {
+  if (!raw) return { items: [], updatedAt: 0 };
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    // Pre-timestamp format was a bare array. Treat it as infinitely old so the
+    // remote cart wins, which is the safer direction on upgrade.
+    if (Array.isArray(parsed)) {
+      return { items: parsed as CartItem[], updatedAt: 0 };
+    }
+
+    if (parsed && Array.isArray(parsed.items)) {
+      return {
+        items: parsed.items as CartItem[],
+        updatedAt: Number(parsed.updatedAt) || 0,
+      };
+    }
+  } catch {
+    // fall through to an empty cart
+  }
+
+  return { items: [], updatedAt: 0 };
+}
 const CartContext = createContext<CartContextType | null>(null);
 
 export function CartProvider({ children }: { children: React.ReactNode }) {
@@ -42,6 +78,14 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<CartItem[]>([]);
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
   const [hasLoadedRemoteCart, setHasLoadedRemoteCart] = useState(false);
+
+  /**
+   * When this device's cart last changed, in epoch ms.
+   *
+   * A ref rather than state: it is only ever compared during reconciliation, and
+   * making it state would retrigger the effects that maintain it.
+   */
+  const localUpdatedAtRef = useRef(0);
 
   const sanitizeCartItems = (input: unknown): CartItem[] => {
     if (!Array.isArray(input)) return [];
@@ -77,13 +121,9 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(CART_STORAGE_KEY);
-      if (!raw) {
-        setItems([]);
-      } else {
-        const parsed = JSON.parse(raw) as CartItem[];
-        setItems(Array.isArray(parsed) ? parsed : []);
-      }
+      const stored = readStoredCart(localStorage.getItem(CART_STORAGE_KEY));
+      setItems(stored.items);
+      localUpdatedAtRef.current = stored.updatedAt;
     } catch {
       // ignore invalid persisted cart data
       setItems([]);
@@ -107,10 +147,30 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       try {
         const customerDocRef = doc(firestore, "customers", uid);
         const customerDoc = await getDoc(customerDocRef);
-        const remoteItems = sanitizeCartItems(customerDoc.data()?.cartItems);
+        const data = customerDoc.data();
 
-        if (remoteItems.length > 0) {
+        // A cart the Telegram bot emptied is an explicit empty array, not a
+        // missing field — so "has the field" and "has items" are different
+        // questions. Conflating them meant a remote clear was never adopted, and
+        // the sync effect below then wrote the stale local items straight back.
+        const hasRemoteCart = Array.isArray(data?.cartItems);
+        if (!hasRemoteCart) {
+          // Never had a cart on the server: keep whatever this device holds and
+          // let the sync effect upload it.
+          return;
+        }
+
+        const remoteItems = sanitizeCartItems(data?.cartItems);
+        const remoteUpdatedAt =
+          data?.cartUpdatedAt?.toMillis?.() ??
+          (data?.cartUpdatedAt ? new Date(data.cartUpdatedAt).getTime() : 0);
+
+        // Last write wins. That way a clear or an add from Telegram is adopted
+        // here, while a guest cart built on this device just before signing in is
+        // not thrown away.
+        if (remoteUpdatedAt >= localUpdatedAtRef.current) {
           setItems(remoteItems);
+          localUpdatedAtRef.current = remoteUpdatedAt;
         }
       } catch {
         // keep local cart if remote fetch fails
@@ -126,7 +186,11 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!hasLoadedStorage) return;
     try {
-      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items));
+      const payload: StoredCart = {
+        items,
+        updatedAt: localUpdatedAtRef.current,
+      };
+      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // ignore storage write failures
     }
@@ -159,8 +223,19 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     void syncRemoteCart();
   }, [items, user, authLoading, hasLoadedStorage, hasLoadedRemoteCart]);
 
+  /**
+   * Apply a local cart change and stamp it as the newest.
+   *
+   * Every mutation goes through here so the recency comparison on the next load
+   * knows this device is ahead of the server.
+   */
+  const mutate = (next: (prev: CartItem[]) => CartItem[]) => {
+    localUpdatedAtRef.current = Date.now();
+    setItems(next);
+  };
+
   const addItem = (item: CartItem) => {
-    setItems((prev) => {
+    mutate((prev) => {
       const existingIndex = prev.findIndex((x) => x.id === item.id);
       if (existingIndex === -1) {
         const safeQty = Math.max(1, item.quantity || 1);
@@ -181,7 +256,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateQuantity = (id: string, quantity: number) => {
-    setItems((prev) =>
+    mutate((prev) =>
       prev
         .map((item) => {
           if (item.id !== id) return item;
@@ -199,10 +274,10 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   };
 
   const removeItem = (id: string) => {
-    setItems((prev) => prev.filter((x) => x.id !== id));
+    mutate((prev) => prev.filter((x) => x.id !== id));
   };
 
-  const clearCart = () => setItems([]);
+  const clearCart = () => mutate(() => []);
 
   const value = useMemo<CartContextType>(() => {
     const itemCount = items.reduce((total, item) => total + item.quantity, 0);

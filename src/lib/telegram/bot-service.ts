@@ -1508,20 +1508,65 @@ async function handleCartCallback(ctx: BotContext, data: string): Promise<void> 
   const action = data.replace("cart_", "");
 
   if (action === "clear") {
+    // Emptying a cart is destructive and was a single tap away, so confirm first.
+    const items = await readCart(ctx.chatId);
+
+    if (items.length === 0) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: "🛒 Your cart is already empty\\.",
+        reply_markup: createMainMenuKeyboard(
+          (await currentBranch(ctx.chatId))?.name,
+        ),
+      });
+      return;
+    }
+
+    const units = items.reduce((sum, item) => sum + item.quantity, 0);
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text:
+        `🗑️ *Clear cart?*\n\n` +
+        `This removes all ${units} item${units === 1 ? "" : "s"} from your cart\\.`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "✅ Yes, clear it", callback_data: "cart_clearconfirm" },
+            { text: "❌ Keep my cart", callback_data: "menu_cart" },
+          ],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === "clearconfirm") {
     const target = await resolveCart(ctx.chatId);
     const { clearTelegramCart, clearCustomerCart } = await import("./cart-service");
 
-    // Clear whichever cart this chat is actually using.
+    // Clear whichever cart this chat is actually using. For a linked account that
+    // is the storefront cart, so the website empties too.
     const cleared = target.customerId
       ? await clearCustomerCart(target.customerId)
       : await clearTelegramCart(ctx.chatId);
 
+    // Report from a re-read rather than trusting the write, so a partial failure
+    // cannot be announced as success.
+    const remaining = await readCart(ctx.chatId);
+
     await sendMessage({
       chat_id: ctx.chatId,
-      text: cleared
-        ? "🗑️ Your cart is now empty\\."
-        : formatError("Could not clear your cart. Please try again."),
-      reply_markup: createMainMenuKeyboard(),
+      text:
+        cleared && remaining.length === 0
+          ? `🗑️ Your cart is now empty\\.` +
+            (target.customerId
+              ? `\n\n🌐 Your website cart has been cleared too\\.`
+              : "")
+          : formatError("Could not clear your cart. Please try again."),
+      reply_markup: createMainMenuKeyboard(
+        (await currentBranch(ctx.chatId))?.name,
+      ),
     });
     return;
   }
