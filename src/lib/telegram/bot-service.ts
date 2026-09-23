@@ -43,7 +43,11 @@ import { searchProducts, type SearchProduct } from "../productSearch";
 import { findOrderByRef } from "../orderSupport";
 import { getCustomerByTelegramId } from "./customer-service";
 import { linkTelegramToCustomer } from "./auth-service";
-import { getTelegramCart, addToTelegramCart } from "./cart-service";
+import {
+  getTelegramCart,
+  addToTelegramCart,
+  addToCustomerCart,
+} from "./cart-service";
 import { getProductById } from "../productInfo";
 import type { BotContext, InlineKeyboard } from "./types";
 
@@ -424,6 +428,34 @@ async function primeCurrency(): Promise<void> {
 }
 
 /**
+ * Which cart this chat writes to.
+ *
+ * A linked customer's items go straight into `customers/{uid}.cartItems` — the
+ * storefront's own cart — so the website shows them immediately. Only an unlinked
+ * chat uses `telegramCarts/{chatId}`, which is then merged into the customer
+ * document when they link.
+ */
+async function resolveCart(
+  chatId: string,
+): Promise<{ customerId?: string }> {
+  const customer = await getCustomerByTelegramId(chatId);
+  return customer ? { customerId: customer.id } : {};
+}
+
+/** Read whichever cart applies to this chat. */
+async function readCart(chatId: string) {
+  const target = await resolveCart(chatId);
+
+  if (target.customerId) {
+    const { getCustomerCart } = await import("./cart-service");
+    return getCustomerCart(target.customerId);
+  }
+
+  const cart = await getTelegramCart(chatId);
+  return cart?.items || [];
+}
+
+/**
  * Send a product card, trying each image candidate before giving up on photos.
  *
  * A handful of catalogue records point at deleted R2 objects, so the first URL
@@ -639,30 +671,32 @@ async function handleCartCommand(ctx: BotContext): Promise<void> {
   await sendChatAction(ctx.chatId, "typing");
 
   try {
-    const cart = await getTelegramCart(ctx.chatId);
+    await primeCurrency();
 
-    if (!cart || cart.items.length === 0) {
+    // Reads the storefront cart for a linked account, so what the customer sees
+    // here is the same cart the website will check out.
+    const items = await readCart(ctx.chatId);
+    const branch = await currentBranch(ctx.chatId);
+
+    if (items.length === 0) {
       await sendMessage({
         chat_id: ctx.chatId,
         text: "🛒 Your cart is empty\\.\n\nStart shopping with /products or /search",
-        reply_markup: createMainMenuKeyboard(),
+        reply_markup: createMainMenuKeyboard(branch?.name),
       });
       return;
     }
 
     const { formatCart } = await import("./formatters");
-    const { createCartKeyboard } = await import("./keyboards");
 
-    const subtotal = cart.items.reduce(
+    const subtotal = items.reduce(
       (sum, item) => sum + item.price * item.quantity,
-      0
+      0,
     );
-
-    const cartText = formatCart(cart.items, subtotal);
 
     await sendMessage({
       chat_id: ctx.chatId,
-      text: cartText,
+      text: formatCart(items, subtotal),
       reply_markup: createCartKeyboard(true),
     });
   } catch (error) {
@@ -1407,17 +1441,27 @@ async function handleAddToCartCallback(
       return;
     }
 
-    const added = await addToTelegramCart(ctx.chatId, {
+    // Optional fields are left off entirely rather than set to `undefined`: a
+    // garment with no colour name used to send `color: undefined`, which the
+    // Admin SDK refuses, failing the whole write.
+    const line = {
       productId,
       name: product.name,
-      image: variant.image || product.image,
-      variantId: variant.id || undefined,
-      color: variant.color || undefined,
+      ...(variant.image || product.image
+        ? { image: variant.image || product.image }
+        : {}),
+      ...(variant.id ? { variantId: variant.id } : {}),
+      ...(variant.color ? { color: variant.color } : {}),
       size: sizeEntry.size,
       price: product.price,
       quantity: 1,
       maxQuantity: sizeEntry.quantity,
-    });
+    };
+
+    const target = await resolveCart(ctx.chatId);
+    const added = target.customerId
+      ? await addToCustomerCart(target.customerId, line)
+      : await addToTelegramCart(ctx.chatId, line);
 
     if (!added) {
       await sendMessage({
@@ -1427,9 +1471,9 @@ async function handleAddToCartCallback(
       return;
     }
 
-    const cart = await getTelegramCart(ctx.chatId);
-    const units = (cart?.items || []).reduce((sum, item) => sum + item.quantity, 0);
-    const subtotal = (cart?.items || []).reduce(
+    const items = await readCart(ctx.chatId);
+    const units = items.reduce((sum, item) => sum + item.quantity, 0);
+    const subtotal = items.reduce(
       (sum, item) => sum + item.price * item.quantity,
       0,
     );
@@ -1442,7 +1486,10 @@ async function handleAddToCartCallback(
         `✅ *Added to cart*\n\n` +
         `${escapeMarkdown(product.name)}${detail ? ` \\(${escapeMarkdown(detail)}\\)` : ""}\n` +
         `💰 ${escapeMarkdown(formatPrice(product.price))}\n\n` +
-        `🛒 Cart: ${units} item${units === 1 ? "" : "s"} \\- ${escapeMarkdown(formatPrice(subtotal))}`,
+        `🛒 Cart: ${units} item${units === 1 ? "" : "s"} \\- ${escapeMarkdown(formatPrice(subtotal))}\n` +
+        (target.customerId
+          ? `🌐 Saved to your website cart\\.`
+          : `Link your account with /link to use this cart on our website\\.`),
       reply_markup: createCartKeyboard(true),
     });
   } catch (error) {
@@ -1461,8 +1508,13 @@ async function handleCartCallback(ctx: BotContext, data: string): Promise<void> 
   const action = data.replace("cart_", "");
 
   if (action === "clear") {
-    const { clearTelegramCart } = await import("./cart-service");
-    const cleared = await clearTelegramCart(ctx.chatId);
+    const target = await resolveCart(ctx.chatId);
+    const { clearTelegramCart, clearCustomerCart } = await import("./cart-service");
+
+    // Clear whichever cart this chat is actually using.
+    const cleared = target.customerId
+      ? await clearCustomerCart(target.customerId)
+      : await clearTelegramCart(ctx.chatId);
 
     await sendMessage({
       chat_id: ctx.chatId,
