@@ -78,6 +78,7 @@ async function handleMessage(message: any): Promise<void> {
   const text = message.text;
   const userId = message.from.id;
   const firstName = message.from.first_name;
+  const lastName = message.from.last_name;
   const username = message.from.username;
 
   console.log(`📩 Message from ${username || userId}: ${text}`);
@@ -87,6 +88,7 @@ async function handleMessage(message: any): Promise<void> {
     userId,
     username,
     firstName,
+    lastName,
     text,
     messageId: message.message_id,
   };
@@ -237,6 +239,7 @@ async function completeWebLink(ctx: BotContext, token: string): Promise<void> {
       chatId: ctx.chatId,
       username: ctx.username,
       firstName: ctx.firstName,
+      lastName: ctx.lastName,
     });
 
     if (!linked) {
@@ -791,9 +794,20 @@ async function handleTrackCommand(ctx: BotContext, orderRef: string): Promise<vo
 
 /**
  * Handle /profile command
+ *
+ * Shows the details that matter for a delivery — name, email, phone, address —
+ * plus the Telegram account this chat belongs to, by name. The numeric chat id
+ * used to be printed here; it means nothing to a customer and is not something
+ * we want sitting in a chat log, so it is gone.
+ *
+ * HTML rather than MarkdownV2: addresses and emails are full of characters
+ * MarkdownV2 would reject, and a rejected message is silently never delivered.
  */
 async function handleProfileCommand(ctx: BotContext): Promise<void> {
   await sendChatAction(ctx.chatId, "typing");
+
+  const escape = (value: string) =>
+    value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   try {
     const customer = await getCustomerByTelegramId(ctx.chatId);
@@ -801,23 +815,58 @@ async function handleProfileCommand(ctx: BotContext): Promise<void> {
     if (!customer) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: "👤 *Your Profile*\n\nYou haven't linked your account yet\\.\n\nUse /link to connect your Telegram with your web account\\.",
+        text:
+          "👤 <b>Your Profile</b>\n\nYou haven't linked your account yet.\n\n" +
+          "Use /link to connect your Telegram with your web account.",
+        parse_mode: "HTML",
         reply_markup: createBackButton(),
       });
       return;
     }
 
-    const profileText = `👤 *Your Profile*\n\n` +
-      `📧 Email: ${escapeMarkdown(customer.email)}\n` +
-      `👤 Name: ${escapeMarkdown(customer.displayName || "Not set")}\n` +
-      `📱 Phone: ${escapeMarkdown(customer.phone || "Not set")}\n` +
-      `🆔 Telegram: @${escapeMarkdown(ctx.username || "unknown")}\n\n` +
+    // Prefer what was stored when the account was linked, but fall back to the
+    // live sender of this update: a customer who linked from the website has a
+    // chat id on file and nothing else.
+    const telegramName =
+      [customer.telegramFirstName, customer.telegramLastName]
+        .filter(Boolean)
+        .join(" ") ||
+      [ctx.firstName, ctx.lastName].filter(Boolean).join(" ") ||
+      (ctx.username ? `@${ctx.username}` : "") ||
+      "Not set";
+
+    const notSet = "<i>Not set</i>";
+    const profileText =
+      `👤 <b>Your Profile</b>\n\n` +
+      `👤 Name: ${customer.displayName ? escape(customer.displayName) : notSet}\n` +
+      `📧 Email: ${customer.email ? escape(customer.email) : notSet}\n` +
+      `📱 Phone: ${customer.phone?.trim() ? escape(customer.phone) : notSet}\n` +
+      `🏠 Address: ${customer.address?.trim() ? escape(customer.address) : notSet}\n` +
+      `✈️ Telegram Name: ${escape(telegramName)}\n\n` +
       `✅ Account linked successfully`;
+
+    // Phone and address can only be edited on the website, so offer the way
+    // there. Telegram rejects a button pointing at localhost, so on a local
+    // build the link goes in the message body instead.
+    const profileUrl = `${storefrontBaseUrl()}/account/profile`;
+    const { isTelegramLinkableUrl } = await import("./keyboards");
+    const linkable = isTelegramLinkableUrl(profileUrl);
 
     await sendMessage({
       chat_id: ctx.chatId,
-      text: profileText,
-      reply_markup: createBackButton(),
+      text: linkable
+        ? profileText
+        : `${profileText}\n\nEdit your details: ${escape(profileUrl)}`,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: linkable
+        ? {
+            inline_keyboard: [
+              [{ text: "✏️ Edit on website", url: profileUrl }],
+              [{ text: "🏠 Main Menu", callback_data: "menu_main" }],
+            ],
+          }
+        : createBackButton(),
     });
   } catch (error) {
     console.error("Profile error:", error);
@@ -1000,6 +1049,7 @@ async function handleCallbackQuery(query: any): Promise<void> {
     userId,
     username: query.from.username,
     firstName: query.from.first_name,
+    lastName: query.from.last_name,
     messageId,
     callbackData,
   };

@@ -149,6 +149,8 @@ export type BotContext = {
   userId: number;
   username?: string;
   firstName?: string;
+  /** Telegram surname, when the account has one. Optional on Telegram's side. */
+  lastName?: string;
   messageId?: number;
   text?: string;
   callbackData?: string;

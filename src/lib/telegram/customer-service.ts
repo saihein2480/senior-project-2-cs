@@ -11,7 +11,7 @@ import type { CustomerTelegramData } from "./types";
  */
 export async function getCustomerByTelegramId(
   telegramChatId: string
-): Promise<(CustomerTelegramData & { id: string; email: string; displayName?: string; phone?: string }) | null> {
+): Promise<(CustomerTelegramData & { id: string; email: string; displayName?: string; phone?: string; address?: string }) | null> {
   if (!adminDb) {
     console.error("Firebase Admin not configured");
     return null;
@@ -36,6 +36,7 @@ export async function getCustomerByTelegramId(
       email: data.email || "",
       displayName: data.displayName,
       phone: data.phone,
+      address: data.address,
       telegramChatId: data.telegramChatId,
       telegramUsername: data.telegramUsername,
       telegramFirstName: data.telegramFirstName,
@@ -59,7 +60,7 @@ export async function getCustomerByTelegramId(
  */
 export async function getCustomerById(
   customerId: string
-): Promise<(CustomerTelegramData & { email: string; displayName?: string; phone?: string }) | null> {
+): Promise<(CustomerTelegramData & { email: string; displayName?: string; phone?: string; address?: string }) | null> {
   if (!adminDb) {
     console.error("Firebase Admin not configured");
     return null;
@@ -79,6 +80,7 @@ export async function getCustomerById(
       email: data.email || "",
       displayName: data.displayName,
       phone: data.phone,
+      address: data.address,
       telegramChatId: data.telegramChatId,
       telegramUsername: data.telegramUsername,
       telegramFirstName: data.telegramFirstName,

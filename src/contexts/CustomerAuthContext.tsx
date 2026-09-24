@@ -83,6 +83,21 @@ export type SendVerificationResult = {
 
 const CustomerAuthContext = createContext<CustomerAuthContextType | null>(null);
 
+/**
+ * Make sure the signed-in user has a `users` and a `customers` document.
+ *
+ * Runs on every Google sign-in and on registration, so it must be safe to call
+ * repeatedly. Two rules keep it that way:
+ *
+ * 1. Only fields the caller actually knows are written. A Google sign-in knows
+ *    nothing about phone or address, and `{ merge: true }` still overwrites any
+ *    field present in the payload — so sending `phone: ""` erased the number the
+ *    customer had saved on their profile page, forcing them to type it in again
+ *    after every login.
+ * 2. Defaults and running totals are only written when the document does not
+ *    exist. Re-sending `totalSpent: 0` on a repeat sign-in reset the customer's
+ *    purchase history, and re-sending `createdAt` lost their join date.
+ */
 async function upsertCustomerDocuments(
   user: FirebaseUser,
   profile?: Partial<CustomerProfile>,
@@ -92,22 +107,42 @@ async function upsertCustomerDocuments(
   const userDocRef = doc(db, "users", user.uid);
   const customerDocRef = doc(db, "customers", user.uid);
 
-  const baseProfile = {
+  const [userSnap, customerSnap] = await Promise.all([
+    getDoc(userDocRef),
+    getDoc(customerDocRef),
+  ]);
+
+  // Blank strings count as "unknown", not as "clear this field". Clearing is
+  // done deliberately through updateCustomerProfile instead.
+  const known: Partial<CustomerProfile> = {};
+  const name = profile?.displayName?.trim() || user.displayName?.trim();
+  if (name) known.displayName = name;
+  if (profile?.phone?.trim()) known.phone = profile.phone.trim();
+  if (profile?.address?.trim()) known.address = profile.address.trim();
+  if (profile?.customerType) known.customerType = profile.customerType;
+
+  const identity = {
     uid: user.uid,
     email: user.email || "",
-    displayName: profile?.displayName || user.displayName || "Customer",
-    phone: profile?.phone || "",
-    address: profile?.address || "",
-    customerType: profile?.customerType || "individual",
     updatedAt: serverTimestamp(),
+  };
+
+  const firstTimeDefaults = {
+    displayName: "Customer",
+    phone: "",
+    address: "",
+    customerType: "individual" as const,
   };
 
   await setDoc(
     userDocRef,
     {
-      ...baseProfile,
+      ...(userSnap.exists()
+        ? {}
+        : { ...firstTimeDefaults, createdAt: serverTimestamp() }),
+      ...identity,
+      ...known,
       role: "customer",
-      createdAt: serverTimestamp(),
     },
     { merge: true },
   );
@@ -115,13 +150,21 @@ async function upsertCustomerDocuments(
   await setDoc(
     customerDocRef,
     {
-      ...baseProfile,
-      totalPurchases: 0,
-      totalSpent: 0,
-      receivables: 0,
-      customerSource: "online", // Mark as online customer
-      isOnline: true, // Flag for online customers
-      createdAt: serverTimestamp(),
+      ...(customerSnap.exists()
+        ? {}
+        : {
+            ...firstTimeDefaults,
+            totalPurchases: 0,
+            totalSpent: 0,
+            receivables: 0,
+            customerSource: "online", // Mark as online customer
+            createdAt: serverTimestamp(),
+          }),
+      ...identity,
+      ...known,
+      // Safe to re-assert: it only ever goes from unset to true, and the POS
+      // customer list uses it to spot shoppers who have a web account.
+      isOnline: true,
     },
     { merge: true },
   );

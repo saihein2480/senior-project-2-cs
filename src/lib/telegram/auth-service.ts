@@ -330,14 +330,21 @@ export async function linkTelegramToCustomer(
     // only holder even if the previous link was never cleaned up.
     await releaseChatIdFromOtherCustomers(telegramData.chatId, customerId);
 
+    // The two link directions know different things. A /start deep link carries
+    // the Telegram profile; the storefront route only knows the chat id. Writing
+    // nulls for what the caller does not know would erase a name we already had,
+    // so each field is only touched when there is a value for it.
+    const identity: Record<string, unknown> = {};
+    if (telegramData.username) identity.telegramUsername = telegramData.username;
+    if (telegramData.firstName) identity.telegramFirstName = telegramData.firstName;
+    if (telegramData.lastName) identity.telegramLastName = telegramData.lastName;
+
     await adminDb
       .collection("customers")
       .doc(customerId)
       .update({
         telegramChatId: telegramData.chatId,
-        telegramUsername: telegramData.username || null,
-        telegramFirstName: telegramData.firstName || null,
-        telegramLastName: telegramData.lastName || null,
+        ...identity,
         telegramLinkedAt: now,
         notificationPreferences: {
           telegram: true,

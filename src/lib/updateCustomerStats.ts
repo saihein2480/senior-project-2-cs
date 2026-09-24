@@ -93,33 +93,43 @@ export async function syncOnlineCustomerToPos(customerUid: string) {
       return;
     }
 
-    const baseCustomerData = {
-      uid: customerUid,
-      email: userData.email || "",
-      displayName: userData.displayName || "Customer",
-      phone: userData.phone || "",
-      address: userData.address || "",
-      customerType: userData.customerType || "individual",
-      customerSource: "online",
-      isOnline: true,
-      updatedAt: FieldValue.serverTimestamp(),
-    };
-
     if (!customerDoc.exists) {
       // Create new customer document
       await customerRef.set({
-        ...baseCustomerData,
+        uid: customerUid,
+        email: userData.email || "",
+        displayName: userData.displayName || "Customer",
+        phone: userData.phone || "",
+        address: userData.address || "",
+        customerType: userData.customerType || "individual",
+        customerSource: "online",
+        isOnline: true,
         totalPurchases: 0,
         totalSpent: 0,
         receivables: 0,
         createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
       console.log(`✅ Synced online customer to POS: ${customerUid}`);
-    } else {
-      // Update existing customer document (preserving purchase stats)
-      await customerRef.update(baseCustomerData);
-      console.log(`✅ Updated online customer info in POS: ${customerUid}`);
+      return;
     }
+
+    // Update the existing document, but only with details we actually have.
+    // The `users` copy can lag behind or be blank, and an empty value here would
+    // wipe contact details the customer or a staff member had already entered.
+    const updates: Record<string, unknown> = {
+      uid: customerUid,
+      isOnline: true,
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    if (userData.email) updates.email = userData.email;
+    if (userData.displayName) updates.displayName = userData.displayName;
+    if (userData.phone) updates.phone = userData.phone;
+    if (userData.address) updates.address = userData.address;
+    if (userData.customerType) updates.customerType = userData.customerType;
+
+    await customerRef.update(updates);
+    console.log(`✅ Updated online customer info in POS: ${customerUid}`);
   } catch (error) {
     console.error("Error syncing online customer to POS:", error);
   }
