@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { adminDb } from "../../../../lib/firebase-admin";
 import { deductStockForPaidOnlineOrder } from "../../../../lib/onlineStockService";
+import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid";
 
 type CompleteTestRequest = {
   orderId?: string;
@@ -298,6 +299,15 @@ export async function POST(req: Request) {
     }
 
     await createTransactionFromOnlineOrder(payload);
+
+    // Same announcement the live callback makes: the owner's POS bell entry plus
+    // the customer's email, Telegram and storefront notification. Without this
+    // the sandbox flow silently skipped both.
+    await announcePaidOnlineOrder(adminDb, {
+      orderId,
+      fallbackAmount: payload.amount,
+      fallbackPaymentMethod: payload.method || "MMPAY",
+    });
 
     return NextResponse.json({
       message: "Test payment marked as SUCCESS",

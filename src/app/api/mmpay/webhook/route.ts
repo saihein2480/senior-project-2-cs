@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { MMPaySDK } from "mmpay-node-sdk";
 import { adminDb } from "../../../../lib/firebase-admin";
 import { deductStockForPaidOnlineOrder } from "../../../../lib/onlineStockService";
-import { updateCustomerStats, syncOnlineCustomerToPos } from "../../../../lib/updateCustomerStats";
+import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid";
 import {
   orderStatusFor,
   shouldApplyCallback,
@@ -371,82 +371,6 @@ export async function POST(req: Request) {
     if (payload.status === "SUCCESS") {
       try {
         await deductStockForPaidOnlineOrder(adminDb, payload.orderId);
-        
-        // Update customer statistics and sync to POS
-        const orderDoc = await adminDb.collection("onlineOrders").doc(payload.orderId).get();
-        if (orderDoc.exists) {
-          const orderData = orderDoc.data();
-          const customerUid = orderData?.customer?.uid;
-          const orderTotal = Number(orderData?.total || payload.amount || 0);
-          
-          if (customerUid) {
-            // Sync customer to POS customers collection if not already there
-            await syncOnlineCustomerToPos(customerUid);
-            
-            // Update purchase statistics
-            await updateCustomerStats(customerUid, orderTotal, 1);
-          }
-        }
-
-        // Create an owner-facing notification so it shows up in the POS
-        // notification bell/page and routes to the online orders page.
-        try {
-          const customerName =
-            orderDoc.exists ? orderDoc.data()?.customer?.displayName || orderDoc.data()?.customer?.email : undefined;
-          await adminDb.collection("notifications").add({
-            type: "online_order",
-            title: "New Online Order",
-            message: `Order #${payload.orderId} has been paid by ${customerName || "a customer"}`,
-            link: "/owner/sales/online-orders",
-            metadata: {
-              orderId: payload.orderId,
-            },
-            read: false,
-            createdAt: new Date().toISOString(),
-          });
-        } catch (notifError) {
-          console.error("Error creating owner notification for new online order:", notifError);
-          // Don't fail the webhook if the notification fails to be created
-        }
-
-        // Tell the customer their payment landed, by email and Telegram.
-        // Best-effort: MyanMyanPay must still get its 200 either way, otherwise
-        // it retries a callback we have already processed.
-        try {
-          const orderData = orderDoc.exists ? orderDoc.data() : undefined;
-          const customerUid = orderData?.customer?.uid;
-
-          if (customerUid) {
-            const { notifyCustomer } = await import("@/lib/notifications/dispatch");
-            await notifyCustomer({
-              customerId: customerUid,
-              fallbackEmail: orderData?.customer?.email,
-              fallbackDisplayName: orderData?.customer?.displayName,
-              event: {
-                type: "payment_received",
-                order: {
-                  orderRef: payload.orderId,
-                  totalAmount: Number(orderData?.total || payload.amount || 0),
-                  paymentMethod: orderData?.paymentMethod || "MMPAY",
-                  paymentStatus: "paid",
-                  items: Array.isArray(orderData?.items)
-                    ? orderData.items.map(
-                        (item: { name?: string; quantity?: number }) => ({
-                          name: item.name || "Item",
-                          quantity: Number(item.quantity || 1),
-                        }),
-                      )
-                    : undefined,
-                },
-              },
-            });
-          }
-        } catch (notifyError) {
-          console.error(
-            "Error sending payment confirmation to customer:",
-            notifyError,
-          );
-        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to sync inventory";
@@ -466,6 +390,16 @@ export async function POST(req: Request) {
     }
 
     await createTransactionFromOnlineOrder(payload);
+
+    // Announce only once the sale is fully recorded, and only for a payment that
+    // actually succeeded. Shared with the sandbox route so both behave alike.
+    if (payload.status === "SUCCESS") {
+      await announcePaidOnlineOrder(adminDb, {
+        orderId: payload.orderId,
+        fallbackAmount: payload.amount,
+        fallbackPaymentMethod: payload.method || "MMPAY",
+      });
+    }
 
     return NextResponse.json({ message: "Callback processed" });
   } catch (error) {

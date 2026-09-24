@@ -10,8 +10,12 @@ import { useCurrencyRate } from "../../../hooks/useSettings";
 import { useCart } from "../../../contexts/CartContext";
 import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
 import { useOnlinePromotions } from "../../../hooks/useOnlinePromotions";
-import { applyBestPromotionToLine } from "../../../lib/onlinePromotion";
+import {
+  applyBestPromotionToLine,
+  getDiscountPercent,
+} from "../../../lib/onlinePromotion";
 import { useCurrency, formatPrice } from "../../../hooks/useCurrency";
+import SaleBadge from "../../../components/SaleBadge";
 
 type SizeQuantity = { size?: string; quantity?: number | string };
 type ColorVariant = {
@@ -353,10 +357,9 @@ export default function ProductDetailPage() {
   const canPurchase = Boolean(
     selectedVariantId && selectedSize && selectedQty > 0,
   );
-  const discountPercent =
-    singleItemPromo.promotion && displayPrice && displayFinalPrice !== null
-      ? Math.round(((displayPrice - displayFinalPrice) / displayPrice) * 100)
-      : 0;
+  // Shared with the grid cards so the badge reads the same everywhere, and so a
+  // capped or fixed-amount promotion reports the percentage actually given.
+  const discountPercent = getDiscountPercent(singleItemPromo);
   const categoryLabel = product.category || product.description || "";
 
   return (
@@ -412,19 +415,20 @@ export default function ProductDetailPage() {
             <div className="w-full flex flex-col">
               {/* Main image */}
               <div className="relative overflow-hidden ">
-                {/* Badges */}
-                {/* <div className="absolute left-3 top-3 z-20 flex flex-col gap-2">
-                  {product.isNew && !isOutOfStock && (
-                    <span className="rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-white shadow-md">
-                      New
-                    </span>
-                  )}
-                  {discountPercent > 0 && (
-                    <span className="rounded-full bg-gray-900 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-white shadow-md">
-                      -{discountPercent}%
-                    </span>
-                  )}
-                </div> */}
+                {/* "New" sits top-left, the sale flag top-right, matching how
+                    the product cards on the grid are laid out. */}
+                {product.isNew && !isOutOfStock && (
+                  <span className="absolute left-3 top-3 z-10 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-white shadow-md">
+                    New
+                  </span>
+                )}
+                {!isOutOfStock && (
+                  <SaleBadge
+                    percent={discountPercent}
+                    promotionName={singleItemPromo.promotion?.name}
+                    className="top-3 right-3 px-3 py-1 text-[11px]"
+                  />
+                )}
 
                 {isOutOfStock && (
                   <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/70 backdrop-blur-[1px]">

@@ -8,9 +8,13 @@ import { useProducts, type Product } from "../hooks/useProducts";
 import { useCurrencyRate } from "../hooks/useSettings";
 import { useShops } from "../hooks/useShops";
 import { useOnlinePromotions } from "../hooks/useOnlinePromotions";
-import { applyBestPromotionToLine } from "../lib/onlinePromotion";
+import {
+  applyBestPromotionToLine,
+  getDiscountPercent,
+} from "../lib/onlinePromotion";
 import { useCurrency, formatPrice } from "../hooks/useCurrency";
 import { productImageProps } from "../lib/productImage";
+import SaleBadge from "./SaleBadge";
 
 type SizeQuantity = {
   size?: string;
@@ -854,6 +858,23 @@ export default function ProductsList({
           const isOutOfStock = displayStock === 0;
           const soldCount = Number(topSellingQuantities[p.id] || 0);
 
+          /**
+           * Resolved once per card so the sale badge on the image and the price
+           * below it can never disagree.
+           *
+           * No variant is passed: a card shows one price for the whole group, so
+           * only group-scope promotions apply here. Variant-scope offers surface
+           * on the product page once a colour is chosen.
+           */
+          const basePrice = Number(p.price || 0);
+          const promo = applyBestPromotionToLine({
+            unitPriceTHB: basePrice,
+            quantity: 1,
+            productId: p.id,
+            promotions: onlinePromotions,
+          });
+          const discountPercent = getDiscountPercent(promo);
+
           const variant = hasVariants
             ? p.colorVariants!.find(
                 (v: ColorVariant, i: number) =>
@@ -902,6 +923,14 @@ export default function ProductsList({
                       {t("new_label")}
                     </span>
                   )}
+                  {/* Sale flag. Suppressed when sold out, where the scrim
+                      covers the corner and the offer is moot anyway. */}
+                  {!isOutOfStock && (
+                    <SaleBadge
+                      percent={discountPercent}
+                      promotionName={promo.promotion?.name}
+                    />
+                  )}
                   {isOutOfStock && (
                     <div className="absolute inset-0 bg-black/50 z-20 flex items-center justify-center">
                       <span className="text-xs font-bold text-white bg-black/60 px-2 py-1 rounded">
@@ -943,37 +972,18 @@ export default function ProductsList({
                   {/* Price */}
                   {p.price ? (
                     <div className="text-xs text-gray-800 mb-2">
-                      {(() => {
-                        const basePrice = Number(p.price || 0);
-                        const promo = applyBestPromotionToLine({
-                          unitPriceTHB: basePrice,
-                          quantity: 1,
-                          productId: p.id,
-                          promotions: onlinePromotions,
-                        });
-                        const finalPriceTHB = promo.finalSubtotalTHB;
-
-                        return (
-                          <>
-                            {promo.promotion ? (
-                              <span className="mr-1.5 text-[10px] text-gray-400 line-through">
-                                {formatPrice(
-                                  basePrice,
-                                  displayCurrency,
-                                  mmkRate,
-                                )}
-                              </span>
-                            ) : null}
-                            <span className="font-bold text-rose-600">
-                              {formatPrice(
-                                finalPriceTHB,
-                                displayCurrency,
-                                mmkRate,
-                              )}
-                            </span>
-                          </>
-                        );
-                      })()}
+                      {promo.promotion ? (
+                        <span className="mr-1.5 text-[10px] text-gray-400 line-through">
+                          {formatPrice(basePrice, displayCurrency, mmkRate)}
+                        </span>
+                      ) : null}
+                      <span className="font-bold text-rose-600">
+                        {formatPrice(
+                          promo.finalSubtotalTHB,
+                          displayCurrency,
+                          mmkRate,
+                        )}
+                      </span>
                     </div>
                   ) : (
                     <span className="text-xs text-gray-700 mb-2">—</span>

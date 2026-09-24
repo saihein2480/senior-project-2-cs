@@ -6,9 +6,13 @@ import { useLanguage } from "../contexts/LanguageContext";
 import { useCurrencyRate } from "../hooks/useSettings";
 import { useCurrency, formatPrice } from "../hooks/useCurrency";
 import { useOnlinePromotions } from "../hooks/useOnlinePromotions";
-import { applyBestPromotionToLine } from "../lib/onlinePromotion";
+import {
+  applyBestPromotionToLine,
+  getDiscountPercent,
+} from "../lib/onlinePromotion";
 import { useRecommendations } from "../hooks/useRecommendations";
 import { productImageProps } from "../lib/productImage";
+import SaleBadge from "./SaleBadge";
 
 /**
  * "You May Like" — personalised suggestions from the shopper's own browsing,
@@ -82,6 +86,17 @@ export default function RecommendedProducts({
           const displayStock = p.stock ?? (p.price ? 10 : 0);
           const isOutOfStock = displayStock === 0;
 
+          // Resolved once so the sale badge and the price agree, matching how
+          // ProductsList prices its cards.
+          const basePrice = Number(p.price || 0);
+          const promo = applyBestPromotionToLine({
+            unitPriceTHB: basePrice,
+            quantity: 1,
+            productId: p.id,
+            promotions: onlinePromotions,
+          });
+          const discountPercent = getDiscountPercent(promo);
+
           return (
             <Link key={p.id} href={`/product/${p.id}`} className="block">
               <div
@@ -95,6 +110,12 @@ export default function RecommendedProducts({
                     <span className="absolute top-2 left-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white text-[10px] px-2 py-1 rounded-full z-10 font-semibold shadow-md">
                       {t("new_label")}
                     </span>
+                  )}
+                  {!isOutOfStock && (
+                    <SaleBadge
+                      percent={discountPercent}
+                      promotionName={promo.promotion?.name}
+                    />
                   )}
                   {isOutOfStock && (
                     <div className="absolute inset-0 bg-black/50 z-20 flex items-center justify-center">
@@ -135,36 +156,18 @@ export default function RecommendedProducts({
 
                   {p.price ? (
                     <div className="text-xs text-gray-800 mb-2">
-                      {(() => {
-                        const basePrice = Number(p.price || 0);
-                        const promo = applyBestPromotionToLine({
-                          unitPriceTHB: basePrice,
-                          quantity: 1,
-                          productId: p.id,
-                          promotions: onlinePromotions,
-                        });
-
-                        return (
-                          <>
-                            {promo.promotion ? (
-                              <span className="mr-1.5 text-[10px] text-gray-400 line-through">
-                                {formatPrice(
-                                  basePrice,
-                                  displayCurrency,
-                                  mmkRate,
-                                )}
-                              </span>
-                            ) : null}
-                            <span className="font-bold text-rose-600">
-                              {formatPrice(
-                                promo.finalSubtotalTHB,
-                                displayCurrency,
-                                mmkRate,
-                              )}
-                            </span>
-                          </>
-                        );
-                      })()}
+                      {promo.promotion ? (
+                        <span className="mr-1.5 text-[10px] text-gray-400 line-through">
+                          {formatPrice(basePrice, displayCurrency, mmkRate)}
+                        </span>
+                      ) : null}
+                      <span className="font-bold text-rose-600">
+                        {formatPrice(
+                          promo.finalSubtotalTHB,
+                          displayCurrency,
+                          mmkRate,
+                        )}
+                      </span>
                     </div>
                   ) : (
                     <span className="text-xs text-gray-700 mb-2">—</span>

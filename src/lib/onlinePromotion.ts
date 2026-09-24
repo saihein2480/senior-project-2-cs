@@ -132,3 +132,25 @@ export function applyBestPromotionToLine(params: {
 
   return best;
 }
+
+/**
+ * The saving on a line expressed as a whole percentage, for a "-25%" badge.
+ *
+ * Derived from the money actually taken off rather than from
+ * `promotion.discountValue`, so a fixed-amount promotion and one capped by
+ * `maxDiscountTHB` both report the percentage the shopper really gets.
+ *
+ * Returns 0 when no promotion applied, so callers can use it as the render
+ * condition directly.
+ */
+export function getDiscountPercent(result: AppliedPromotionResult): number {
+  if (!result.promotion) return 0;
+  if (result.baseSubtotalTHB <= 0) return 0;
+
+  const percent = Math.round(
+    (result.discountTHB / result.baseSubtotalTHB) * 100,
+  );
+
+  // A rounded 0% would render as "-0%", which reads like a bug.
+  return percent > 0 ? percent : 0;
+}
