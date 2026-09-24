@@ -565,6 +565,7 @@ export function formatHelpMessage(): string {
 *Account Commands:*
 /profile \\- View your profile
 /link \\- Link your web account
+/unlink \\- Disconnect this Telegram
 /account \\- Account settings
 
 *Other Commands:*

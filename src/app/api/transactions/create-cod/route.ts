@@ -25,6 +25,7 @@ export async function POST(request: NextRequest) {
       couponCode,
       couponId,
       couponDiscountTHB,
+      appliedPromotions,
     } = body;
 
     // Validate required fields
@@ -81,6 +82,40 @@ export async function POST(request: NextRequest) {
     const total =
       totalTHB || Math.max(0, subtotal - discount - couponDiscount) + tax;
 
+    /**
+     * Promotions that reduced this order, named.
+     *
+     * Kept as its own field so an invoice rendered months later can still say
+     * *which* promotion applied; the promotion documents themselves are edited
+     * and deactivated over time and cannot be trusted as a lookup after the fact.
+     */
+    const promotions = Array.isArray(appliedPromotions)
+      ? appliedPromotions
+          .filter(
+            (promo: unknown): promo is Record<string, unknown> =>
+              !!promo && typeof promo === "object",
+          )
+          .map((promo) => ({
+            promotionId: String(promo.promotionId || ""),
+            name: String(promo.name || ""),
+            discountType: String(promo.discountType || ""),
+            discountValue: Number(promo.discountValue || 0),
+            discountTHB: Number(promo.discountTHB || 0),
+          }))
+      : [];
+
+    /** Line-level pricing detail shared by both documents written below. */
+    const lineDetails = items.map((item: any) => ({
+      unitPrice: item.discountedPriceTHB || item.unitPriceTHB,
+      originalPrice: item.unitPriceTHB,
+      discountedPrice: item.discountedPriceTHB,
+      lineDiscount: Number(item.lineDiscountTHB || 0),
+      promotionId: item.promotionId || "",
+      promotionName: item.promotionName || "",
+      promotionDiscountType: item.promotionDiscountType || "",
+      promotionDiscountValue: Number(item.promotionDiscountValue || 0),
+    }));
+
     // Generate unique online order ID (different from transaction ID)
     const orderId = `COD-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
@@ -104,7 +139,7 @@ export async function POST(request: NextRequest) {
         address: customer.address,
         customerType: "online",
       },
-      items: items.map((item: any) => ({
+      items: items.map((item: any, index: number) => ({
         id: `${item.productId}_${item.variantId}_${item.size}`,
         productId: item.productId,
         stockId: item.productId, // Use productId as stockId for web orders
@@ -113,16 +148,15 @@ export async function POST(request: NextRequest) {
         selectedSize: item.size,
         colorCode: "", // Will be populated from product data
         image: item.image,
-        unitPrice: item.discountedPriceTHB || item.unitPriceTHB,
-        originalPrice: item.unitPriceTHB,
-        discountedPrice: item.discountedPriceTHB,
         quantity: item.quantity,
+        ...lineDetails[index],
       })),
       subtotal,
       tax,
       taxRate,
       discount,
       total,
+      appliedPromotions: promotions,
       amountPaid: total, // For COD, amount paid equals total (will be paid on delivery)
       amountMmk, // Add MMK amount for display
       change: 0,
@@ -160,7 +194,7 @@ export async function POST(request: NextRequest) {
     const docRef = await adminDb.collection("transactions").add(transactionData);
 
     // Convert items to cartItems format for onlineOrders
-    const cartItems = items.map((item: any) => ({
+    const cartItems = items.map((item: any, index: number) => ({
       productId: item.productId,
       productName: item.productName,
       variantId: item.variantId,
@@ -168,6 +202,10 @@ export async function POST(request: NextRequest) {
       size: item.size,
       image: item.image,
       priceTHB: item.discountedPriceTHB || item.unitPriceTHB,
+      originalPriceTHB: item.unitPriceTHB,
+      lineDiscountTHB: lineDetails[index].lineDiscount,
+      promotionId: lineDetails[index].promotionId,
+      promotionName: lineDetails[index].promotionName,
       quantity: item.quantity,
     }));
 
@@ -193,6 +231,7 @@ export async function POST(request: NextRequest) {
       tax,
       taxRate,
       discount,
+      appliedPromotions: promotions,
       total, // Add THB total amount
       amountMmk,
       exchangeRate: mmkRate,

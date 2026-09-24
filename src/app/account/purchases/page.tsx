@@ -19,6 +19,11 @@ import {
   normalizePurchaseOrderStatus,
   type PurchaseOrderStatus,
 } from "../../../lib/orderLabels";
+import { useStoreProfile, type StoreProfile } from "../../../hooks/useSettings";
+import {
+  printCustomerInvoice,
+  type CustomerInvoice,
+} from "../../../lib/customerInvoice";
 
 type IconProps = {
   size?: number;
@@ -227,9 +232,32 @@ function DollarSign({ size = 16, className = "" }: IconProps) {
 type TxnItem = {
   groupName?: string;
   quantity?: number;
+  /** Unit price actually charged, after any promotion. */
   unitPrice?: number;
+  /**
+   * Catalogue unit price before any promotion, and the saving it produced.
+   *
+   * Written at checkout by the storefront order paths. Absent on orders placed
+   * before per-line promotion detail was recorded, in which case the invoice
+   * simply shows no line saving rather than guessing one.
+   */
+  originalPrice?: number;
+  discountedPrice?: number;
+  lineDiscount?: number;
+  /** Name of the promotion that won for this line, when one did. */
+  promotionName?: string;
   selectedColor?: string;
   selectedSize?: string;
+  image?: string;
+};
+
+/** A promotion that reduced the order, as recorded at checkout. */
+type AppliedPromotion = {
+  promotionId?: string;
+  name?: string;
+  discountType?: string;
+  discountValue?: number;
+  discountTHB?: number;
 };
 
 type Txn = {
@@ -249,11 +277,29 @@ type Txn = {
   paymentMethod?: string;
   items?: TxnItem[];
   deliveryStatus?: string;
+  /**
+   * Who the order is for and where it goes.
+   *
+   * Stored on every storefront transaction since the order paths were written,
+   * but never typed here, which is why the customer's own invoice could not show
+   * their name, phone or delivery address.
+   */
+  customer?: {
+    uid?: string;
+    email?: string;
+    displayName?: string;
+    phone?: string;
+    address?: string;
+    customerType?: string;
+  };
+  branchName?: string;
   // Financial breakdown
   subtotal?: number;
   tax?: number;
   taxRate?: number; // Percentage applied at purchase time (e.g. 7 for 7%)
   discount?: number;
+  /** Named promotions behind `discount`. Empty on older orders. */
+  appliedPromotions?: AppliedPromotion[];
   // Coupon fields
   couponCode?: string;
   appliedCouponCode?: string;
@@ -445,7 +491,9 @@ function formatRatePercent(percent: number) {
  * savings only; coupon savings live in `couponDiscountTHB`.
  */
 function getOrderSummary(row: Txn) {
-  const itemsSubtotal = (row.items || []).reduce(
+  const items = row.items || [];
+
+  const itemsSubtotal = items.reduce(
     (sum, item) =>
       sum + Number(item.unitPrice || 0) * Number(item.quantity || 1),
     0,
@@ -472,14 +520,273 @@ function getOrderSummary(row: Txn) {
 
   const total = Number(row.total || 0) || taxableBase + tax;
 
+  /**
+   * Named promotions behind `promotionDiscount`.
+   *
+   * Preferred source is the order-level list written at checkout. Orders placed
+   * before that existed can still be described from the per-line promotion names,
+   * so those are folded together as a fallback.
+   */
+  const promotionsFromOrder = (row.appliedPromotions || [])
+    .map((promo) => ({
+      name: (promo.name || "").trim(),
+      discountTHB: Math.max(0, Number(promo.discountTHB || 0)),
+    }))
+    .filter((promo) => promo.name || promo.discountTHB > 0);
+
+  const promotionsFromLines = Object.values(
+    items.reduce<Record<string, { name: string; discountTHB: number }>>(
+      (acc, item) => {
+        const name = (item.promotionName || "").trim();
+        const lineDiscount = Math.max(0, Number(item.lineDiscount || 0));
+        if (!name || lineDiscount <= 0) return acc;
+
+        if (acc[name]) {
+          acc[name].discountTHB += lineDiscount;
+        } else {
+          acc[name] = { name, discountTHB: lineDiscount };
+        }
+        return acc;
+      },
+      {},
+    ),
+  );
+
+  const promotions =
+    promotionsFromOrder.length > 0 ? promotionsFromOrder : promotionsFromLines;
+
+  /**
+   * Per-line figures for the invoice.
+   *
+   * Each line is quoted at its catalogue price so the Amount column sums to the
+   * subtotal the breakdown starts from. Without this the item list showed
+   * discounted prices while the subtotal showed the pre-discount figure, and the
+   * two never visibly added up.
+   */
+  const lines = items.map((item) => {
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    const chargedUnitPrice = Number(item.unitPrice || 0);
+    const storedOriginal = Number(item.originalPrice || 0);
+    const originalUnitPrice =
+      storedOriginal > chargedUnitPrice ? storedOriginal : chargedUnitPrice;
+
+    const lineGross = originalUnitPrice * quantity;
+    const recordedDiscount = Math.max(0, Number(item.lineDiscount || 0));
+
+    // Prefer the saving recorded at checkout. Where it is missing but a higher
+    // catalogue price was stored, the gap is the saving. Orders with neither
+    // simply report no line saving rather than one invented here.
+    const lineDiscount =
+      recordedDiscount > 0
+        ? recordedDiscount
+        : Math.max(0, lineGross - chargedUnitPrice * quantity);
+
+    return {
+      name: item.groupName || "Item",
+      variant: [item.selectedColor, item.selectedSize].filter(Boolean).join(", "),
+      quantity,
+      originalUnitPrice,
+      chargedUnitPrice,
+      lineGross,
+      lineDiscount,
+      lineNet: Math.max(0, lineGross - lineDiscount),
+      promotionName: item.promotionName || undefined,
+    };
+  });
+
+  const lineGrossTotal = lines.reduce((sum, line) => sum + line.lineGross, 0);
+  const lineDiscountTotal = lines.reduce(
+    (sum, line) => sum + line.lineDiscount,
+    0,
+  );
+
+  // The subtotal the invoice starts from. Derived from the lines so the Amount
+  // column always adds up to it; the stored figure is the fallback for orders
+  // with no item detail at all.
+  const invoiceSubtotal = lines.length > 0 ? lineGrossTotal : subtotal;
+
+  /** What the lines cost once their own discounts are taken off. */
+  const subtotalAfterItemDiscount = invoiceSubtotal - lineDiscountTotal;
+
+  /**
+   * Discount that belongs to the order rather than to any single line.
+   *
+   * Derived as the gap between what the lines leave and the base tax was
+   * actually charged on. Taking it from the recorded taxable base rather than
+   * from the stored `discount` is what lets the invoice close on every
+   * generation of stored order: ones that recorded catalogue prices per line,
+   * ones that recorded only the charged price, and ones that recorded only an
+   * order-level discount with no item detail at all.
+   */
+  const orderDiscount = Math.max(
+    0,
+    subtotalAfterItemDiscount - taxableBase - couponDiscount,
+  );
+
+  const invoicePromotionDiscount = lineDiscountTotal + orderDiscount;
+
+  /**
+   * Which bucket the named promotions account for, so they can be shown in place
+   * of an anonymous row without double counting. When their amounts match
+   * neither bucket the aggregate row is the honest presentation.
+   */
+  const promotionsTotal = promotions.reduce(
+    (sum, promo) => sum + promo.discountTHB,
+    0,
+  );
+  const promotionsApplyTo: "line" | "order" | "none" =
+    promotions.length === 0
+      ? "none"
+      : lineDiscountTotal > 0 &&
+          Math.abs(promotionsTotal - lineDiscountTotal) < 0.01
+        ? "line"
+        : orderDiscount > 0 && Math.abs(promotionsTotal - orderDiscount) < 0.01
+          ? "order"
+          : "none";
+
   return {
     subtotal,
+    invoiceSubtotal,
     promotionDiscount,
+    invoicePromotionDiscount,
+    lineDiscountTotal,
+    subtotalAfterItemDiscount,
+    orderDiscount,
     couponDiscount,
     taxableBase,
     tax,
     taxPercent,
     total,
+    lines,
+    promotions,
+    promotionsApplyTo,
+    totalSavings: invoicePromotionDiscount + couponDiscount,
+  };
+}
+
+/** A single saving in the order summary, shown as a negative amount. */
+function DiscountRow({ label, amount }: { label: string; amount: number }) {
+  return (
+    <div className="flex justify-between items-center gap-3 text-emerald-700">
+      <span className="flex min-w-0 items-center gap-1">
+        <svg
+          className="w-4 h-4 shrink-0"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          viewBox="0 0 24 24"
+          aria-hidden
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
+          />
+        </svg>
+        <span className="truncate">{label}</span>
+      </span>
+      <span className="shrink-0 font-medium">-฿ {amount.toFixed(2)}</span>
+    </div>
+  );
+}
+
+/** How the customer should see the payment method they chose. */
+function getPaymentMethodLabel(row: Txn): string {
+  switch ((row.paymentMethod || "").toLowerCase()) {
+    case "cash":
+      return "Cash";
+    case "scan":
+    case "wallet":
+      return "QR Scan";
+    case "cod":
+      return "Cash on Delivery";
+    default:
+      return row.paymentProvider || row.paymentMethod || "-";
+  }
+}
+
+/**
+ * Assemble the printable invoice for one order.
+ *
+ * Every figure comes from `getOrderSummary`, the same helper the on-screen
+ * summary uses, so the printed document and the screen can never disagree.
+ */
+function buildInvoiceFromTxn(
+  row: Txn,
+  displayStatus: PurchaseOrderStatus,
+  store: StoreProfile,
+): CustomerInvoice {
+  const summary = getOrderSummary(row);
+
+  // Quote each line at its catalogue price with its own discount beside it, so
+  // the Amount column sums to the subtotal the breakdown starts from.
+  const lines = summary.lines.map((line) => ({
+    name: line.name,
+    variant: line.variant,
+    quantity: line.quantity,
+    unitPrice: line.originalUnitPrice,
+    chargedUnitPrice:
+      line.lineDiscount > 0 ? line.chargedUnitPrice : undefined,
+    lineDiscount: line.lineDiscount,
+    promotionName: line.promotionName,
+    lineTotal: line.lineGross,
+    lineNet: line.lineNet,
+  }));
+
+  const recordedMmk = Number(row.amountMmk || row.sellingTotal || 0);
+  const exchangeRate = Number(row.exchangeRate || 0);
+  const totalMMK =
+    recordedMmk > 0
+      ? recordedMmk
+      : exchangeRate > 0
+        ? summary.total * exchangeRate
+        : 0;
+
+  return {
+    seller: {
+      businessName: store.businessName || "Online Store",
+      branchName: store.branchName || row.branchName || "",
+      address: store.address,
+      phone: store.phone,
+      email: store.email,
+      logoUrl: store.businessLogo,
+      showLogo: store.showLogoOnInvoice && !!store.businessLogo,
+      footerMessage: store.invoiceFooterMessage,
+      footerImageUrl: store.invoiceFooterImage,
+    },
+    buyer: {
+      name: row.customer?.displayName || "",
+      phone: row.customer?.phone || "",
+      address: row.customer?.address || "",
+      email: row.customer?.email || "",
+      accountId: row.customer?.uid || row.customerUid || "",
+    },
+    meta: {
+      invoiceNumber: row.transactionId || row.id,
+      orderRef: row.onlineOrderId || "",
+      issuedAt: row.timestamp
+        ? new Date(row.timestamp).toLocaleString()
+        : "-",
+      paymentMethod: getPaymentMethodLabel(row),
+      paymentStatus: getPaymentStatusLabel(row.status, row.paymentStatus),
+      orderStatus: getPurchaseOrderStatusLabel(displayStatus),
+    },
+    lines,
+    totals: {
+      subtotal: summary.invoiceSubtotal,
+      promotions: summary.promotions,
+      promotionsApplyTo: summary.promotionsApplyTo,
+      lineDiscountTotal: summary.lineDiscountTotal,
+      subtotalAfterItemDiscount: summary.subtotalAfterItemDiscount,
+      orderDiscount: summary.orderDiscount,
+      couponCode: row.couponCode || row.appliedCouponCode,
+      couponDiscount: summary.couponDiscount,
+      taxPercent: summary.taxPercent,
+      tax: summary.tax,
+      total: summary.total,
+      totalSavings: summary.totalSavings,
+      totalMMK,
+    },
   };
 }
 
@@ -678,6 +985,25 @@ function PurchaseDetailsModal({
   const cancelRequest = row.cancellationRequest;
   const refundRequest = row.refundRequest;
   const summary = getOrderSummary(row);
+  const { profile: storeProfile } = useStoreProfile();
+
+  const customer = row.customer;
+  const accountId = customer?.uid || row.customerUid || "";
+  const hasCustomerDetails =
+    !!customer?.displayName ||
+    !!customer?.phone ||
+    !!customer?.address ||
+    !!customer?.email ||
+    !!accountId;
+
+  const handlePrintInvoice = () => {
+    const opened = printCustomerInvoice(
+      buildInvoiceFromTxn(row, displayStatus, storeProfile),
+    );
+    if (!opened) {
+      alert("Please allow pop-ups for this site to print your invoice.");
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4 sm:p-0">
@@ -1117,6 +1443,70 @@ function PurchaseDetailsModal({
               below, which is why that row is no longer in the grid. */}
           <OrderStatusTracker status={displayStatus} />
 
+          {/* Who the order is for and where it is going. Stored at checkout and
+              shown here so the invoice is complete on its own. */}
+          {hasCustomerDetails && (
+            <div className="rounded-2xl border border-rose-100 bg-white shadow-sm overflow-hidden">
+              <div className="bg-gradient-to-r from-rose-50 to-pink-50 px-4 py-2.5 border-b border-rose-100">
+                <h3 className="text-[11px] font-bold uppercase tracking-wide text-rose-600">
+                  Customer &amp; Delivery
+                </h3>
+              </div>
+              <div className="grid grid-cols-1 gap-2.5 px-4 py-3.5 text-sm">
+                {customer?.displayName && (
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Name
+                    </span>
+                    <span className="text-right font-medium text-gray-800">
+                      {customer.displayName}
+                    </span>
+                  </div>
+                )}
+                {customer?.phone && (
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Phone
+                    </span>
+                    <span className="text-right font-medium text-gray-800">
+                      {customer.phone}
+                    </span>
+                  </div>
+                )}
+                {customer?.address && (
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Address
+                    </span>
+                    <span className="text-right font-medium text-gray-800 break-words">
+                      {customer.address}
+                    </span>
+                  </div>
+                )}
+                {customer?.email && (
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Email
+                    </span>
+                    <span className="text-right font-medium text-gray-800 break-all">
+                      {customer.email}
+                    </span>
+                  </div>
+                )}
+                {accountId && (
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                      Account
+                    </span>
+                    <span className="text-right font-mono text-[11px] font-medium text-gray-600 break-all">
+                      {accountId}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="rounded-2xl border border-rose-100 bg-white p-4 shadow-sm">
             <div className="grid grid-cols-1 gap-2.5 text-sm">
               <div className="flex items-start justify-between gap-3">
@@ -1196,39 +1586,53 @@ function PurchaseDetailsModal({
               </div>
             ) : (
               <div className="rounded-2xl border border-rose-100 bg-white shadow-sm overflow-hidden">
-                {items.map((item, idx) => {
-                  const details = [item.selectedColor, item.selectedSize]
-                    .filter(Boolean)
-                    .join(", ");
-
-                  return (
-                    <div
-                      key={`${row.id}-${idx}`}
-                      className="px-4 py-3 border-b border-rose-50 last:border-0 text-sm transition-colors hover:bg-rose-50/40"
-                    >
-                      <div className="flex justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="font-semibold text-gray-900">
-                            {item.groupName || "Item"}
+                {summary.lines.map((line, idx) => (
+                  <div
+                    key={`${row.id}-${idx}`}
+                    className="px-4 py-3 border-b border-rose-50 last:border-0 text-sm transition-colors hover:bg-rose-50/40"
+                  >
+                    <div className="flex justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-gray-900">
+                          {line.name}
+                        </div>
+                        {line.variant ? (
+                          <div className="mt-1 inline-flex rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600">
+                            {line.variant}
                           </div>
-                          {details ? (
-                            <div className="mt-1 inline-flex rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600">
-                              {details}
+                        ) : null}
+                        {line.promotionName ? (
+                          <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                            🏷️ {line.promotionName}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <div className="text-xs font-medium text-gray-400">
+                          {line.quantity} × ฿{" "}
+                          {line.originalUnitPrice.toFixed(2)}
+                        </div>
+                        {line.lineDiscount > 0 ? (
+                          <>
+                            <div className="text-[11px] font-medium text-gray-400 line-through">
+                              ฿ {line.lineGross.toFixed(2)}
                             </div>
-                          ) : null}
-                        </div>
-                        <div className="shrink-0 text-right">
-                          <div className="text-xs font-medium text-gray-400">
-                            x{Number(item.quantity || 1)}
-                          </div>
+                            <div className="text-[11px] font-semibold text-emerald-700">
+                              Discount -฿ {line.lineDiscount.toFixed(2)}
+                            </div>
+                            <div className="text-sm font-bold text-rose-600">
+                              ฿ {line.lineNet.toFixed(2)}
+                            </div>
+                          </>
+                        ) : (
                           <div className="text-sm font-bold text-rose-600">
-                            ฿ {Number(item.unitPrice || 0).toFixed(2)}
+                            ฿ {line.lineGross.toFixed(2)}
                           </div>
-                        </div>
+                        )}
                       </div>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -1241,28 +1645,65 @@ function PurchaseDetailsModal({
               </h3>
             </div>
             <div className="px-4 py-3.5 space-y-2.5 text-sm">
-              {/* Subtotal */}
+              {/* Subtotal — the catalogue value the item list above adds up to */}
               <div className="flex justify-between items-center">
-                <span className="text-gray-600">Subtotal</span>
+                <span className="text-gray-600">
+                  {summary.invoicePromotionDiscount > 0 ||
+                  summary.couponDiscount > 0
+                    ? "Subtotal (before discount)"
+                    : "Subtotal"}
+                </span>
                 <span className="font-medium text-gray-900">
-                  ฿ {summary.subtotal.toFixed(2)}
+                  ฿ {summary.invoiceSubtotal.toFixed(2)}
                 </span>
               </div>
 
-              {/* Promotion Discount */}
-              {summary.promotionDiscount > 0 && (
-                <div className="flex justify-between items-center text-emerald-700">
-                  <span className="flex items-center gap-1">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-                    </svg>
-                    Promotion Discount
+              {/* Discounts that belong to individual items, named per promotion
+                  when the order recorded which ones applied. */}
+              {summary.lineDiscountTotal > 0 &&
+                (summary.promotionsApplyTo === "line" ? (
+                  summary.promotions.map((promo, idx) => (
+                    <DiscountRow
+                      key={`line-${promo.name}-${idx}`}
+                      label={promo.name || "Promotion"}
+                      amount={promo.discountTHB}
+                    />
+                  ))
+                ) : (
+                  <DiscountRow
+                    label="Item discounts"
+                    amount={summary.lineDiscountTotal}
+                  />
+                ))}
+
+              {/* Running subtotal, so the steps down to the total are visible */}
+              {summary.lineDiscountTotal > 0 && (
+                <div className="flex justify-between items-center border-t border-dotted border-rose-100 pt-2.5">
+                  <span className="font-medium text-gray-700">
+                    Subtotal after item discount
                   </span>
-                  <span className="font-medium">
-                    -฿ {summary.promotionDiscount.toFixed(2)}
+                  <span className="font-semibold text-gray-900">
+                    ฿ {summary.subtotalAfterItemDiscount.toFixed(2)}
                   </span>
                 </div>
               )}
+
+              {/* Discount applied to the order rather than to any one item */}
+              {summary.orderDiscount > 0 &&
+                (summary.promotionsApplyTo === "order" ? (
+                  summary.promotions.map((promo, idx) => (
+                    <DiscountRow
+                      key={`order-${promo.name}-${idx}`}
+                      label={promo.name || "Promotion"}
+                      amount={promo.discountTHB}
+                    />
+                  ))
+                ) : (
+                  <DiscountRow
+                    label="Order discount"
+                    amount={summary.orderDiscount}
+                  />
+                ))}
 
               {/* Coupon Discount */}
               {summary.couponDiscount > 0 && (
@@ -1309,14 +1750,44 @@ function PurchaseDetailsModal({
                   </span>
                 </div>
               )}
+
+              {/* What every discount added up to, stated plainly. */}
+              {summary.totalSavings > 0 && (
+                <div className="flex justify-between items-center border-t border-dashed border-emerald-200 pt-2.5 text-emerald-700">
+                  <span className="font-semibold">You saved</span>
+                  <span className="font-bold">
+                    ฿ {summary.totalSavings.toFixed(2)}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        <div className="px-6 py-4 border-t border-rose-100 bg-white">
+        <div className="flex gap-2 px-6 py-4 border-t border-rose-100 bg-white">
+          <button
+            onClick={handlePrintInvoice}
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-full border-2 border-rose-300 bg-white py-3 text-sm font-semibold text-rose-600 shadow-sm transition-all hover:bg-rose-50 hover:shadow-md"
+          >
+            <svg
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              viewBox="0 0 24 24"
+              aria-hidden
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M6 9V4h12v5m-12 6H4v-4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4h-2m-12 0h12v5H6v-5Z"
+              />
+            </svg>
+            Print Invoice
+          </button>
           <button
             onClick={onClose}
-            className="w-full rounded-full bg-gradient-to-r from-rose-500 to-pink-500 py-3 text-sm font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg"
+            className="flex-1 rounded-full bg-gradient-to-r from-rose-500 to-pink-500 py-3 text-sm font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg"
           >
             Close
           </button>

@@ -156,6 +156,66 @@ export default function CheckoutPage() {
     }),
   );
 
+  /**
+   * Pair every checkout line with the promotion that won for it.
+   *
+   * Only the aggregate discount used to be persisted, so an invoice could say
+   * "Promotion -฿40" but never which promotion earned it, and the per-line
+   * saving was gone entirely. Carrying the promotion identity and the line
+   * maths here means both order-writing paths below persist the same detail.
+   */
+  const checkoutLines = checkoutItems.map((item, index) => {
+    const result = lineResults[index];
+    const discountedUnitPriceTHB =
+      item.quantity > 0
+        ? result.finalSubtotalTHB / item.quantity
+        : item.unitPriceTHB;
+
+    return {
+      item,
+      result,
+      discountedUnitPriceTHB,
+      promotionId: result.promotion?.id || "",
+      promotionName: result.promotion?.name || "",
+      promotionDiscountType: result.promotion?.discountType || "",
+      promotionDiscountValue: Number(result.promotion?.discountValue || 0),
+      lineDiscountTHB: result.discountTHB,
+    };
+  });
+
+  /** Distinct promotions that actually reduced this order, with their totals. */
+  const appliedPromotions = Object.values(
+    checkoutLines.reduce<
+      Record<
+        string,
+        {
+          promotionId: string;
+          name: string;
+          discountType: string;
+          discountValue: number;
+          discountTHB: number;
+        }
+      >
+    >((acc, line) => {
+      if (!line.promotionId || line.lineDiscountTHB <= 0) return acc;
+
+      const existing = acc[line.promotionId];
+      if (existing) {
+        existing.discountTHB += line.lineDiscountTHB;
+        return acc;
+      }
+
+      acc[line.promotionId] = {
+        promotionId: line.promotionId,
+        name: line.promotionName,
+        discountType: line.promotionDiscountType,
+        discountValue: line.promotionDiscountValue,
+        discountTHB: line.lineDiscountTHB,
+      };
+      return acc;
+    }, {}),
+  );
+
   const discountTHB = lineResults.reduce(
     (sum, row) => sum + row.discountTHB,
     0,
@@ -317,15 +377,8 @@ export default function CheckoutPage() {
       // undiscounted total. Instead, allocate the final MMK total across the
       // lines in proportion to their value, letting the last line absorb any
       // rounding remainder so the sum matches totalMMK exactly.
-      const linePromoTotalsTHB = checkoutItems.map(
-        (item) =>
-          applyBestPromotionToLine({
-            unitPriceTHB: item.unitPriceTHB,
-            quantity: item.quantity,
-            productId: item.productId,
-            variantId: item.variantId,
-            promotions: onlinePromotions,
-          }).finalSubtotalTHB,
+      const linePromoTotalsTHB = checkoutLines.map(
+        (line) => line.result.finalSubtotalTHB,
       );
       const linesTotalTHB = linePromoTotalsTHB.reduce(
         (sum, value) => sum + value,
@@ -381,55 +434,45 @@ export default function CheckoutPage() {
             address: profile.address,
           },
           items: payloadItems,
+          // Promotions that reduced this order, named so the invoice can say so
+          appliedPromotions,
           // Add coupon information
           ...(activeCoupon && {
             couponCode: activeCoupon.code,
             couponId: activeCoupon.id,
             couponDiscountTHB: couponDiscount.discountAmount,
           }),
-          cartItems: checkoutItems.map((item) => ({
-            priceTHB: (() => {
-              const line = applyBestPromotionToLine({
-                unitPriceTHB: item.unitPriceTHB,
-                quantity: item.quantity,
-                productId: item.productId,
-                variantId: item.variantId,
-                promotions: onlinePromotions,
-              });
-              return item.quantity > 0
-                ? line.finalSubtotalTHB / item.quantity
-                : item.unitPriceTHB;
-            })(),
-            productId: item.productId,
-            productName: item.name,
-            variantId: item.variantId || "",
-            color: item.color || "",
-            size: item.size || "",
-            image: item.image || "",
-            quantity: item.quantity,
+          cartItems: checkoutLines.map((line) => ({
+            priceTHB: line.discountedUnitPriceTHB,
+            originalPriceTHB: line.item.unitPriceTHB,
+            lineDiscountTHB: line.lineDiscountTHB,
+            promotionId: line.promotionId,
+            promotionName: line.promotionName,
+            promotionDiscountType: line.promotionDiscountType,
+            promotionDiscountValue: line.promotionDiscountValue,
+            productId: line.item.productId,
+            productName: line.item.name,
+            variantId: line.item.variantId || "",
+            color: line.item.color || "",
+            size: line.item.size || "",
+            image: line.item.image || "",
+            quantity: line.item.quantity,
           })),
           product:
-            checkoutItems.length === 1
+            checkoutLines.length === 1
               ? {
-                  productId: checkoutItems[0].productId,
-                  productName: checkoutItems[0].name,
-                  variantId: checkoutItems[0].variantId || "",
-                  color: checkoutItems[0].color || "",
-                  size: checkoutItems[0].size || "",
-                  image: checkoutItems[0].image || "",
-                  priceTHB: (() => {
-                    const line = applyBestPromotionToLine({
-                      unitPriceTHB: checkoutItems[0].unitPriceTHB,
-                      quantity: checkoutItems[0].quantity,
-                      productId: checkoutItems[0].productId,
-                      variantId: checkoutItems[0].variantId,
-                      promotions: onlinePromotions,
-                    });
-                    return checkoutItems[0].quantity > 0
-                      ? line.finalSubtotalTHB / checkoutItems[0].quantity
-                      : checkoutItems[0].unitPriceTHB;
-                  })(),
-                  quantity: checkoutItems[0].quantity,
+                  productId: checkoutLines[0].item.productId,
+                  productName: checkoutLines[0].item.name,
+                  variantId: checkoutLines[0].item.variantId || "",
+                  color: checkoutLines[0].item.color || "",
+                  size: checkoutLines[0].item.size || "",
+                  image: checkoutLines[0].item.image || "",
+                  priceTHB: checkoutLines[0].discountedUnitPriceTHB,
+                  originalPriceTHB: checkoutLines[0].item.unitPriceTHB,
+                  lineDiscountTHB: checkoutLines[0].lineDiscountTHB,
+                  promotionId: checkoutLines[0].promotionId,
+                  promotionName: checkoutLines[0].promotionName,
+                  quantity: checkoutLines[0].item.quantity,
                 }
               : undefined,
         }),
@@ -511,31 +554,27 @@ export default function CheckoutPage() {
             phone: profile!.phone,
             address: profile!.address,
           },
-          items: checkoutItems.map((item) => {
-            const line = applyBestPromotionToLine({
-              unitPriceTHB: item.unitPriceTHB,
-              quantity: item.quantity,
-              productId: item.productId,
-              variantId: item.variantId,
-              promotions: onlinePromotions,
-            });
-            return {
-              productId: item.productId,
-              productName: item.name,
-              variantId: item.variantId || "",
-              color: item.color || "",
-              size: item.size || "",
-              image: item.image || "",
-              quantity: item.quantity,
-              unitPriceTHB: item.unitPriceTHB,
-              discountedPriceTHB:
-                item.quantity > 0
-                  ? line.finalSubtotalTHB / item.quantity
-                  : item.unitPriceTHB,
-            };
-          }),
+          items: checkoutLines.map((line) => ({
+            productId: line.item.productId,
+            productName: line.item.name,
+            variantId: line.item.variantId || "",
+            color: line.item.color || "",
+            size: line.item.size || "",
+            image: line.item.image || "",
+            quantity: line.item.quantity,
+            unitPriceTHB: line.item.unitPriceTHB,
+            discountedPriceTHB: line.discountedUnitPriceTHB,
+            // Per-line promotion detail, so the invoice can show what each
+            // line saved and which promotion did it.
+            lineDiscountTHB: line.lineDiscountTHB,
+            promotionId: line.promotionId,
+            promotionName: line.promotionName,
+            promotionDiscountType: line.promotionDiscountType,
+            promotionDiscountValue: line.promotionDiscountValue,
+          })),
           subtotalTHB: baseTotalTHB,
           discountTHB: discountTHB,
+          appliedPromotions,
           couponDiscountTHB: activeCoupon ? couponDiscount.discountAmount : 0,
           couponCode: activeCoupon?.code || null,
           couponId: activeCoupon?.id || null,

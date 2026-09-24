@@ -22,6 +22,7 @@ export const BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: "track", description: "Track an order" },
   { command: "profile", description: "View/edit your profile" },
   { command: "link", description: "Link your account" },
+  { command: "unlink", description: "Disconnect this Telegram from your account" },
   { command: "promotions", description: "View current promotions" },
   { command: "account", description: "Manage your account" },
   { command: "cancel", description: "Cancel a pending order" },

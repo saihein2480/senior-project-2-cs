@@ -129,6 +129,7 @@ async function handleCommand(ctx: BotContext): Promise<void> {
     "/track": () => handleTrackCommand(ctx, args),
     "/profile": () => handleProfileCommand(ctx),
     "/link": () => handleLinkCommand(ctx),
+    "/unlink": () => handleUnlinkCommand(ctx),
     "/promotions": () => handlePromotionsCommand(ctx),
     "/cancel": () => handleCancelOrderCommand(ctx, args),
     "/newarrivals": () => renderBrowsePage(ctx, "new", 1),
@@ -924,6 +925,108 @@ async function handleProfileCommand(ctx: BotContext): Promise<void> {
 }
 
 /**
+ * Handle /unlink command.
+ *
+ * Disconnects this chat from the customer account it is linked to. Asks first:
+ * unlinking silently stops every order notification, which is not something to
+ * do on a mistyped command.
+ *
+ * Only ever affects the account this chat is linked to — the customer is
+ * identified by `ctx.chatId`, never by anything they can type.
+ */
+async function handleUnlinkCommand(ctx: BotContext): Promise<void> {
+  await sendChatAction(ctx.chatId, "typing");
+
+  const escape = (value: string) =>
+    value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  try {
+    const customer = await getCustomerByTelegramId(ctx.chatId);
+
+    if (!customer) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text:
+          "🔌 <b>Nothing to disconnect</b>\n\n" +
+          "This Telegram account is not linked to a web account.\n\n" +
+          "Use /link if you would like to connect one.",
+        parse_mode: "HTML",
+        reply_markup: createBackButton(),
+      });
+      return;
+    }
+
+    const { createConfirmationKeyboard } = await import("./keyboards");
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text:
+        `🔌 <b>Disconnect Telegram?</b>\n\n` +
+        `This chat is linked to <b>${escape(customer.email || "your account")}</b>.\n\n` +
+        `If you disconnect:\n` +
+        `• You will stop receiving order and delivery updates here\n` +
+        `• Your cart and orders stay safe on the website\n` +
+        `• You can reconnect any time with /link`,
+      parse_mode: "HTML",
+      reply_markup: createConfirmationKeyboard("unlink_confirm"),
+    });
+  } catch (error) {
+    console.error("Unlink error:", error);
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("Could not start disconnecting. Please try again."),
+    });
+  }
+}
+
+/** Apply the unlink once the customer has confirmed it. */
+async function handleUnlinkConfirmed(ctx: BotContext): Promise<void> {
+  try {
+    const customer = await getCustomerByTelegramId(ctx.chatId);
+
+    // Re-read rather than trusting the button: the link may already be gone if
+    // they confirmed twice, or disconnected from the website in between.
+    if (!customer) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text:
+          "🔌 <b>Already disconnected</b>\n\n" +
+          "This Telegram account is no longer linked. Use /link to connect again.",
+        parse_mode: "HTML",
+        reply_markup: createBackButton(),
+      });
+      return;
+    }
+
+    const { unlinkTelegramFromCustomer } = await import("./auth-service");
+    const unlinked = await unlinkTelegramFromCustomer(customer.id);
+
+    if (!unlinked) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: formatError("Could not disconnect your account. Please try again."),
+      });
+      return;
+    }
+
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text:
+        "🔌 <b>Account disconnected</b>\n\n" +
+        "You will no longer get order notifications in this chat.\n\n" +
+        "Changed your mind? Use /link to connect again.",
+      parse_mode: "HTML",
+    });
+  } catch (error) {
+    console.error("Unlink confirm error:", error);
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: formatError("Could not disconnect your account. Please try again."),
+    });
+  }
+}
+
+/**
  * Handle /link command
  */
 async function handleLinkCommand(ctx: BotContext): Promise<void> {
@@ -1087,10 +1190,18 @@ async function handleCallbackQuery(query: any): Promise<void> {
 
   console.log(`🔘 Callback from ${userId}: ${callbackData}`);
 
-  // Acknowledge the callback
-  await answerCallbackQuery({
-    callback_query_id: query.id,
-  });
+  // Acknowledge the callback so Telegram stops the button's spinner.
+  //
+  // Deliberately not allowed to fail the whole update: this used to be an
+  // unguarded await outside the try below, so any error here — an expired query
+  // id, a transient network fault — threw before the button's actual work was
+  // routed, and the press was silently dropped. The acknowledgement is cosmetic;
+  // the action is not.
+  try {
+    await answerCallbackQuery({ callback_query_id: query.id });
+  } catch (error) {
+    console.error("Could not acknowledge callback (continuing):", error);
+  }
 
   if (!chatId) return;
 
@@ -1125,6 +1236,8 @@ async function handleCallbackQuery(query: any): Promise<void> {
       await handleCartCallback(ctx, callbackData);
     } else if (callbackData.startsWith("order_")) {
       await handleOrderCallback(ctx, callbackData);
+    } else if (callbackData === "unlink_confirm") {
+      await handleUnlinkConfirmed(ctx);
     }
   } catch (error) {
     console.error("Error handling callback:", error);

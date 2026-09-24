@@ -84,7 +84,13 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
           groupName:
             (item.productName as string | undefined) || "Online Product",
           unitPrice: Number(item.priceTHB || 0),
-          originalPrice: Number(item.priceTHB || 0),
+          // The catalogue price when the line carries one. Older orders only
+          // stored the charged price, so fall back to it rather than reporting
+          // a saving that was never recorded.
+          originalPrice: Number(item.originalPriceTHB || item.priceTHB || 0),
+          lineDiscount: Number(item.lineDiscountTHB || 0),
+          promotionId: (item.promotionId as string | undefined) || "",
+          promotionName: (item.promotionName as string | undefined) || "",
           quantity: Number(item.quantity || 1),
           selectedColor: (item.color as string | undefined) || "",
           selectedSize: (item.size as string | undefined) || "",
@@ -99,7 +105,12 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
             groupName:
               (product.productName as string | undefined) || "Online Product",
             unitPrice: Number(product.priceTHB || 0),
-            originalPrice: Number(product.priceTHB || 0),
+            originalPrice: Number(
+              product.originalPriceTHB || product.priceTHB || 0,
+            ),
+            lineDiscount: Number(product.lineDiscountTHB || 0),
+            promotionId: (product.promotionId as string | undefined) || "",
+            promotionName: (product.promotionName as string | undefined) || "",
             quantity: Number(product.quantity || 1),
             selectedColor: (product.color as string | undefined) || "",
             selectedSize: (product.size as string | undefined) || "",
@@ -156,6 +167,11 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
     tax,
     taxRate,
     discount,
+    // Named promotions, copied from the order so the invoice can report which
+    // promotion applied rather than just a smaller number.
+    appliedPromotions: Array.isArray(order.appliedPromotions)
+      ? order.appliedPromotions
+      : [],
     total,
     amountPaid: total,
     change: 0,

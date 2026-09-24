@@ -13,7 +13,16 @@ type CreateOrderRequest = {
     color?: string;
     size?: string;
     image?: string;
+    /** Unit price actually charged, after the winning promotion. */
     priceTHB: number;
+    /** Catalogue unit price before any promotion. */
+    originalPriceTHB?: number;
+    /** What this line saved. */
+    lineDiscountTHB?: number;
+    promotionId?: string;
+    promotionName?: string;
+    promotionDiscountType?: string;
+    promotionDiscountValue?: number;
     quantity: number;
   }>;
   customer: {
@@ -31,6 +40,10 @@ type CreateOrderRequest = {
     size?: string;
     image?: string;
     priceTHB: number;
+    originalPriceTHB?: number;
+    lineDiscountTHB?: number;
+    promotionId?: string;
+    promotionName?: string;
     quantity: number;
   };
   // Financial breakdown fields
@@ -40,6 +53,20 @@ type CreateOrderRequest = {
   discount?: number; // THB discount amount (same as couponDiscountTHB)
   total?: number; // THB total amount
   exchangeRate?: number; // THB -> MMK rate used at checkout
+  /**
+   * Promotions that reduced this order, named.
+   *
+   * Recorded with the order because promotion documents are edited and
+   * deactivated over time, so they cannot be looked up after the fact to
+   * explain an old invoice.
+   */
+  appliedPromotions?: Array<{
+    promotionId: string;
+    name: string;
+    discountType?: string;
+    discountValue?: number;
+    discountTHB: number;
+  }>;
   // Coupon fields
   couponCode?: string;
   couponId?: string;
@@ -234,6 +261,7 @@ export async function POST(req: Request) {
         tax: Number(body.tax || 0),
         taxRate: Number(body.taxRate || 0),
         discount: Number(body.discount || 0),
+        appliedPromotions: body.appliedPromotions || [],
         total: Number(body.total || 0),
         exchangeRate: Number(body.exchangeRate || 0),
         status: "pending",

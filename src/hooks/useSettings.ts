@@ -1,12 +1,29 @@
 import { useQuery } from "@tanstack/react-query";
 
-type SettingsResponse = {
-  data?: {
-    currencyRate?: number;
-    taxRate?: number;
-  };
+/**
+ * The parts of the POS business settings the storefront uses.
+ *
+ * `/api/settings` proxies the POS endpoint, which returns the whole settings
+ * document. Only what the storefront actually renders is typed here.
+ */
+type BusinessSettingsPayload = {
   currencyRate?: number;
   taxRate?: number;
+  businessName?: string;
+  businessLogo?: string;
+  showBusinessLogoOnInvoice?: boolean;
+  invoiceFooterMessage?: string;
+  invoiceFooterImage?: string;
+  currentBranch?: string;
+  storeInfo?: {
+    address?: string;
+    phone?: string;
+    email?: string;
+  };
+};
+
+type SettingsResponse = BusinessSettingsPayload & {
+  data?: BusinessSettingsPayload;
   success?: boolean;
   error?: string;
 };
@@ -79,4 +96,45 @@ export function useTaxRate() {
     isLoading,
     error,
   };
+}
+
+/** Who the store is, as it should appear at the top of a customer invoice. */
+export type StoreProfile = {
+  businessName: string;
+  businessLogo: string;
+  showLogoOnInvoice: boolean;
+  invoiceFooterMessage: string;
+  invoiceFooterImage: string;
+  branchName: string;
+  address: string;
+  phone: string;
+  email: string;
+};
+
+/**
+ * Store identity for invoice headers.
+ *
+ * A customer invoice has to say who issued it. Everything here is optional at
+ * the source, so each field falls back to an empty string and the invoice simply
+ * omits whatever the owner has not configured rather than printing "undefined".
+ */
+export function useStoreProfile() {
+  const { data, isLoading, error } = useSettings();
+
+  const settings = data?.data ?? data ?? {};
+  const store = settings.storeInfo ?? {};
+
+  const profile: StoreProfile = {
+    businessName: settings.businessName?.trim() || "",
+    businessLogo: settings.businessLogo?.trim() || "",
+    showLogoOnInvoice: settings.showBusinessLogoOnInvoice ?? true,
+    invoiceFooterMessage: settings.invoiceFooterMessage?.trim() || "",
+    invoiceFooterImage: settings.invoiceFooterImage?.trim() || "",
+    branchName: settings.currentBranch?.trim() || "",
+    address: store.address?.trim() || "",
+    phone: store.phone?.trim() || "",
+    email: store.email?.trim() || "",
+  };
+
+  return { profile, isLoading, error };
 }
