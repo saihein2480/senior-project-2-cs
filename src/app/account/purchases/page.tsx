@@ -314,6 +314,15 @@ type Txn = {
     rejectionReason?: string;
   };
   refundRequest?: {
+    /**
+     * Lifecycle of the request, as written by the POS:
+     * `pending` -> `approved` -> `completed` (inspection passed, refund owed) or
+     * `completed_no_refund` (everything came back damaged), plus `rejected` when
+     * the owner turns the request down outright.
+     *
+     * See `describeRefundRequest` for why this must not be compared with only
+     * two of those values.
+     */
     status: string;
     type?: string; // "return" or "refund"
     reason?: string;
@@ -972,6 +981,68 @@ function OrderStatusTracker({ status }: { status: PurchaseOrderStatus }) {
   );
 }
 
+type RefundRequestTone = "pending" | "positive" | "negative" | "neutral";
+
+const REFUND_REQUEST_TONES: Record<RefundRequestTone, string> = {
+  pending: "border-rose-200 bg-rose-50",
+  positive: "border-green-200 bg-green-50",
+  negative: "border-red-200 bg-red-50",
+  neutral: "border-gray-200 bg-gray-50",
+};
+
+/**
+ * Statuses that mean the owner accepted the request and the return is underway
+ * or finished. Used to keep the return journey visible after inspection, which
+ * moves the status off `approved`.
+ */
+const ACCEPTED_REFUND_STATUSES = new Set([
+  "approved",
+  "completed",
+  "completed_no_refund",
+]);
+
+/**
+ * Headline and colour for a refund/return request.
+ *
+ * This exists because the POS writes five different statuses and the UI
+ * previously tested for only two of them, with everything else falling through
+ * to "Rejected". After the owner inspected returned goods the POS sets
+ * `completed`, so an approved-and-fully-refunded return was telling the customer
+ * their return had been rejected — while the refund receipt sat directly below
+ * it saying the money had been paid.
+ *
+ * The default case is deliberately neutral rather than negative: if the POS ever
+ * introduces another status, the worst outcome should be a vague message, never
+ * a false rejection.
+ */
+function describeRefundRequest(
+  status: string | undefined,
+  type: string | undefined,
+): { title: string; tone: RefundRequestTone } {
+  const noun = type === "return" ? "Return" : "Refund";
+
+  switch ((status || "").toLowerCase()) {
+    case "pending":
+      return { title: `⏳ ${noun} Request Pending`, tone: "pending" };
+    case "approved":
+      return { title: `✅ ${noun} Approved`, tone: "positive" };
+    case "completed":
+      return { title: `✅ ${noun} Completed`, tone: "positive" };
+    case "completed_no_refund":
+      // The return itself was accepted; only the refund was declined, because
+      // the goods came back unsellable. Saying "rejected" here would suggest the
+      // store never took the items back.
+      return {
+        title: `⚠️ ${noun} Received — No Refund Due`,
+        tone: "negative",
+      };
+    case "rejected":
+      return { title: `❌ ${noun} Rejected`, tone: "negative" };
+    default:
+      return { title: `${noun} Request Updated`, tone: "neutral" };
+  }
+}
+
 function PurchaseDetailsModal({
   row,
   displayStatus,
@@ -984,6 +1055,16 @@ function PurchaseDetailsModal({
   const items = row.items || [];
   const cancelRequest = row.cancellationRequest;
   const refundRequest = row.refundRequest;
+  const refundStatus = describeRefundRequest(
+    refundRequest?.status,
+    refundRequest?.type,
+  );
+  const normalisedRefundStatus = (refundRequest?.status || "").toLowerCase();
+  /** Owner accepted the request, so the return journey is worth showing. */
+  const refundAccepted = ACCEPTED_REFUND_STATUSES.has(normalisedRefundStatus);
+  /** Inspection found nothing resellable, so no money is coming back. */
+  const refundDeclinedAfterInspection =
+    normalisedRefundStatus === "completed_no_refund";
   const summary = getOrderSummary(row);
   const { profile: storeProfile } = useStoreProfile();
 
@@ -1096,26 +1177,18 @@ function PurchaseDetailsModal({
 
           {/* Refund/Return Request Status */}
           {refundRequest && (
-            <div className={`rounded-2xl border p-4 shadow-sm ${
-              refundRequest.status === "pending"
-                ? "border-rose-200 bg-rose-50"
-                : refundRequest.status === "approved"
-                ? "border-green-200 bg-green-50"
-                : "border-red-200 bg-red-50"
-            }`}>
+            <div
+              className={`rounded-2xl border p-4 shadow-sm ${
+                REFUND_REQUEST_TONES[refundStatus.tone]
+              }`}
+            >
               <div className="flex items-start gap-2">
                 <div className="flex-1">
                   {/* Status Title */}
-                  <p className="font-medium text-sm">
-                    {refundRequest.status === "pending"
-                      ? (refundRequest.type === "return" ? "⏳ Return Request Pending" : "⏳ Refund Request Pending")
-                      : refundRequest.status === "approved"
-                      ? (refundRequest.type === "return" ? "✅ Return Approved" : "✅ Refund Approved")
-                      : (refundRequest.type === "return" ? "❌ Return Rejected" : "❌ Refund Rejected")}
-                  </p>
-                  
+                  <p className="font-medium text-sm">{refundStatus.title}</p>
+
                   {/* Return Journey Progress (only for return type) */}
-                  {refundRequest.type === "return" && refundRequest.status === "approved" && (
+                  {refundRequest.type === "return" && refundAccepted && (
                     <div className="mt-3 space-y-2">
                       <p className="text-xs font-semibold text-gray-700 mb-2">Return Journey:</p>
                       <div className="space-y-1.5">
@@ -1160,7 +1233,15 @@ function PurchaseDetailsModal({
                         {/* Step 4: Refund Processing */}
                         {refundRequest.inspectionCompleted && (
                           <div className="flex items-center gap-2 text-xs">
-                            {row.refunds && row.refunds.length > 0 ? (
+                            {refundDeclinedAfterInspection ? (
+                              // No refund is coming, so "Processing Refund
+                              // Payment" would leave the customer waiting for
+                              // money that was never approved.
+                              <>
+                                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white font-medium">!</span>
+                                <span className="text-red-700 font-medium">No Refund Due — Items Not Resellable</span>
+                              </>
+                            ) : row.refunds && row.refunds.length > 0 ? (
                               <>
                                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-green-500 text-white font-medium">✓</span>
                                 <span className="text-gray-700">Refund Processed</span>
@@ -1209,7 +1290,7 @@ function PurchaseDetailsModal({
                   )}
                   
                   {/* Cancellation Type Info */}
-                  {refundRequest.type === "cancellation" && refundRequest.status === "approved" && (
+                  {refundRequest.type === "cancellation" && refundAccepted && (
                     <div className="mt-2 p-2.5 bg-amber-50 rounded-xl border border-amber-200">
                       <p className="text-xs text-amber-800">
                         💰 Your cancellation refund is being processed. Check refund details below.
@@ -1237,13 +1318,16 @@ function PurchaseDetailsModal({
                   <p className="text-xs mt-1 text-gray-600">
                     Requested: {refundRequest.requestedAt ? new Date(refundRequest.requestedAt).toLocaleString() : "-"}
                   </p>
+                  {/* Label follows whichever timestamp the POS actually wrote.
+                      Deriving it from the status instead meant an approved
+                      request that had moved on to "completed" printed its
+                      approval time under the word "Rejected". */}
                   {(refundRequest.approvedAt || refundRequest.rejectedAt) && (
                     <p className="text-xs text-gray-600">
-                      {refundRequest.status === "approved" ? "Approved" : "Rejected"}: {
-                        (refundRequest.approvedAt || refundRequest.rejectedAt)
-                          ? new Date(refundRequest.approvedAt || refundRequest.rejectedAt || "").toLocaleString()
-                          : "-"
-                      }
+                      {refundRequest.approvedAt ? "Approved" : "Rejected"}:{" "}
+                      {new Date(
+                        refundRequest.approvedAt || refundRequest.rejectedAt || "",
+                      ).toLocaleString()}
                     </p>
                   )}
                 </div>
@@ -2721,8 +2805,15 @@ function PurchaseRow({
   const hasPendingRefund = row.refundRequest?.status === "pending";
   const hasApprovedCancellation = row.cancellationRequest?.status === "approved";
   const hasRejectedCancellation = row.cancellationRequest?.status === "rejected";
-  const hasApprovedRefund = row.refundRequest?.status === "approved";
-  const hasRejectedRefund = row.refundRequest?.status === "rejected";
+  // "completed" is what the POS writes once returned goods pass inspection, so
+  // it belongs with "approved" here — testing for "approved" alone made the chip
+  // vanish at the exact moment the return succeeded.
+  const hasApprovedRefund = ["approved", "completed"].includes(
+    (row.refundRequest?.status || "").toLowerCase(),
+  );
+  const hasRejectedRefund = ["rejected", "completed_no_refund"].includes(
+    (row.refundRequest?.status || "").toLowerCase(),
+  );
 
   // Check if order has completed refunds
   const hasCompletedRefunds = row.refunds && row.refunds.some(r => r.status === "completed");
@@ -2917,8 +3008,15 @@ function PurchaseCard({
   const hasPendingRefund = row.refundRequest?.status === "pending";
   const hasApprovedCancellation = row.cancellationRequest?.status === "approved";
   const hasRejectedCancellation = row.cancellationRequest?.status === "rejected";
-  const hasApprovedRefund = row.refundRequest?.status === "approved";
-  const hasRejectedRefund = row.refundRequest?.status === "rejected";
+  // "completed" is what the POS writes once returned goods pass inspection, so
+  // it belongs with "approved" here — testing for "approved" alone made the chip
+  // vanish at the exact moment the return succeeded.
+  const hasApprovedRefund = ["approved", "completed"].includes(
+    (row.refundRequest?.status || "").toLowerCase(),
+  );
+  const hasRejectedRefund = ["rejected", "completed_no_refund"].includes(
+    (row.refundRequest?.status || "").toLowerCase(),
+  );
 
   // Check if order has completed refunds
   const hasCompletedRefunds = row.refunds && row.refunds.some(r => r.status === "completed");
