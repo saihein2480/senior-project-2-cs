@@ -17,7 +17,13 @@ export interface OrderInfo {
   orderId: string;
   orderRef: string;
   status: string;
+  /**
+   * Payment instrument as stored (`scan`, `cod`), falling back to the gateway
+   * when the field is absent — 147 of 248 orders have no `paymentMethod`.
+   */
   paymentMethod: string;
+  /** Payment gateway as stored: `MMPAY` or `COD`. */
+  paymentProvider: string;
   paymentStatus: string;
   totalAmount: number;
   createdAt: Date;
@@ -99,6 +105,7 @@ function mapOrder(id: string, data: Record<string, unknown>): OrderInfo {
     orderRef: String(data.orderRef || data.orderId || id),
     status: String(data.status || "pending"),
     paymentMethod: String(data.paymentMethod || data.provider || "COD"),
+    paymentProvider: String(data.provider || ""),
     paymentStatus: String(data.paymentStatus || "pending"),
     totalAmount: storedTotal || cartSubtotal || fromMmk || 0,
     createdAt: toDate(data.createdAt),

@@ -5,6 +5,13 @@
 
 import type { SearchProduct } from "../productSearch";
 import type { OrderInfo } from "../orderSupport";
+import {
+  getPaymentMethodLabel,
+  getPaymentStatusLabel,
+  getPurchaseOrderStatusLabel,
+  normalizePurchaseOrderStatus,
+  type PurchaseOrderStatus,
+} from "../orderLabels";
 
 /**
  * Escape special characters for Telegram MarkdownV2
@@ -359,57 +366,63 @@ export function formatProductDetail(product: ProductDetailLike): string {
 }
 
 /**
- * Format order status icon
+ * Icon for an order's position on the fulfilment path.
+ *
+ * Keyed on the normalised status rather than the raw stored value, so the eight
+ * different tokens `onlineOrders.status` actually holds all land somewhere.
  */
-function getOrderStatusIcon(status: string): string {
-  const statusMap: Record<string, string> = {
+function getOrderStatusIcon(status: string, paymentStatus?: string): string {
+  const iconMap: Record<PurchaseOrderStatus, string> = {
     pending: "⏳",
-    // `onlineOrders` stores "paid" for a settled order; without it every paid
-    // order fell through to the generic 📋 clipboard.
-    paid: "✅",
-    confirmed: "✅",
-    processing: "📦",
-    shipped: "🚚",
+    packaging: "📦",
+    delivering: "🚚",
     delivered: "🎉",
+    failed: "⚠️",
     cancelled: "❌",
-    refunded: "💰",
+    fully_returned: "↩️",
+    partially_returned: "↩️",
   };
-  return statusMap[status.toLowerCase()] || "📋";
+  return iconMap[normalizePurchaseOrderStatus(status, paymentStatus)];
 }
 
 /**
- * Format order for Telegram message
+ * Format one order for Telegram.
+ *
+ * HTML, and every state is spelled out with the same wording the website uses.
+ * Raw tokens were being printed before — a customer was shown `scan` and
+ * `SUCCESS` rather than "MyanMyanPay (QR Scan)" and "Paid".
  */
 export function formatOrder(order: OrderInfo): string {
   const parts: string[] = [];
 
-  const statusIcon = getOrderStatusIcon(order.status);
-  parts.push(`📦 *Order ${escapeMarkdown(order.orderRef)}*\n`);
-  parts.push(`${statusIcon} *Status:* ${escapeMarkdown(order.status)}`);
-  parts.push(`💳 *Payment:* ${escapeMarkdown(order.paymentMethod)} \\(${escapeMarkdown(order.paymentStatus)}\\)`);
-  parts.push(`💰 *Total:* ${escapeMarkdown(formatPrice(order.totalAmount))}\n`);
+  const statusIcon = getOrderStatusIcon(order.status, order.paymentStatus);
+  parts.push(`📦 <b>Order ${escapeHtml(order.orderRef)}</b>\n`);
+  parts.push(...orderStateLines(order, statusIcon));
+  parts.push(`💰 Total - ${escapeHtml(formatPrice(order.totalAmount))}\n`);
 
   if (order.items && order.items.length > 0) {
-    parts.push(`📋 *Items:*`);
+    parts.push(`📋 <b>Items</b>`);
     order.items.forEach((item) => {
       parts.push(
-        `  • ${escapeMarkdown(item.productName)} x${item.quantity} \\- ${escapeMarkdown(formatPrice(item.price))}`
+        `  • ${escapeHtml(item.productName)} x${item.quantity} — ${escapeHtml(formatPrice(item.price))}`,
       );
     });
     parts.push("");
   }
 
   if (order.trackingNumber) {
-    parts.push(`🔢 *Tracking:* ${escapeMarkdown(order.trackingNumber)}`);
+    parts.push(`🔢 Tracking - ${escapeHtml(order.trackingNumber)}`);
   }
 
   const orderDate = new Date(order.createdAt);
   parts.push(
-    `📅 *Ordered:* ${escapeMarkdown(orderDate.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    }))}`
+    `📅 Ordered - ${escapeHtml(
+      orderDate.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      }),
+    )}`,
   );
 
   return parts.join("\n");
@@ -418,6 +431,29 @@ export function formatOrder(order: OrderInfo): string {
 /** Escape the three characters that mean something to Telegram's HTML parser. */
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * The three labelled state lines shown for an order, in a fixed order.
+ *
+ * Payment status, order status and payment method are separate facts and were
+ * previously collapsed into one ambiguous `pending • scan` line, where it was
+ * impossible to tell which value meant what.
+ */
+function orderStateLines(order: OrderInfo, statusIcon: string): string[] {
+  return [
+    `💳 Payment Status - ${escapeHtml(
+      getPaymentStatusLabel(order.status, order.paymentStatus),
+    )}`,
+    `${statusIcon} Order Status - ${escapeHtml(
+      getPurchaseOrderStatusLabel(
+        normalizePurchaseOrderStatus(order.status, order.paymentStatus),
+      ),
+    )}`,
+    `🏦 Payment Method - ${escapeHtml(
+      getPaymentMethodLabel(order.paymentMethod, order.paymentProvider),
+    )}`,
+  ];
 }
 
 /**
@@ -442,12 +478,12 @@ export function formatOrderList(orders: OrderInfo[]): string {
   parts.push(`📦 <b>Your Recent Orders</b>\n`);
 
   orders.forEach((order, index) => {
-    const statusIcon = getOrderStatusIcon(order.status);
+    const statusIcon = getOrderStatusIcon(order.status, order.paymentStatus);
     parts.push(
-      `${index + 1}. ${statusIcon} <b>${escapeHtml(order.orderRef)}</b> — ${escapeHtml(formatPrice(order.totalAmount))}`,
+      `${index + 1}. <b>${escapeHtml(order.orderRef)}</b> — ${escapeHtml(formatPrice(order.totalAmount))}`,
     );
-    parts.push(
-      `   ${escapeHtml(order.status)} • ${escapeHtml(order.paymentMethod)}`,
+    orderStateLines(order, statusIcon).forEach((line) =>
+      parts.push(`   ${line}`),
     );
     parts.push("");
   });

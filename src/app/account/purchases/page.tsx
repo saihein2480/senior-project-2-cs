@@ -11,6 +11,14 @@ import {
   MAX_QR_DATA_URL_BYTES,
   fileToCompressedDataUrl,
 } from "../../../lib/imageCompression";
+// Shared with the Telegram bot so both describe an order's state identically.
+import {
+  getPaymentStatusLabel,
+  getPurchaseOrderStatusLabel,
+  normalizePaymentStatus,
+  normalizePurchaseOrderStatus,
+  type PurchaseOrderStatus,
+} from "../../../lib/orderLabels";
 
 type IconProps = {
   size?: number;
@@ -306,16 +314,6 @@ type Txn = {
   customerUid?: string;
 };
 
-type PurchaseOrderStatus =
-  | "pending"
-  | "packaging"
-  | "delivering"
-  | "delivered"
-  | "failed"
-  | "cancelled"
-  | "fully_returned"
-  | "partially_returned";
-
 type OnlineOrderLookup = {
   orderId?: string;
   status?: string;
@@ -324,45 +322,6 @@ type OnlineOrderLookup = {
     uid?: string;
   };
 };
-
-function normalizePurchaseOrderStatus(
-  status?: string,
-  paymentStatus?: string,
-): PurchaseOrderStatus {
-  const combined = `${(status || "").toLowerCase()} ${(paymentStatus || "").toLowerCase()}`;
-
-  if (/(packaging|packed|preparing)/.test(combined)) return "packaging";
-  if (/(delivering|shipping|shipped|in_transit)/.test(combined)) {
-    return "delivering";
-  }
-  if (/(delivered|fulfilled|received)/.test(combined)) return "delivered";
-  if (/(fail|failed|error|declined|stock_conflict)/.test(combined)) {
-    return "failed";
-  }
-  if (/(fully_returned)/.test(combined)) {
-    return "fully_returned";
-  }
-  if (/(partially_returned)/.test(combined)) {
-    return "partially_returned";
-  }
-  if (/(cancelled|canceled|void)/.test(combined)) {
-    return "cancelled";
-  }
-
-  // Paid/successful payment starts the fulfillment workflow from pending.
-  return "pending";
-}
-
-function getPurchaseOrderStatusLabel(status: PurchaseOrderStatus) {
-  if (status === "pending") return "Pending";
-  if (status === "packaging") return "Packaging";
-  if (status === "delivering") return "Delivering";
-  if (status === "delivered") return "Delivered";
-  if (status === "failed") return "Failed";
-  if (status === "fully_returned") return "Fully Returned";
-  if (status === "partially_returned") return "Partially Returned";
-  return "Cancelled";
-}
 
 function resolvePurchaseOrderStatus(
   row: Txn,
@@ -405,58 +364,6 @@ function resolvePurchaseOrderStatus(
   
   // Finally, fall back to normalizing from payment status
   return normalizePurchaseOrderStatus(row.status);
-}
-
-function normalizePaymentStatus(
-  status?: string,
-  paymentStatus?: string,
-): "pending" | "paid" | "failed" | "cancelled" | "refunded" | "partially_refunded" | "pending_refund" | "refund_rejected" | "unknown" {
-  // First check paymentStatus field if available (for COD and online orders)
-  if (paymentStatus) {
-    const ps = paymentStatus.toLowerCase();
-    if (/(success|succeeded|paid|completed)/.test(ps)) return "paid";
-    if (/(pending_refund)/.test(ps)) return "pending_refund";
-    if (/(refund_rejected)/.test(ps)) return "refund_rejected";
-    if (/(partially_refunded|partial)/.test(ps)) return "partially_refunded";
-    if (/(refunded)/.test(ps)) return "refunded";
-    if (/(pending|processing|created|initiated)/.test(ps)) return "pending";
-    if (/(fail|failed|error|declined|stock_conflict)/.test(ps)) return "failed";
-    if (/(cancelled|canceled|void)/.test(ps)) return "cancelled";
-  }
-  
-  // Fallback to status field
-  const raw = (status || "").toLowerCase();
-
-  if (/(success|succeeded|paid|completed)/.test(raw)) return "paid";
-  if (/(pending_refund)/.test(raw)) return "pending_refund";
-  if (/(refund_rejected)/.test(raw)) return "refund_rejected";
-  if (/(pending|processing|created|initiated)/.test(raw)) return "pending";
-  if (/(fail|failed|error|declined|stock_conflict)/.test(raw)) {
-    return "failed";
-  }
-  if (/(cancelled|canceled|void)/.test(raw)) return "cancelled";
-  // Check for partially_refunded BEFORE refunded to avoid false match
-  if (/(partially_refunded|partial)/.test(raw)) return "partially_refunded";
-  if (/(refunded)/.test(raw)) return "refunded";
-  
-  // If no match, treat as paid for delivered/completed orders
-  return "unknown";
-}
-
-function getPaymentStatusLabel(status?: string, paymentStatus?: string) {
-  // Prioritize paymentStatus field, then fall back to status
-  const normalized = normalizePaymentStatus(status, paymentStatus);
-  if (normalized === "paid") return "Paid";
-  if (normalized === "pending_refund") return "Pending Refund";
-  if (normalized === "refund_rejected") return "Refund Rejected";
-  if (normalized === "pending") return "Pending";
-  if (normalized === "failed") return "Failed";
-  if (normalized === "cancelled") return "Cancelled";
-  if (normalized === "refunded") return "Fully Refunded";
-  if (normalized === "partially_refunded") return "Partially Refunded";
-
-  const fallback = paymentStatus || status || "-";
-  return fallback.charAt(0).toUpperCase() + fallback.slice(1).toLowerCase();
 }
 
 function getStatusBadgeClass(status?: string) {

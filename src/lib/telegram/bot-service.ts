@@ -809,6 +809,9 @@ async function handleTrackCommand(ctx: BotContext, orderRef: string): Promise<vo
     await sendMessage({
       chat_id: ctx.chatId,
       text: orderText,
+      // formatOrder emits HTML; order refs and money carry characters
+      // MarkdownV2 would reject outright.
+      parse_mode: "HTML",
       reply_markup: createBackButton(),
     });
   } catch (error) {
