@@ -3,6 +3,11 @@ import { MMPaySDK } from "mmpay-node-sdk";
 import { adminDb } from "../../../../lib/firebase-admin";
 import { deductStockForPaidOnlineOrder } from "../../../../lib/onlineStockService";
 import { updateCustomerStats, syncOnlineCustomerToPos } from "../../../../lib/updateCustomerStats";
+import {
+  orderStatusFor,
+  shouldApplyCallback,
+  type MmpayCallbackStatus,
+} from "../../../../lib/mmpayCallback";
 
 type MmpayPayload = {
   orderId: string;
@@ -10,7 +15,7 @@ type MmpayPayload = {
   currency?: string;
   method?: string;
   vendor?: string;
-  status: "PENDING" | "SUCCESS" | "FAILED" | "REFUNDED";
+  status: MmpayCallbackStatus;
   condition?: "PRISTINE" | "TOUCHED" | "EXPIRED";
   transactionRefId?: string;
 };
@@ -309,25 +314,43 @@ export async function POST(req: Request) {
       );
     }
 
-    await adminDb
-      .collection("onlineOrders")
-      .doc(payload.orderId)
-      .set(
+    const orderRef = adminDb.collection("onlineOrders").doc(payload.orderId);
+    const currentSnap = await orderRef.get();
+    const currentPaymentStatus = currentSnap.data()?.paymentStatus;
+
+    if (!shouldApplyCallback(currentPaymentStatus, payload.status)) {
+      // Keep the evidence without touching the order's state, so a late QR
+      // expiry is still auditable. `updatedAt` is deliberately left alone: it
+      // drives the owner's ordering, and this event changed nothing.
+      console.warn(
+        `Ignoring ${payload.status} callback for ${payload.orderId}: already settled as ${currentPaymentStatus}`,
+      );
+
+      await orderRef.set(
         {
-          paymentStatus: payload.status,
-          status:
-            payload.status === "SUCCESS"
-              ? "paid"
-              : payload.status === "REFUNDED"
-                ? "refunded"
-                : payload.status === "FAILED"
-                  ? "failed"
-                  : "pending",
-          callbackPayload: payload,
-          updatedAt: new Date().toISOString(),
+          ignoredCallback: {
+            payload,
+            reason: `Order already settled as ${currentPaymentStatus}`,
+            receivedAt: new Date().toISOString(),
+          },
         },
         { merge: true },
       );
+
+      // Still a 200: the callback was received and understood. Anything else
+      // makes MyanMyanPay retry it indefinitely.
+      return NextResponse.json({ ok: true, applied: false });
+    }
+
+    await orderRef.set(
+      {
+        paymentStatus: payload.status,
+        status: orderStatusFor(payload.status),
+        callbackPayload: payload,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true },
+    );
 
     if (payload.status === "SUCCESS") {
       try {

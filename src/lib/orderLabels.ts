@@ -27,6 +27,8 @@ export type NormalisedPaymentStatus =
   | "partially_refunded"
   | "pending_refund"
   | "refund_rejected"
+  /** MyanMyanPay reports a lapsed QR session as EXPIRED. */
+  | "expired"
   | "unknown";
 
 /**
@@ -88,6 +90,7 @@ export function normalizePaymentStatus(
     if (/(partially_refunded|partial)/.test(ps)) return "partially_refunded";
     if (/(refunded)/.test(ps)) return "refunded";
     if (/(pending|processing|created|initiated)/.test(ps)) return "pending";
+    if (/(expired|timeout)/.test(ps)) return "expired";
     if (/(fail|failed|error|declined|stock_conflict)/.test(ps)) return "failed";
     if (/(cancelled|canceled|void)/.test(ps)) return "cancelled";
   }
@@ -99,6 +102,7 @@ export function normalizePaymentStatus(
   if (/(pending_refund)/.test(raw)) return "pending_refund";
   if (/(refund_rejected)/.test(raw)) return "refund_rejected";
   if (/(pending|processing|created|initiated)/.test(raw)) return "pending";
+  if (/(expired|timeout)/.test(raw)) return "expired";
   if (/(fail|failed|error|declined|stock_conflict)/.test(raw)) {
     return "failed";
   }
@@ -132,6 +136,7 @@ export function getPaymentStatusLabel(status?: string, paymentStatus?: string) {
   if (normalized === "pending_refund") return "Pending Refund";
   if (normalized === "refund_rejected") return "Refund Rejected";
   if (normalized === "pending") return "Pending";
+  if (normalized === "expired") return "Expired";
   if (normalized === "failed") return "Failed";
   if (normalized === "cancelled") return "Cancelled";
   if (normalized === "refunded") return "Fully Refunded";
