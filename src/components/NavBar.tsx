@@ -1362,13 +1362,13 @@ function NavBarContent() {
                   >
                     My Account
                   </Link>
-                  <Link
+                  {/* <Link
                     href={buildUrlWithBranch("/membership")}
                     onClick={() => setMenuOpen(false)}
                     className="block text-sm text-gray-600 hover:text-rose-600 transition-colors"
                   >
                     {!isMember && !membershipLoading ? "Join Membership" : "Membership & Rewards"}
-                  </Link>
+                  </Link> */}
                   <Link
                     href={buildUrlWithBranch("/account/purchases")}
                     onClick={() => setMenuOpen(false)}
