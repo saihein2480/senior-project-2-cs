@@ -5,6 +5,7 @@
 import type { InlineKeyboard, InlineKeyboardButton } from "./types";
 import type { SearchProduct } from "../productSearch";
 import type { OrderInfo } from "../orderSupport";
+import { publicSiteUrl } from "../publicUrl";
 
 /**
  * Create main menu keyboard
@@ -454,12 +455,15 @@ export function createConfirmationKeyboard(
   };
 }
 
-/** Storefront base URL with any trailing slashes removed. */
+/**
+ * Storefront base URL for links sent into a Telegram chat.
+ *
+ * Delegates to the shared resolver, which prefers a genuinely public address
+ * over the build-time `NEXT_PUBLIC_APP_URL` — a button pointing at localhost is
+ * useless to the customer and is rejected by Telegram anyway.
+ */
 export function storefrontBaseUrl(): string {
-  return (process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001").replace(
-    /\/+$/,
-    "",
-  );
+  return publicSiteUrl();
 }
 
 /**

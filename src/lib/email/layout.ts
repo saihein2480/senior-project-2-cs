@@ -7,6 +7,8 @@
  * notification only has to describe its own body.
  */
 
+import { publicSiteUrlFor } from "../publicUrl";
+
 /** Escape untrusted values before interpolating them into HTML. */
 export function escapeHtml(value: string) {
   return value
@@ -25,15 +27,12 @@ export function brandName() {
 /**
  * Storefront base URL used for links in outgoing mail.
  *
- * Falls back to the dev port rather than a relative path: a relative href is
- * useless once the message is sitting in somebody's inbox.
+ * Always absolute and, where it can be determined, the public address: a
+ * relative href is useless once the message is sitting in somebody's inbox, and
+ * so is a localhost one.
  */
 export function storefrontUrl(path = "") {
-  const base = (
-    process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001"
-  ).replace(/\/+$/, "");
-  if (!path) return base;
-  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  return publicSiteUrlFor(path);
 }
 
 /** One label/value row in the details table. */
