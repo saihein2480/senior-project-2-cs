@@ -594,6 +594,13 @@ export function truncateText(text: string, maxLength: number = 4096): string {
 /**
  * Format error message
  */
+/**
+ * Wrap a message as an error notice.
+ *
+ * Takes **plain text** — it escapes for MarkdownV2 itself. Passing pre-escaped
+ * text double-escapes it into a stray backslash plus an unescaped reserved
+ * character, which Telegram rejects with a 400, so the customer sees nothing.
+ */
 export function formatError(error: string): string {
   return `❌ *Error*\n\n${escapeMarkdown(error)}\n\nPlease try again or contact support if the problem persists\\.`;
 }

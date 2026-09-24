@@ -230,6 +230,37 @@ export default function ChatBot() {
     return formatPriceWithCurrency(priceTHB, currency, mmkRate);
   };
 
+  /**
+   * The same amount in the other currency.
+   *
+   * Prices are shown in both baht and kyat here, because customers compare the
+   * two and a single figure leaves them converting in their head. The selected
+   * currency still leads, so the navbar picker and `?currency=` keep their
+   * meaning; this is the supporting figure.
+   */
+  const formatPriceAlt = (priceTHB: number) => {
+    return formatPriceWithCurrency(
+      priceTHB,
+      currency === "THB" ? "MMK" : "THB",
+      mmkRate,
+    );
+  };
+
+  /**
+   * Below `md` the chat panel is `w-full h-full`, so it covers the page whole.
+   * Tapping a product used to navigate behind it, leaving the customer staring
+   * at the chat and wondering why nothing happened. On desktop the panel is a
+   * floating card and there is nothing to get out of the way of.
+   */
+  const closeIfCoveringViewport = () => {
+    if (
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 767px)").matches
+    ) {
+      setIsOpen(false);
+    }
+  };
+
   const sendMessage = async (content: string) => {
     if (!content.trim()) return;
 
@@ -482,6 +513,7 @@ export default function ChatBot() {
                           <Link
                             key={product.id}
                             href={`/product/${product.id}`}
+                            onClick={closeIfCoveringViewport}
                             className="flex gap-3 p-2 bg-white hover:bg-rose-50 rounded-lg transition-colors border border-rose-100"
                           >
                             <div className="relative w-16 h-16 flex-shrink-0 bg-white rounded-md overflow-hidden border border-gray-200">
@@ -520,9 +552,17 @@ export default function ChatBot() {
                                 {product.name}
                               </p>
                               <div className="flex items-center justify-between mt-1">
-                                <p className="text-sm text-rose-600 font-semibold">
-                                  {formatPrice(product.price)}
-                                </p>
+                                {/* Stacked rather than inline: this row also
+                                    carries the colour swatches, and two prices
+                                    side by side crowd it on a phone. */}
+                                <div className="min-w-0">
+                                  <p className="text-sm text-rose-600 font-semibold">
+                                    {formatPrice(product.price)}
+                                  </p>
+                                  <p className="text-[11px] text-gray-500">
+                                    {formatPriceAlt(product.price)}
+                                  </p>
+                                </div>
                                 {product.colors && product.colors.length > 0 && (
                                   <div className="flex gap-1">
                                     {product.colors.slice(0, 3).map((color, idx) => (
@@ -544,8 +584,13 @@ export default function ChatBot() {
                       {/* Total Price */}
                       <div className="flex items-center justify-between py-2 px-3 bg-white rounded-lg border border-rose-200">
                         <span className="font-semibold text-gray-700">Total Outfit Price:</span>
-                        <span className="text-lg font-bold text-rose-600">
-                          {formatPrice(message.outfit.totalPrice)}
+                        <span className="text-right">
+                          <span className="block text-lg font-bold text-rose-600">
+                            {formatPrice(message.outfit.totalPrice)}
+                          </span>
+                          <span className="block text-[11px] text-gray-500">
+                            {formatPriceAlt(message.outfit.totalPrice)}
+                          </span>
                         </span>
                       </div>
 
@@ -575,6 +620,7 @@ export default function ChatBot() {
                         <Link
                           key={product.id}
                           href={`/product/${product.id}`}
+                          onClick={closeIfCoveringViewport}
                           className="flex gap-3 p-2 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors border border-gray-200"
                         >
                           <div className="relative w-16 h-16 flex-shrink-0 bg-white rounded-md overflow-hidden">
@@ -609,6 +655,9 @@ export default function ChatBot() {
                             </p>
                             <p className="text-sm text-rose-600 font-semibold">
                               {formatPrice(product.price)}
+                              <span className="ml-1.5 text-xs font-normal text-gray-500">
+                                ({formatPriceAlt(product.price)})
+                              </span>
                             </p>
                             <p className="text-xs text-gray-500">
                               {product.stock > 0

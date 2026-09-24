@@ -142,7 +142,10 @@ async function handleCommand(ctx: BotContext): Promise<void> {
   } else {
     await sendMessage({
       chat_id: ctx.chatId,
-      text: formatError(`Unknown command: ${escapeMarkdown(command)}\n\nUse /help to see available commands\\.`),
+      // formatError escapes its argument, so this must be plain text.
+      text: formatError(
+        `Unknown command: ${command}\n\nUse /help to see available commands.`,
+      ),
     });
   }
 }
@@ -794,12 +797,24 @@ async function handleTrackCommand(ctx: BotContext, orderRef: string): Promise<vo
   await sendChatAction(ctx.chatId, "typing");
 
   try {
-    const order = await findOrderByRef(orderRef.trim());
+    // Prices are quoted here, so the owner's rate has to be loaded first.
+    // Without this the message falls back to NEXT_PUBLIC_MMK_RATE and quotes MMK
+    // at the wrong rate.
+    await primeCurrency();
+
+    // References are stored upper-case (all 249 of them) and are Firestore
+    // document ids, so a lower-case copy/paste would otherwise never match.
+    const order = await findOrderByRef(orderRef.trim().toUpperCase());
 
     if (!order) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: formatError(`Order ${escapeMarkdown(orderRef)} not found\\.\n\nPlease check the order reference and try again\\.`),
+        // Plain text: formatError escapes what it is given, so pre-escaping here
+        // produced a literal backslash and a bare `-`, which Telegram rejects —
+        // the customer got "Failed to track order" instead of "not found".
+        text: formatError(
+          `Order ${orderRef.trim()} not found.\n\nPlease check the order reference and try again.`,
+        ),
       });
       return;
     }
@@ -1015,12 +1030,16 @@ async function handleCancelOrderCommand(ctx: BotContext, orderRef: string): Prom
   await sendChatAction(ctx.chatId, "typing");
 
   try {
-    const order = await findOrderByRef(orderRef.trim());
+    // Same two corrections as /track: the confirmation quotes a price, and the
+    // reference has to be matched in the case it is stored in.
+    await primeCurrency();
+
+    const order = await findOrderByRef(orderRef.trim().toUpperCase());
 
     if (!order) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: formatError(`Order ${escapeMarkdown(orderRef)} not found\\.`),
+        text: formatError(`Order ${orderRef.trim()} not found.`),
       });
       return;
     }
@@ -1031,7 +1050,7 @@ async function handleCancelOrderCommand(ctx: BotContext, orderRef: string): Prom
     if (!cancelInfo.canCancel) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: formatError(cancelInfo.reason || "This order cannot be cancelled\\."),
+        text: formatError(cancelInfo.reason || "This order cannot be cancelled."),
       });
       return;
     }
