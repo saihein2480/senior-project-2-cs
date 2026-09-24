@@ -3003,6 +3003,26 @@ export default function PurchaseHistoryPage() {
   const [refundRow, setRefundRow] = useState<Txn | null>(null);
   const [refundDetailsRow, setRefundDetailsRow] = useState<Txn | null>(null);
 
+  /** Order reference this page was deep-linked to, via `?order=<ref>`. */
+  const [deepLinkOrder, setDeepLinkOrder] = useState("");
+
+  // Deep link support for `?order=<ref>`, used by the Telegram bot's per-order
+  // "view details" buttons. The date filter is widened at the same time: the
+  // default 30-day window would hide an older order and make the link look
+  // broken. Read from `window.location` rather than `useSearchParams` so the
+  // page needs no Suspense boundary.
+  useEffect(() => {
+    const ref = new URLSearchParams(window.location.search).get("order");
+    if (!ref) return;
+    // Reading the URL is exactly the external-system sync this rule tolerates,
+    // and it cannot move into a lazy initialiser without touching `window`
+    // during server rendering.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDeepLinkOrder(ref);
+    setSearchTerm(ref);
+    setDateRange("all");
+  }, []);
+
   useEffect(() => {
     if (!loading && !user) {
       router.push("/auth/login?redirect=/account/purchases");
@@ -3416,6 +3436,41 @@ export default function PurchaseHistoryPage() {
             </div>
           </div>
         </div>
+
+        {/* A deep link can point at an order that has no purchase record yet:
+            this table is built from completed transactions, and an order only
+            gets one once payment is confirmed. Say so, rather than showing an
+            empty table and leaving the customer to guess. */}
+        {deepLinkOrder &&
+          !pageLoading &&
+          !rows.some(
+            (row) =>
+              (row.onlineOrderId || "").toLowerCase() ===
+              deepLinkOrder.toLowerCase(),
+          ) && (
+            <div
+              role="status"
+              className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm"
+            >
+              <p className="text-sm font-semibold text-amber-900">
+                Order {deepLinkOrder} is not in your purchase history yet
+              </p>
+              <p className="mt-1 text-xs text-amber-800">
+                Orders appear here once payment is confirmed. If you have not
+                finished paying for this one, it is still waiting.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeepLinkOrder("");
+                  setSearchTerm("");
+                }}
+                className="mt-3 inline-flex items-center rounded-full border border-amber-300 bg-white px-4 py-2 text-xs font-semibold text-amber-900 transition-colors hover:bg-amber-100"
+              >
+                Show all purchases
+              </button>
+            </div>
+          )}
 
         <div className="mt-6 rounded-2xl border border-rose-100 bg-white p-4 shadow-sm">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">

@@ -364,6 +364,9 @@ export function formatProductDetail(product: ProductDetailLike): string {
 function getOrderStatusIcon(status: string): string {
   const statusMap: Record<string, string> = {
     pending: "⏳",
+    // `onlineOrders` stores "paid" for a settled order; without it every paid
+    // order fell through to the generic 📋 clipboard.
+    paid: "✅",
     confirmed: "✅",
     processing: "📦",
     shipped: "🚚",
@@ -412,27 +415,44 @@ export function formatOrder(order: OrderInfo): string {
   return parts.join("\n");
 }
 
+/** Escape the three characters that mean something to Telegram's HTML parser. */
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /**
- * Format order list for Telegram
+ * Format order list for Telegram.
+ *
+ * HTML, not MarkdownV2. The empty-state text ends in a full stop, and MarkdownV2
+ * requires a literal `.` to be escaped — so the old version was rejected by
+ * Telegram with a 400, the send threw, and a customer with no orders saw
+ * "Failed to load orders" instead of being told they have none. Order refs and
+ * prices carry `-` and `()` with the same hazard.
  */
 export function formatOrderList(orders: OrderInfo[]): string {
   if (orders.length === 0) {
-    return "📦 You don't have any orders yet.\n\nStart shopping with /products or /search";
+    return (
+      "📦 <b>No order history</b>\n\n" +
+      "You haven't placed any orders yet.\n\n" +
+      "Browse the shop with /products or /search to get started."
+    );
   }
 
   const parts: string[] = [];
-  parts.push(`📦 *Your Recent Orders*\n`);
+  parts.push(`📦 <b>Your Recent Orders</b>\n`);
 
   orders.forEach((order, index) => {
     const statusIcon = getOrderStatusIcon(order.status);
     parts.push(
-      `${index + 1}\\. ${statusIcon} *${escapeMarkdown(order.orderRef)}* \\- ${escapeMarkdown(formatPrice(order.totalAmount))}`
+      `${index + 1}. ${statusIcon} <b>${escapeHtml(order.orderRef)}</b> — ${escapeHtml(formatPrice(order.totalAmount))}`,
     );
-    parts.push(`   ${escapeMarkdown(order.status)} • ${escapeMarkdown(order.paymentMethod)}`);
+    parts.push(
+      `   ${escapeHtml(order.status)} • ${escapeHtml(order.paymentMethod)}`,
+    );
     parts.push("");
   });
 
-  parts.push("Tap an order to view details\\.");
+  parts.push("Open an order below to see the full details on our website.");
 
   return parts.join("\n");
 }

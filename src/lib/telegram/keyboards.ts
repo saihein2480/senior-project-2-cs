@@ -500,6 +500,40 @@ export function accountLinkUrl(token: string): string {
 }
 
 /**
+ * Absolute URL for one order inside the customer's purchase history.
+ *
+ * The history page has no per-order route, so the reference is passed as a query
+ * parameter and the page filters itself down to that order on load.
+ */
+export function orderDetailUrl(orderRef: string): string {
+  return `${storefrontBaseUrl()}/account/purchases?order=${encodeURIComponent(orderRef)}`;
+}
+
+/**
+ * One "view details" button per order, opening it on the website.
+ *
+ * Returns `null` when the storefront URL is not one Telegram will accept on a
+ * button — on a local build the caller must put the links in the message text
+ * instead, or the whole message is rejected.
+ */
+export function createOrderListKeyboard(
+  orderRefs: string[],
+): InlineKeyboard | null {
+  if (!isTelegramLinkableUrl(storefrontBaseUrl())) return null;
+
+  const rows: InlineKeyboardButton[][] = orderRefs.map((ref) => [
+    { text: `📄 ${ref}`, url: orderDetailUrl(ref) },
+  ]);
+
+  rows.push([
+    { text: "🧾 All purchases", url: `${storefrontBaseUrl()}/account/purchases` },
+  ]);
+  rows.push([{ text: "🏠 Main Menu", callback_data: "menu_main" }]);
+
+  return { inline_keyboard: rows };
+}
+
+/**
  * Create account link keyboard.
  *
  * Returns `null` when the storefront URL is not something Telegram will accept

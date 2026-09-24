@@ -736,10 +736,38 @@ async function handleOrdersCommand(ctx: BotContext): Promise<void> {
     const { findCustomerOrdersByUid } = await import("../orderSupport");
     const orders = await findCustomerOrdersByUid(customer.id, 10);
 
+    const body = formatOrderList(orders);
+
+    // Nothing to open when there is no history, so the empty state keeps the
+    // plain Back button.
+    if (orders.length === 0) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: body,
+        parse_mode: "HTML",
+        reply_markup: createBackButton(),
+      });
+      return;
+    }
+
+    const { createOrderListKeyboard, orderDetailUrl } = await import(
+      "./keyboards"
+    );
+    const keyboard = createOrderListKeyboard(orders.map((o) => o.orderRef));
+
     await sendMessage({
       chat_id: ctx.chatId,
-      text: formatOrderList(orders),
-      reply_markup: createBackButton(),
+      // On a local build Telegram rejects URL buttons, so the same links go into
+      // the body as tappable text rather than losing the message entirely.
+      text: keyboard
+        ? body
+        : `${body}\n\n` +
+          orders
+            .map((o) => `• ${o.orderRef}: ${orderDetailUrl(o.orderRef)}`)
+            .join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: keyboard || createBackButton(),
     });
   } catch (error) {
     console.error("Orders error:", error);
