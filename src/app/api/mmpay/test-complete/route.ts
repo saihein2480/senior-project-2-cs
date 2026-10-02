@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { adminDb } from "../../../../lib/firebase-admin";
 import { deductStockForPaidOnlineOrder } from "../../../../lib/onlineStockService";
 import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid";
+import { normalizeDeliveryFee } from "../../../../lib/deliveryFee";
 
 type CompleteTestRequest = {
   orderId?: string;
@@ -110,8 +111,11 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
   const discount = Number(order.discount || 0);
   const couponDiscountTHB = Number(order.couponDiscountTHB || 0);
   const taxRate = Number(order.taxRate || 0);
+  // Orders placed before delivery fees existed have none, which is 0.
+  const deliveryFee = normalizeDeliveryFee(order.deliveryFee);
   const total =
-    Number(order.total || 0) || Math.max(0, subtotal - discount) + tax;
+    Number(order.total || 0) ||
+    Math.max(0, subtotal - discount - couponDiscountTHB) + tax + deliveryFee;
 
   const orderExchangeRate = Number(order.exchangeRate || 0);
   const envExchangeRate = Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
@@ -147,6 +151,7 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
     tax,
     taxRate,
     discount,
+    deliveryFee,
     appliedPromotions: Array.isArray(order.appliedPromotions)
       ? order.appliedPromotions
       : [],
@@ -214,7 +219,8 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
       await LoyaltyService.awardPoints({
         customerId: customerUid,
         transactionId: payload.transactionRefId,
-        transactionAmount: total,
+        // Points are for what was bought, not for delivery.
+        transactionAmount: Math.max(0, total - deliveryFee),
         source: "online",
         description: `Online payment for order ${payload.orderId}`,
       });

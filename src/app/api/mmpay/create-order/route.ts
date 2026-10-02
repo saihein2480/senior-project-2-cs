@@ -1,7 +1,17 @@
 import { NextResponse } from "next/server";
 import { MMPaySDK } from "mmpay-node-sdk";
 import { adminDb } from "../../../../lib/firebase-admin";
-import { ensureStockAvailableForOrderInput } from "../../../../lib/onlineStockService";
+import {
+  createOrderWithStockReservation,
+  releaseStaleReservations,
+  releaseStockReservation,
+} from "../../../../lib/onlineStockService";
+import { DELIVERY_AREA_NOTICE, isDeliverableAddress } from "../../../../lib/deliveryArea";
+import { getDeliveryFeeTHB } from "../../../../lib/storeSettings";
+import {
+  deliveryFeeChangedMessage,
+  isSameDeliveryFee,
+} from "../../../../lib/deliveryFee";
 
 type CreateOrderRequest = {
   amountMmk: number;
@@ -51,7 +61,8 @@ type CreateOrderRequest = {
   tax?: number; // THB tax amount
   taxRate?: number; // Tax rate as a percentage (e.g. 7 for 7%)
   discount?: number; // THB discount amount (same as couponDiscountTHB)
-  total?: number; // THB total amount
+  deliveryFee?: number; // THB delivery fee the customer was shown at checkout
+  total?: number; // THB total amount, including the delivery fee
   exchangeRate?: number; // THB -> MMK rate used at checkout
   /**
    * Promotions that reduced this order, named.
@@ -231,24 +242,54 @@ export async function POST(req: Request) {
       );
     }
 
-    try {
-      await ensureStockAvailableForOrderInput(
-        adminDb,
-        body as unknown as Record<string, unknown>,
+    // Delivery is Tachileik-only; enforced here because the payload is
+    // client-supplied, not just on the checkout page.
+    if (!isDeliverableAddress(body.customer.address)) {
+      return NextResponse.json(
+        { error: DELIVERY_AREA_NOTICE },
+        { status: 400 },
       );
+    }
+
+    // The delivery fee is owned by POS Settings. Checked before any stock is
+    // reserved or a QR is issued, so a customer whose page still shows an old
+    // fee is asked to review the new total instead of being charged it.
+    let deliveryFee: number;
+    try {
+      deliveryFee = await getDeliveryFeeTHB();
+    } catch (feeError) {
+      console.error("Could not read delivery fee for QR order:", feeError);
+      return NextResponse.json(
+        { error: "Could not load the delivery fee. Please try again." },
+        { status: 503 },
+      );
+    }
+
+    if (!isSameDeliveryFee(body.deliveryFee, deliveryFee)) {
+      return NextResponse.json(
+        { error: deliveryFeeChangedMessage(deliveryFee), deliveryFee },
+        { status: 409 },
+      );
+    }
+
+    // Free stock held by checkouts nobody is going to pay for, including this
+    // customer's own earlier QR that has run out, before reserving again.
+    try {
+      await releaseStaleReservations(adminDb, {
+        customerUid: body.customer.uid,
+      });
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Stock validation failed";
-      return NextResponse.json({ error: message }, { status: 409 });
+      console.error("Failed to release stale stock reservations:", error);
     }
 
     const orderId = `ONL-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     const callbackUrl = process.env.MMPAY_CALLBACK_URL;
 
-    await adminDb
-      .collection("onlineOrders")
-      .doc(orderId)
-      .set({
+    // Reserve the stock and create the order in one transaction. If another
+    // buyer (online or at the till) got the last unit first, this fails here,
+    // before the customer is shown a QR code or charged anything.
+    try {
+      await createOrderWithStockReservation(adminDb, orderId, {
         orderId,
         source: "online",
         customer: body.customer,
@@ -261,6 +302,8 @@ export async function POST(req: Request) {
         tax: Number(body.tax || 0),
         taxRate: Number(body.taxRate || 0),
         discount: Number(body.discount || 0),
+        // Server-read fee (verified equal to what the customer saw above).
+        deliveryFee,
         appliedPromotions: body.appliedPromotions || [],
         total: Number(body.total || 0),
         exchangeRate: Number(body.exchangeRate || 0),
@@ -279,6 +322,25 @@ export async function POST(req: Request) {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Stock validation failed";
+      return NextResponse.json({ error: message }, { status: 409 });
+    }
+
+    // From here on the order holds stock. Any path that ends without a
+    // payable QR or link must hand it back.
+    const db = adminDb;
+    const releaseReservation = async (reason: string) => {
+      try {
+        await releaseStockReservation(db, orderId, reason);
+      } catch (releaseError) {
+        console.error(
+          `Failed to release stock reservation for ${orderId}:`,
+          releaseError,
+        );
+      }
+    };
 
     const paymentPayload = {
       orderId,
@@ -288,14 +350,26 @@ export async function POST(req: Request) {
       customMessage: `Order ${orderId}`,
     };
 
-    const payResponse = shouldUseSandboxMode()
-      ? await mmpay.sandboxPay(paymentPayload)
-      : await mmpay.pay(paymentPayload);
+    let payResponse: unknown;
+    try {
+      payResponse = shouldUseSandboxMode()
+        ? await mmpay.sandboxPay(paymentPayload)
+        : await mmpay.pay(paymentPayload);
+    } catch (payError) {
+      await releaseReservation("payment_init_failed");
+      throw payError;
+    }
 
     const safePayResponse = toFirestoreSafe(payResponse);
     const paymentUrl = extractPaymentUrl(payResponse);
     const qr = extractQr(payResponse);
     const sdkError = getSdkErrorMessage(payResponse);
+
+    if (!paymentUrl && !qr) {
+      // Nothing the customer can pay with; the checkout page treats this as
+      // a failure too.
+      await releaseReservation("payment_init_failed");
+    }
 
     if (!paymentUrl && !qr && sdkError) {
       const isUnauthorized =

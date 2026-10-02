@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCart } from "../../contexts/CartContext";
-import { useCurrencyRate } from "../../hooks/useSettings";
+import { useCurrencyRate, useDeliveryFee } from "../../hooks/useSettings";
 import { useOnlinePromotions } from "../../hooks/useOnlinePromotions";
 import { applyBestPromotionToLine } from "../../lib/onlinePromotion";
 
@@ -12,6 +12,8 @@ export default function CartPage() {
   const { items, subtotalTHB, isLoading, removeItem, updateQuantity, clearCart } =
     useCart();
   const { rate: mmkRate } = useCurrencyRate();
+  // Not shown until settings arrive, so "Free delivery" never flashes first.
+  const { deliveryFeeTHB, isLoading: deliveryFeeLoading } = useDeliveryFee();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
 
   const discountTHB = items.reduce((sum, item) => {
@@ -388,6 +390,14 @@ export default function CartPage() {
                 <div className="mt-0.5 text-sm font-medium text-gray-500">
                   Ks {finalSubtotalMMK.toLocaleString()}
                 </div>
+                {/* Set the expectation before checkout, where it is charged */}
+                {!deliveryFeeLoading && (
+                  <p className="mt-2 text-xs text-gray-500">
+                    {deliveryFeeTHB > 0
+                      ? `+ ฿ ${deliveryFeeTHB.toFixed(2)} delivery fee and tax at checkout`
+                      : "Free delivery. Tax is added at checkout"}
+                  </p>
+                )}
               </div>
 
               <div className="mt-5 space-y-2.5">

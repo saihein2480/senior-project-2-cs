@@ -5,6 +5,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCustomerAuth } from "../../../contexts/CustomerAuthContext";
 import { TelegramLinkCard } from "../../../components/TelegramLinkCard";
+import {
+  DELIVERY_AREA_LABEL,
+  DELIVERY_AREA_NOTICE,
+  composeDeliveryAddress,
+  findWard,
+  isDeliverableAddress,
+  parseDeliveryAddress,
+} from "../../../lib/deliveryArea";
+import { WardCombobox } from "../../../components/WardCombobox";
 
 export default function CustomerProfilePage() {
   const router = useRouter();
@@ -12,7 +21,9 @@ export default function CustomerProfilePage() {
 
   const [displayName, setDisplayName] = useState("");
   const [phone, setPhone] = useState("");
-  const [address, setAddress] = useState("");
+  // Delivery is Tachileik-only, so the city is fixed and only these vary.
+  const [addressLine, setAddressLine] = useState("");
+  const [addressWard, setAddressWard] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -26,18 +37,48 @@ export default function CustomerProfilePage() {
     if (!profile) return;
     setDisplayName(profile.displayName || "");
     setPhone(profile.phone || "");
-    setAddress(profile.address || "");
+
+    // Prefer the structured parts; fall back to splitting older free-text
+    // addresses so the customer doesn't have to retype everything.
+    // Only an official ward name is kept, so an old free-text ward is cleared
+    // and the customer re-picks it from the list.
+    if (profile.addressLine || profile.addressWard) {
+      setAddressLine(profile.addressLine || "");
+      setAddressWard(findWard(profile.addressWard)?.name || "");
+    } else {
+      const parsed = parseDeliveryAddress(profile.address || "");
+      setAddressLine(parsed.line);
+      setAddressWard(parsed.ward);
+    }
   }, [profile]);
+
+  // Saved address isn't a Tachileik ward address yet — shown as a warning.
+  const needsAddressUpdate =
+    !!profile?.address?.trim() && !isDeliverableAddress(profile.address);
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    setSaving(true);
     setMessage(null);
+
+    const line = addressLine.trim();
+    const ward = findWard(addressWard)?.name || "";
+    if ((line && !ward) || (!line && ward)) {
+      setMessage(
+        ward
+          ? "Please enter your house number / street in Tachileik."
+          : "Please select your ward or area in Tachileik from the list.",
+      );
+      return;
+    }
+
+    setSaving(true);
     try {
       await updateCustomerProfile({
         displayName: displayName.trim(),
         phone: phone.trim(),
-        address: address.trim(),
+        address: composeDeliveryAddress({ line, ward }),
+        addressLine: line,
+        addressWard: ward,
       });
       setMessage("Profile updated successfully.");
     } catch (err) {
@@ -200,26 +241,85 @@ export default function CustomerProfilePage() {
               />
             </div>
 
-            <div>
-              <label
-                htmlFor="profile-address"
-                className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-gray-500"
-              >
+            <fieldset className="space-y-3">
+              <legend className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-gray-500">
                 <svg className="h-3.5 w-3.5 text-rose-400" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24" aria-hidden>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z" />
                   <circle cx="12" cy="10" r="2.5" />
                 </svg>
-                Address
-              </label>
-              <textarea
-                id="profile-address"
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                rows={3}
-                placeholder="Where should we deliver your order?"
-                className="w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-900 transition-all placeholder:text-gray-400 focus:border-rose-300 focus:outline-none focus:ring-2 focus:ring-rose-200"
-              />
-            </div>
+                Delivery Address
+              </legend>
+
+              <p
+                id="profile-address-notice"
+                className="flex items-start gap-2 rounded-2xl border border-amber-100 bg-amber-50 px-4 py-2.5 text-xs font-medium text-amber-800"
+              >
+                <svg className="mt-0.5 h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {DELIVERY_AREA_NOTICE}
+              </p>
+
+              {needsAddressUpdate && (
+                <p
+                  role="alert"
+                  className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs font-medium text-rose-700"
+                >
+                  Your saved address needs updating. Please select your ward or
+                  area in Tachileik and check your street details, then save.
+                </p>
+              )}
+
+              <div>
+                <label
+                  htmlFor="profile-address-city"
+                  className="mb-1 block text-[11px] font-semibold text-gray-500"
+                >
+                  City
+                </label>
+                <input
+                  id="profile-address-city"
+                  value={DELIVERY_AREA_LABEL}
+                  disabled
+                  aria-describedby="profile-address-notice"
+                  className="w-full cursor-not-allowed rounded-2xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-500"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="profile-address-ward"
+                  className="mb-1 block text-[11px] font-semibold text-gray-500"
+                >
+                  Ward / Area <span className="font-normal">(ရပ်ကွက်)</span>
+                </label>
+                <WardCombobox
+                  id="profile-address-ward"
+                  value={addressWard}
+                  onChange={setAddressWard}
+                  describedBy="profile-address-notice"
+                  invalid={needsAddressUpdate && !addressWard}
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="profile-address-line"
+                  className="mb-1 block text-[11px] font-semibold text-gray-500"
+                >
+                  House No. / Street / Landmark
+                </label>
+                <textarea
+                  id="profile-address-line"
+                  value={addressLine}
+                  onChange={(e) => setAddressLine(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. No. 12, Johnnie Street, near the market"
+                  autoComplete="street-address"
+                  className="w-full resize-none rounded-2xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-900 transition-all placeholder:text-gray-400 focus:border-rose-300 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                />
+              </div>
+            </fieldset>
 
             {message && (
               <p className="flex items-start gap-2 rounded-2xl border border-rose-100 bg-rose-50/70 px-4 py-2.5 text-xs font-medium text-gray-700">

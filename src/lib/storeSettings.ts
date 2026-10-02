@@ -8,6 +8,7 @@
  */
 
 import { adminDb } from "./firebase-admin";
+import { normalizeDeliveryFee } from "./deliveryFee";
 
 /**
  * Fallback THB -> MMK rate.
@@ -58,4 +59,23 @@ export async function getMmkRate(): Promise<number> {
 
   cached = { rate, at: Date.now() };
   return rate;
+}
+
+/**
+ * The delivery fee (THB) the owner currently charges per online order.
+ *
+ * Deliberately uncached: the order routes compare it with the fee the customer
+ * was shown, and a stale copy would reject valid orders for up to a minute
+ * after the owner changes it. One document read per order is cheap.
+ *
+ * Throws when the settings cannot be read, so an order is never written with a
+ * guessed fee.
+ */
+export async function getDeliveryFeeTHB(): Promise<number> {
+  if (!adminDb) {
+    throw new Error("Server database is not configured");
+  }
+
+  const snap = await adminDb.collection("business_settings").doc("main").get();
+  return normalizeDeliveryFee(snap.data()?.deliveryFee);
 }

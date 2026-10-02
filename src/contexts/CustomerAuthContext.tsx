@@ -35,7 +35,12 @@ export type CustomerProfile = {
   email: string;
   displayName?: string;
   phone?: string;
+  /** Full delivery address, composed from the parts below (see deliveryArea.ts). */
   address?: string;
+  /** House number / street / landmark part of the address. */
+  addressLine?: string;
+  /** Ward (quarter) inside Tachileik. */
+  addressWard?: string;
   customerType?: "individual" | "retailer" | "wholesaler" | "other";
   /**
    * Set once the customer has entered the code we emailed them. Google
@@ -218,6 +223,8 @@ export function CustomerAuthProvider({
         displayName: data.displayName || firebaseUser.displayName || "Customer",
         phone: data.phone || "",
         address: data.address || "",
+        addressLine: data.addressLine || "",
+        addressWard: data.addressWard || "",
         customerType: data.customerType || "individual",
         emailVerified: data.emailVerified === true,
       });

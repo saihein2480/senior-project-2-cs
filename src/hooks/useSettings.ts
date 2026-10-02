@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { normalizeDeliveryFee } from "../lib/deliveryFee";
 
 /**
  * The parts of the POS business settings the storefront uses.
@@ -9,6 +10,8 @@ import { useQuery } from "@tanstack/react-query";
 type BusinessSettingsPayload = {
   currencyRate?: number;
   taxRate?: number;
+  /** Flat THB delivery fee per online order; 0 or missing = free. */
+  deliveryFee?: number;
   businessName?: string;
   businessLogo?: string;
   showBusinessLogoOnInvoice?: boolean;
@@ -93,6 +96,28 @@ export function useTaxRate() {
     taxRate: taxRatePercent / 100,
     taxRatePercent, // Percentage value for display
     hasTaxRate, // False until the real rate has loaded
+    isLoading,
+    error,
+  };
+}
+
+/**
+ * Delivery fee (THB) configured in POS Settings.
+ *
+ * Comes from the same settings response as the tax rate, so once `useTaxRate`
+ * reports `hasTaxRate` this value is loaded too. A missing value means the owner
+ * has not set a fee, which is free delivery.
+ */
+export function useDeliveryFee() {
+  const { data, isLoading, error } = useSettings();
+
+  const deliveryFeeTHB = normalizeDeliveryFee(
+    data?.data?.deliveryFee ?? data?.deliveryFee,
+  );
+
+  return {
+    deliveryFeeTHB,
+    isFreeDelivery: deliveryFeeTHB === 0,
     isLoading,
     error,
   };

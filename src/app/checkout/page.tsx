@@ -4,13 +4,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useProduct } from "../../hooks/useProducts";
-import { useCurrencyRate, useTaxRate } from "../../hooks/useSettings";
+import {
+  useCurrencyRate,
+  useDeliveryFee,
+  useTaxRate,
+} from "../../hooks/useSettings";
 import { useCustomerAuth } from "../../contexts/CustomerAuthContext";
 import { useCart } from "../../contexts/CartContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { useOnlinePromotions } from "../../hooks/useOnlinePromotions";
 import { applyBestPromotionToLine } from "../../lib/onlinePromotion";
 import { CouponService, type Coupon } from "../../lib/couponService";
+import { isDeliverableAddress } from "../../lib/deliveryArea";
 
 type ColorVariant = {
   id?: string;
@@ -48,6 +53,9 @@ export default function CheckoutPage() {
   const { t } = useLanguage();
   const { rate: mmkRate } = useCurrencyRate();
   const { taxRate, taxRatePercent, hasTaxRate } = useTaxRate();
+  // Same settings response as the tax rate, so it is loaded whenever
+  // `hasTaxRate` is true and the pay button is enabled.
+  const { deliveryFeeTHB } = useDeliveryFee();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
   const {
     items: cartItems,
@@ -229,17 +237,24 @@ export default function CheckoutPage() {
   
   const subtotalAfterCoupon = couponDiscount.finalAmount;
   const taxTHB = subtotalAfterCoupon * taxRate; // Use dynamic tax rate from POS settings
-  const totalTHB = subtotalAfterCoupon + taxTHB;
+  // Delivery is a flat fee from POS Settings, added after tax: it is not taxed
+  // and promotions/coupons never reduce it.
+  const totalTHB = subtotalAfterCoupon + taxTHB + deliveryFeeTHB;
   const promotionTitle =
     lineResults.find((row) => row.promotion?.name)?.promotion?.name ||
     "Promotion";
   const totalMMK = Math.round(totalTHB * mmkRate);
+  // Cannot exceed totalMMK: rounding is monotonic and the fee is part of it.
+  const deliveryFeeMMK = Math.round(deliveryFeeTHB * mmkRate);
 
   const missingProfileFields = useMemo(() => {
     const missing: string[] = [];
     if (!profile?.displayName?.trim()) missing.push("display name");
     if (!profile?.phone?.trim()) missing.push("phone");
     if (!profile?.address?.trim()) missing.push("address");
+    // We only deliver inside Tachileik, so an address elsewhere counts as missing.
+    else if (!isDeliverableAddress(profile.address))
+      missing.push("a delivery ward or area in Tachileik");
     return missing;
   }, [profile]);
 
@@ -377,6 +392,9 @@ export default function CheckoutPage() {
       // undiscounted total. Instead, allocate the final MMK total across the
       // lines in proportion to their value, letting the last line absorb any
       // rounding remainder so the sum matches totalMMK exactly.
+      // The delivery fee is its own gateway line, so only the goods (plus tax)
+      // are spread across the product lines.
+      const goodsMmk = totalMMK - deliveryFeeMMK;
       const linePromoTotalsTHB = checkoutLines.map(
         (line) => line.result.finalSubtotalTHB,
       );
@@ -386,7 +404,7 @@ export default function CheckoutPage() {
       );
 
       let allocatedMmk = 0;
-      const payloadItems = checkoutItems.map((item, index) => {
+      const productItems = checkoutItems.map((item, index) => {
         const isLastLine = index === checkoutItems.length - 1;
         const share =
           linesTotalTHB > 0
@@ -394,8 +412,8 @@ export default function CheckoutPage() {
             : 1 / checkoutItems.length;
 
         const lineMmk = isLastLine
-          ? totalMMK - allocatedMmk
-          : Math.max(0, Math.round(totalMMK * share));
+          ? goodsMmk - allocatedMmk
+          : Math.max(0, Math.round(goodsMmk * share));
         allocatedMmk += lineMmk;
 
         const variantLabel = [item.color, item.size].filter(Boolean).join(", ");
@@ -412,7 +430,12 @@ export default function CheckoutPage() {
         };
         // Zero-value lines are dropped below; they contribute nothing to the
         // sum, so the itemisation still reconciles with totalMMK.
-      }).filter((line) => line.amount > 0);
+      });
+
+      const payloadItems = [
+        ...productItems,
+        { name: "Delivery fee", amount: deliveryFeeMMK, quantity: 1 },
+      ].filter((line) => line.amount > 0);
 
       const response = await fetch("/api/mmpay/create-order", {
         method: "POST",
@@ -424,7 +447,8 @@ export default function CheckoutPage() {
           discount: discountTHB, // Promotion discount only; coupon tracked separately
           tax: taxTHB, // Tax amount
           taxRate: taxRatePercent, // Rate actually applied, for accurate display later
-          total: totalTHB, // Final total
+          deliveryFee: deliveryFeeTHB, // Flat fee shown to the customer; checked server-side
+          total: totalTHB, // Final total, including the delivery fee
           exchangeRate: mmkRate, // Rate used for the MMK amount
           customer: {
             uid: user.uid,
@@ -580,6 +604,9 @@ export default function CheckoutPage() {
           couponId: activeCoupon?.id || null,
           taxTHB: taxTHB,
           taxRatePercent: taxRatePercent,
+          // Fee the customer was shown; the server rejects the order if the
+          // owner has changed it since, rather than charging a different total.
+          deliveryFeeTHB: deliveryFeeTHB,
           totalTHB: totalTHB,
           exchangeRate: mmkRate,
         }),
@@ -1032,6 +1059,25 @@ export default function CheckoutPage() {
             <span className="text-sm font-semibold text-gray-900">
               ฿ {taxTHB.toFixed(2)}
             </span>
+          </div>
+
+          {/* Delivery fee - always shown so the customer knows before paying */}
+          <div className="flex items-center justify-between gap-3 py-1">
+            <span className="text-xs font-medium text-gray-500">
+              Delivery Fee
+            </span>
+            {!hasTaxRate ? (
+              // Settings still loading; avoid flashing "Free" before the fee.
+              <span className="text-sm font-semibold text-gray-400">—</span>
+            ) : deliveryFeeTHB > 0 ? (
+              <span className="text-sm font-semibold text-gray-900">
+                ฿ {deliveryFeeTHB.toFixed(2)}
+              </span>
+            ) : (
+              <span className="text-sm font-semibold text-emerald-700">
+                Free
+              </span>
+            )}
           </div>
 
           <div className="mt-4 border-t border-rose-100 pt-4">

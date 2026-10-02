@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 import { MMPaySDK } from "mmpay-node-sdk";
 import { adminDb } from "../../../../lib/firebase-admin";
-import { deductStockForPaidOnlineOrder } from "../../../../lib/onlineStockService";
+import {
+  deductStockForPaidOnlineOrder,
+  releaseStockReservation,
+} from "../../../../lib/onlineStockService";
 import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid";
+import { normalizeDeliveryFee } from "../../../../lib/deliveryFee";
 import {
   orderStatusFor,
   shouldApplyCallback,
@@ -129,8 +133,11 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
   const discount = Number(order.discount || 0);
   const couponDiscountTHB = Number(order.couponDiscountTHB || 0);
   const taxRate = Number(order.taxRate || 0);
+  // Orders placed before delivery fees existed have none, which is 0.
+  const deliveryFee = normalizeDeliveryFee(order.deliveryFee);
   const total =
-    Number(order.total || 0) || Math.max(0, subtotal - discount) + tax;
+    Number(order.total || 0) ||
+    Math.max(0, subtotal - discount - couponDiscountTHB) + tax + deliveryFee;
 
   const orderExchangeRate = Number(order.exchangeRate || 0);
   const envExchangeRate = Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
@@ -167,6 +174,7 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
     tax,
     taxRate,
     discount,
+    deliveryFee,
     // Named promotions, copied from the order so the invoice can report which
     // promotion applied rather than just a smaller number.
     appliedPromotions: Array.isArray(order.appliedPromotions)
@@ -386,6 +394,24 @@ export async function POST(req: Request) {
         );
 
         return NextResponse.json({ error: message }, { status: 409 });
+      }
+    }
+
+    // The QR lapsed or the payment failed: give the reserved stock back so
+    // other buyers and the POS can sell it. A later SUCCESS for the same
+    // order takes it again (see deductStockForPaidOnlineOrder).
+    if (payload.status === "FAILED" || payload.status === "EXPIRED") {
+      try {
+        await releaseStockReservation(
+          adminDb,
+          payload.orderId,
+          `payment_${payload.status.toLowerCase()}`,
+        );
+      } catch (error) {
+        console.error(
+          `Failed to release stock reservation for ${payload.orderId}:`,
+          error,
+        );
       }
     }
 

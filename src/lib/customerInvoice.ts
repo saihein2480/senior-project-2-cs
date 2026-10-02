@@ -70,6 +70,8 @@ export type InvoiceTotals = {
   couponDiscount: number;
   taxPercent: number;
   tax: number;
+  /** Flat delivery fee in THB, charged after tax. 0 or missing = none. */
+  deliveryFee?: number;
   total: number;
   totalSavings: number;
   /** Total in MMK, when the order recorded an amount or a rate. */
@@ -254,6 +256,14 @@ function buildTotalsHtml(totals: InvoiceTotals): string {
       thb(totals.tax),
     )}</td></tr>`,
   );
+
+  if (typeof totals.deliveryFee === "number" && totals.deliveryFee > 0) {
+    rows.push(
+      `<tr><td>Delivery fee</td><td class="right">${escapeHtml(
+        thb(totals.deliveryFee),
+      )}</td></tr>`,
+    );
+  }
 
   rows.push(
     `<tr class="grand"><td>Total</td><td class="right">${escapeHtml(thb(totals.total))}</td></tr>`,

@@ -2,6 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
 import { syncOnlineCustomerToPos } from "@/lib/updateCustomerStats";
+import { DELIVERY_AREA_NOTICE, isDeliverableAddress } from "@/lib/deliveryArea";
+import { createCodOrderWithStock } from "@/lib/onlineStockService";
+import { getDeliveryFeeTHB } from "@/lib/storeSettings";
+import {
+  deliveryFeeChangedMessage,
+  isSameDeliveryFee,
+} from "@/lib/deliveryFee";
 
 export async function POST(request: NextRequest) {
   try {
@@ -20,6 +27,7 @@ export async function POST(request: NextRequest) {
       discountTHB,
       taxTHB,
       taxRatePercent,
+      deliveryFeeTHB,
       totalTHB,
       exchangeRate,
       couponCode,
@@ -33,6 +41,36 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Missing required fields" },
         { status: 400 }
+      );
+    }
+
+    // Delivery is Tachileik-only; the checkout page checks this too, but the
+    // payload is client-supplied so it is enforced here as well.
+    if (!isDeliverableAddress(customer.address)) {
+      return NextResponse.json(
+        { error: DELIVERY_AREA_NOTICE },
+        { status: 400 }
+      );
+    }
+
+    // The delivery fee comes from POS Settings, not the request. If the owner
+    // changed it after the customer loaded checkout, stop here so the customer
+    // re-confirms the new total instead of being billed a different amount.
+    let deliveryFee: number;
+    try {
+      deliveryFee = await getDeliveryFeeTHB();
+    } catch (feeError) {
+      console.error("Could not read delivery fee for COD order:", feeError);
+      return NextResponse.json(
+        { error: "Could not load the delivery fee. Please try again." },
+        { status: 503 }
+      );
+    }
+
+    if (!isSameDeliveryFee(deliveryFeeTHB, deliveryFee)) {
+      return NextResponse.json(
+        { error: deliveryFeeChangedMessage(deliveryFee), deliveryFee },
+        { status: 409 }
       );
     }
 
@@ -80,7 +118,8 @@ export async function POST(request: NextRequest) {
     const taxRate = Number(taxRatePercent || 0); // Percentage actually applied
     const couponDiscount = Number(couponDiscountTHB || 0);
     const total =
-      totalTHB || Math.max(0, subtotal - discount - couponDiscount) + tax;
+      totalTHB ||
+      Math.max(0, subtotal - discount - couponDiscount) + tax + deliveryFee;
 
     /**
      * Promotions that reduced this order, named.
@@ -155,6 +194,7 @@ export async function POST(request: NextRequest) {
       tax,
       taxRate,
       discount,
+      deliveryFee, // Flat THB fee from POS Settings; already included in `total`
       total,
       appliedPromotions: promotions,
       amountPaid: total, // For COD, amount paid equals total (will be paid on delivery)
@@ -189,9 +229,6 @@ export async function POST(request: NextRequest) {
       orderSource: "web_storefront",
       customerUid: customer.uid,
     };
-
-    // Save transaction to Firebase
-    const docRef = await adminDb.collection("transactions").add(transactionData);
 
     // Convert items to cartItems format for onlineOrders
     const cartItems = items.map((item: any, index: number) => ({
@@ -231,8 +268,9 @@ export async function POST(request: NextRequest) {
       tax,
       taxRate,
       discount,
+      deliveryFee,
       appliedPromotions: promotions,
-      total, // Add THB total amount
+      total, // THB total amount, including the delivery fee
       amountMmk,
       exchangeRate: mmkRate,
       status: "pending",
@@ -253,7 +291,25 @@ export async function POST(request: NextRequest) {
       updatedAt: new Date().toISOString(),
     };
 
-    await adminDb.collection("onlineOrders").doc(orderId).set(onlineOrderData);
+    // Take the stock and write the transaction and the online order in one
+    // transaction. Before this, COD orders never touched stock at all, yet the
+    // POS put stock back when one was cancelled or returned, so every
+    // cancelled COD order inflated the count. If another buyer got the last
+    // unit first, nothing is written and the customer is told now.
+    let transactionDocId: string;
+    try {
+      ({ transactionDocId } = await createCodOrderWithStock(adminDb, {
+        orderId,
+        orderData: onlineOrderData,
+        transactionData,
+      }));
+    } catch (stockError) {
+      const message =
+        stockError instanceof Error
+          ? stockError.message
+          : "Some items are no longer in stock";
+      return NextResponse.json({ error: message }, { status: 409 });
+    }
 
     // Sync customer to POS system's customers collection
     if (customer.uid) {
@@ -310,7 +366,7 @@ export async function POST(request: NextRequest) {
     console.log(
       "COD transaction and online order created successfully:",
       transactionId,
-      docRef.id
+      transactionDocId
     );
 
     // Mark coupon as used and deduct points if a coupon was applied
@@ -346,7 +402,8 @@ export async function POST(request: NextRequest) {
         const loyaltyResult = await LoyaltyService.awardPoints({
           customerId: customer.uid,
           transactionId,
-          transactionAmount: total,
+          // Points are for what was bought, not for delivery.
+          transactionAmount: Math.max(0, total - deliveryFee),
           source: 'online',
           description: `Online COD order ${orderId}`,
         });
@@ -367,7 +424,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       transactionId,
-      firestoreId: docRef.id,
+      firestoreId: transactionDocId,
       orderId,
       message: "COD order created successfully",
     });

@@ -20,6 +20,7 @@ import {
   type PurchaseOrderStatus,
 } from "../../../lib/orderLabels";
 import { useStoreProfile, type StoreProfile } from "../../../hooks/useSettings";
+import { normalizeDeliveryFee } from "../../../lib/deliveryFee";
 import {
   printCustomerInvoice,
   type CustomerInvoice,
@@ -298,6 +299,8 @@ type Txn = {
   tax?: number;
   taxRate?: number; // Percentage applied at purchase time (e.g. 7 for 7%)
   discount?: number;
+  /** Flat THB delivery fee charged with the order; missing on older orders. */
+  deliveryFee?: number;
   /** Named promotions behind `discount`. Empty on older orders. */
   appliedPromotions?: AppliedPromotion[];
   // Coupon fields
@@ -527,7 +530,10 @@ function getOrderSummary(row: Txn) {
         ? (tax / taxableBase) * 100
         : 0;
 
-  const total = Number(row.total || 0) || taxableBase + tax;
+  // Charged on top of tax; orders from before delivery fees existed have none.
+  const deliveryFee = normalizeDeliveryFee(row.deliveryFee);
+
+  const total = Number(row.total || 0) || taxableBase + tax + deliveryFee;
 
   /**
    * Named promotions behind `promotionDiscount`.
@@ -665,6 +671,7 @@ function getOrderSummary(row: Txn) {
     taxableBase,
     tax,
     taxPercent,
+    deliveryFee,
     total,
     lines,
     promotions,
@@ -792,6 +799,7 @@ function buildInvoiceFromTxn(
       couponDiscount: summary.couponDiscount,
       taxPercent: summary.taxPercent,
       tax: summary.tax,
+      deliveryFee: summary.deliveryFee,
       total: summary.total,
       totalSavings: summary.totalSavings,
       totalMMK,
@@ -1816,6 +1824,16 @@ function PurchaseDetailsModal({
                   ฿ {summary.tax.toFixed(2)}
                 </span>
               </div>
+
+              {/* Delivery fee - only orders that recorded one */}
+              {summary.deliveryFee > 0 && (
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600">Delivery Fee</span>
+                  <span className="font-medium text-gray-900">
+                    ฿ {summary.deliveryFee.toFixed(2)}
+                  </span>
+                </div>
+              )}
 
               {/* Total */}
               <div className="flex justify-between items-center pt-2.5 border-t border-dashed border-rose-200">

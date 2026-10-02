@@ -1,5 +1,15 @@
 import { adminDb } from "../firebase-admin";
 import { formatPoliciesForAssistant } from "../storePolicies";
+import { DELIVERY_AREA_LABEL, DELIVERY_AREAS } from "../deliveryArea";
+import { normalizeDeliveryFee } from "../deliveryFee";
+
+const namesOf = (kind: "ward" | "local") =>
+  DELIVERY_AREAS.filter((a) => a.kind === kind)
+    .map((a) => `${a.name} (${a.mm})`)
+    .join(", ");
+
+/** What checkout accepts, phrased for the assistant. */
+const DELIVERY_AREAS_TEXT = `${DELIVERY_AREA_LABEL} only. Wards: ${namesOf("ward")}. Local areas: ${namesOf("local")}.`;
 
 /**
  * Store facts for the chatbot, read from the systems that already own them:
@@ -63,7 +73,7 @@ export async function getStoreInfoSnapshot(): Promise<StoreInfoSnapshot> {
     openingHours: null,
     email: null,
     deliveryAvailable: null,
-    deliveryAreas: null,
+    deliveryAreas: DELIVERY_AREAS_TEXT,
     deliveryFee: null,
     codAvailable: null,
     codMaxAmount: null,
@@ -118,8 +128,19 @@ export async function getStoreInfoSnapshot(): Promise<StoreInfoSnapshot> {
 
     snapshot.openingHours = asString(store.openingHours);
     snapshot.email = asString(store.email);
-    snapshot.deliveryAreas = asString(store.deliveryAreas);
-    snapshot.deliveryFee = asString(store.deliveryFee);
+    // Checkout only accepts Tachileik addresses, so the bot must say the same
+    // regardless of what free text is in settings.
+    snapshot.deliveryAreas = DELIVERY_AREAS_TEXT;
+    // The numeric fee is what checkout actually charges, so it wins over the
+    // older free-text note. The field only exists once the owner has saved
+    // settings, so "absent" still means unknown rather than free.
+    if (typeof data.deliveryFee === "number") {
+      const fee = normalizeDeliveryFee(data.deliveryFee);
+      snapshot.deliveryFee =
+        fee > 0 ? `฿${fee.toFixed(2)} per order` : "Free delivery";
+    } else {
+      snapshot.deliveryFee = asString(store.deliveryFee);
+    }
 
     snapshot.deliveryAvailable =
       typeof store.deliveryAvailable === "boolean"
