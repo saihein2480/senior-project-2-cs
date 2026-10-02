@@ -113,13 +113,35 @@ export default function MembershipPage() {
     }
   }, [user]);
 
+  /**
+   * fetch() against the loyalty routes as the signed-in customer. They identify
+   * the customer from the ID token and ignore any uid in the request.
+   */
+  const authFetch = async (url: string, init: RequestInit = {}) => {
+    if (!user) throw new Error("Not signed in");
+    const idToken = await user.getIdToken();
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${idToken}`);
+    return fetch(url, { ...init, headers });
+  };
+
+  /** Parse a JSON body without throwing on an empty or non-JSON response. */
+  const readJson = async (response: Response) =>
+    response.json().catch(() => ({
+      success: false,
+      error:
+        response.status === 401
+          ? "Your session has expired. Please sign in again."
+          : `Request failed (${response.status})`,
+    }));
+
   const loadLoyaltyData = async () => {
     if (!user) return;
     
     setIsLoadingLoyalty(true);
     try {
-      const response = await fetch(`/api/loyalty/summary?customerId=${user.uid}`);
-      const data = await response.json();
+      const response = await authFetch("/api/loyalty/summary");
+      const data = await readJson(response);
       if (data.success) {
         setLoyaltyData(data.data);
         setIsMember(data.data?.isMember || false);
@@ -143,17 +165,15 @@ export default function MembershipPage() {
     setJoinSuccess(false);
 
     try {
-      const response = await fetch("/api/loyalty/join", {
+      const response = await authFetch("/api/loyalty/join", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          customerId: user.uid,
-        }),
+        body: JSON.stringify({}),
       });
 
-      const data = await response.json();
+      const data = await readJson(response);
 
       if (data.success) {
         setJoinSuccess(true);
@@ -186,13 +206,13 @@ export default function MembershipPage() {
     setRedeemError("");
 
     try {
-      const response = await fetch("/api/loyalty/redeem-package", {
+      const response = await authFetch("/api/loyalty/redeem-package", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ customerId: user.uid, packageId }),
+        body: JSON.stringify({ packageId }),
       });
 
-      const data = await response.json();
+      const data = await readJson(response);
 
       if (!data.success) {
         setRedeemError(data.error || "Failed to redeem this reward");
@@ -214,18 +234,15 @@ export default function MembershipPage() {
     setUsingCouponId(couponId);
 
     try {
-      const response = await fetch("/api/loyalty/use-coupon", {
+      const response = await authFetch("/api/loyalty/use-coupon", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          customerId: user.uid,
-          couponId,
-        }),
+        body: JSON.stringify({ couponId }),
       });
 
-      const data = await response.json();
+      const data = await readJson(response);
 
       if (data.success) {
         // Reload loyalty data to show updated coupon status
@@ -248,14 +265,14 @@ export default function MembershipPage() {
     setCancelingCouponId(couponId);
 
     try {
-      const response = await fetch(
-        `/api/loyalty/use-coupon?customerId=${user.uid}&couponId=${couponId}`,
+      const response = await authFetch(
+        `/api/loyalty/use-coupon?couponId=${encodeURIComponent(couponId)}`,
         {
           method: "DELETE",
         }
       );
 
-      const data = await response.json();
+      const data = await readJson(response);
 
       if (data.success) {
         // Reload loyalty data to show updated coupon status

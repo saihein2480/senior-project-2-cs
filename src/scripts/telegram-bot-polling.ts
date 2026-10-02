@@ -75,7 +75,9 @@ async function processUpdate(update: any) {
 async function startPolling() {
   console.log("🤖 Telegram Bot Starting...");
   console.log("📡 Mode: Polling (Development)");
-  console.log("🔑 Bot Token:", BOT_TOKEN!.substring(0, 20) + "...");
+  // Never log any part of the token: the first 20 characters are the bot id,
+  // the colon and a good share of the secret.
+  console.log("🔑 Bot token: loaded from environment");
   console.log("");
 
   // Delete webhook to enable polling.

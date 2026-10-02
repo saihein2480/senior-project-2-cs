@@ -34,6 +34,12 @@ export interface OrderInfo {
   }[];
   shippingAddress?: string;
   trackingNumber?: string;
+  /**
+   * uid of the customer who placed the order (`customer.uid`, or a top-level
+   * `customerUid` on older documents). Used to scope lookups by reference; not
+   * shown to anyone.
+   */
+  customerUid?: string;
 }
 
 /** `createdAt` is written as an ISO string at checkout, not a Timestamp. */
@@ -98,6 +104,9 @@ function mapOrder(id: string, data: Record<string, unknown>): OrderInfo {
   const rate = Number(data.exchangeRate ?? 0);
   const fromMmk = rate > 0 ? Number(data.amountMmk ?? 0) / rate : 0;
 
+  const nestedUid = (data.customer as { uid?: unknown } | undefined)?.uid;
+  const ownerUid = nestedUid ?? data.customerUid;
+
   return {
     orderId: id,
     // The customer-facing reference is the document id / `orderId`, e.g.
@@ -114,6 +123,8 @@ function mapOrder(id: string, data: Record<string, unknown>): OrderInfo {
       typeof data.shippingAddress === "string" ? data.shippingAddress : undefined,
     trackingNumber:
       typeof data.trackingNumber === "string" ? data.trackingNumber : undefined,
+    customerUid:
+      typeof ownerUid === "string" && ownerUid ? ownerUid : undefined,
   };
 }
 
@@ -155,6 +166,29 @@ export async function findOrderByRef(orderRef: string): Promise<OrderInfo | null
     console.error("Error finding order:", error);
     return null;
   }
+}
+
+/**
+ * `findOrderByRef`, but only for an order placed by `customerUid`.
+ *
+ * Use this for anything customer-facing. An order reference is not a secret —
+ * it appears on invoices, in notifications and in URLs — so looking orders up
+ * by reference alone let anyone read anyone's order. Returns null both when the
+ * order does not exist and when it belongs to someone else, so callers can give
+ * the same "not found" answer and references cannot be probed.
+ */
+export async function findOrderByRefForCustomer(
+  orderRef: string,
+  customerUid: string | null | undefined,
+): Promise<OrderInfo | null> {
+  if (!customerUid) return null;
+
+  const order = await findOrderByRef(orderRef);
+  if (!order || !order.customerUid || order.customerUid !== customerUid) {
+    return null;
+  }
+
+  return order;
 }
 
 /**

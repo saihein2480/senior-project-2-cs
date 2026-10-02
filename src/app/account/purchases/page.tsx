@@ -3755,18 +3755,22 @@ export default function PurchaseHistoryPage() {
     if (!cancelRow || !user) return;
 
     try {
+      // The route identifies the customer from the ID token, not a uid.
+      const idToken = await user.getIdToken();
       const response = await fetch("/api/transactions/request-cancel", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           transactionId: cancelRow.transactionId || cancelRow.id,
-          customerUid: user.uid,
           reason,
           qrCodeImage,
         }),
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
         alert(data.error || "Failed to submit cancellation request");
@@ -3821,12 +3825,17 @@ export default function PurchaseHistoryPage() {
     }
 
     try {
+      // The route identifies the customer from the ID token, not a uid, and
+      // prices the items from the stored order rather than this request.
+      const idToken = await user.getIdToken();
       const response = await fetch("/api/transactions/request-refund", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           transactionId: refundRow.transactionId || refundRow.id,
-          customerUid: user.uid,
           reason,
           items,
           qrCodeImage, // Include QR code image
@@ -3836,7 +3845,7 @@ export default function PurchaseHistoryPage() {
         }),
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
         alert(data.error || `Failed to submit ${requestType} request`);

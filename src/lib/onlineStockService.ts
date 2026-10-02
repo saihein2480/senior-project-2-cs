@@ -21,7 +21,7 @@ import { isSettledPaymentStatus } from "./mmpayCallback";
  * concurrent POS sale or owner restock (the POS does the same on its side).
  */
 
-type StockRequestLine = {
+export type StockRequestLine = {
   stockId: string;
   variantId?: string;
   color?: string;
@@ -30,9 +30,10 @@ type StockRequestLine = {
   itemLabel?: string;
 };
 
-type StockVariant = {
+export type StockVariant = {
   id?: string;
   color?: string;
+  image?: string;
   sizeQuantities?: Array<{ size?: string; quantity?: number }>;
 };
 
@@ -128,7 +129,11 @@ function mergeLines(lines: StockRequestLine[]): StockRequestLine[] {
   return Array.from(merged.values());
 }
 
-function resolveVariantIndex(
+/**
+ * Which variant of a stock document an order line means. Exported so order
+ * pricing resolves the same variant the stock reservation will deduct from.
+ */
+export function resolveVariantIndex(
   variants: StockVariant[],
   line: StockRequestLine,
 ): number {
@@ -199,7 +204,7 @@ function resolveVariantIndex(
   return -1;
 }
 
-function resolveSizeIndex(
+export function resolveSizeIndex(
   sizeQuantities: Array<{ size?: string; quantity?: number }>,
   line: StockRequestLine,
 ): number {

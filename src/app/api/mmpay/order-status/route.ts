@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
-import { adminDb } from "../../../../lib/firebase-admin";
+import { adminDb, getUidFromAuthHeader } from "../../../../lib/firebase-admin";
 
+/**
+ * GET /api/mmpay/order-status?orderId=<id>
+ *   headers: Authorization: Bearer <firebase id token>
+ *
+ * Polled by the checkout page while a QR is open. Only the customer who placed
+ * the order may read its status; anyone else gets the same 404 as a missing
+ * order, so order ids cannot be probed.
+ */
 export async function GET(req: Request) {
   try {
     if (!adminDb) {
@@ -10,9 +18,14 @@ export async function GET(req: Request) {
       );
     }
 
+    const uid = await getUidFromAuthHeader(req.headers.get("authorization"));
+    if (!uid) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    }
+
     const { searchParams } = new URL(req.url);
-    const orderId = searchParams.get("orderId") || "";
-    if (!orderId) {
+    const orderId = (searchParams.get("orderId") || "").trim();
+    if (!orderId || orderId.includes("/")) {
       return NextResponse.json(
         { error: "orderId is required" },
         { status: 400 },
@@ -23,11 +36,14 @@ export async function GET(req: Request) {
       .collection("onlineOrders")
       .doc(orderId)
       .get();
-    if (!orderSnap.exists) {
+
+    const order = (orderSnap.data() || {}) as Record<string, unknown>;
+    const ownerUid = (order.customer as { uid?: unknown } | undefined)?.uid;
+
+    if (!orderSnap.exists || ownerUid !== uid) {
       return NextResponse.json({ error: "Order not found" }, { status: 404 });
     }
 
-    const order = orderSnap.data() as Record<string, unknown>;
     return NextResponse.json({
       orderId,
       status: order.status || "pending",
@@ -35,8 +51,10 @@ export async function GET(req: Request) {
       updatedAt: order.updatedAt || null,
     });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to load order status";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("Error loading order status:", error);
+    return NextResponse.json(
+      { error: "Failed to load order status" },
+      { status: 500 },
+    );
   }
 }

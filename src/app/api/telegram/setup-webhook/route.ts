@@ -12,7 +12,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeEqual } from "crypto";
+import { safeEqual } from "../../../../lib/safeEqual";
 import { setWebhook, getWebhookInfo, deleteWebhook } from "../../../../lib/telegram/api-client";
 
 const WEBHOOK_URL = process.env.TELEGRAM_WEBHOOK_URL;
@@ -20,22 +20,12 @@ const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET;
 
 /** Constant-time comparison; fails closed when no secret is configured. */
 function isAuthorised(req: NextRequest): boolean {
-  if (!WEBHOOK_SECRET) return false;
-
   const supplied =
     req.headers.get("x-telegram-webhook-secret") ||
     req.nextUrl.searchParams.get("secret") ||
     "";
 
-  const a = Buffer.from(supplied);
-  const b = Buffer.from(WEBHOOK_SECRET);
-  if (a.length !== b.length) return false;
-
-  try {
-    return timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
+  return safeEqual(supplied, WEBHOOK_SECRET);
 }
 
 export async function GET(req: NextRequest) {

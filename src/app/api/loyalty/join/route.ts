@@ -1,26 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase-admin";
+import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 
 /**
  * POST /api/loyalty/join
- * Join the membership program
+ *   headers: Authorization: Bearer <firebase id token>
+ *   body: {} (a `customerId` from older clients is ignored)
+ *
+ * Join the membership program as the customer identified by the ID token.
  */
 export async function POST(req: NextRequest) {
   try {
-    const { customerId } = await req.json();
-
-    if (!customerId) {
-      return NextResponse.json(
-        { success: false, error: "Customer ID is required" },
-        { status: 400 }
-      );
-    }
-
     if (!adminDb) {
       return NextResponse.json(
         { success: false, error: "Database not configured" },
         { status: 500 }
+      );
+    }
+
+    const customerId = await getUidFromAuthHeader(req.headers.get("authorization"));
+    if (!customerId) {
+      return NextResponse.json(
+        { success: false, error: "Not authenticated" },
+        { status: 401 }
       );
     }
 

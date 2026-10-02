@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { normalizeDeliveryFee } from "../lib/deliveryFee";
+import { resolveMmkRate } from "../lib/orderPricing";
 
 /**
  * The parts of the POS business settings the storefront uses.
@@ -64,11 +65,12 @@ export function useSettings() {
 export function useCurrencyRate() {
   const { data, isLoading, error } = useSettings();
 
-  const rate =
-    (data?.data?.currencyRate ??
-      data?.currencyRate ??
-      Number(process?.env?.NEXT_PUBLIC_MMK_RATE)) ||
-    55;
+  // Same rule the order routes use (lib/orderPricing.ts), so the MMK amount
+  // shown at checkout is the amount the server charges.
+  const rate = resolveMmkRate(
+    data?.data?.currencyRate ?? data?.currencyRate,
+    process?.env?.NEXT_PUBLIC_MMK_RATE,
+  );
 
   return {
     rate,

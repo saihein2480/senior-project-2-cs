@@ -74,6 +74,7 @@ export {
 
 // AI integration
 export { processWithAI, getAIProductRecommendation } from "./ai-integration";
+export type { ProcessWithAIContext } from "./ai-integration";
 
 // Formatters
 export {

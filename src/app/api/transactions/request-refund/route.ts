@@ -1,7 +1,73 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase-admin";
+import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { exceedsDocBudget } from "@/lib/documentBudget";
+
+/**
+ * POST /api/transactions/request-refund
+ *   headers: Authorization: Bearer <firebase id token>
+ *   body: {
+ *     transactionId,
+ *     items: Array<{ id, productId?, groupName?, quantity }>,
+ *     reason?, qrCodeImage?, itemPhotos?
+ *   }
+ *
+ * The requesting customer is taken from the ID token only; a `customerUid` in
+ * the body (sent by older clients) is ignored. Item prices and names are read
+ * from the stored transaction, never from the request: a client-supplied
+ * `unitPrice` used to be stored as-is on the refund request the owner reviews.
+ */
+
+/** The fields of a stored (or requested) line this route reads. */
+type TransactionItem = {
+  id?: unknown;
+  productId?: unknown;
+  groupName?: unknown;
+  quantity?: unknown;
+  unitPrice?: unknown;
+};
+
+/**
+ * Match a requested refund line to the line it refers to on the transaction.
+ *
+ * Same keys the route has always used — the line `id`, then `productId` — but
+ * an exact `id` match wins over a product match, and a key only matches when it
+ * is actually present. Previously an item with no `productId` matched the
+ * first line that also had none (`undefined === undefined`).
+ *
+ * The storefront sends the line's `groupName` as `id`, which is also how the
+ * POS pairs requested items with transaction lines, so the name is used to pick
+ * between several lines of one product and as a last resort.
+ */
+function findOriginalItem(
+  transactionItems: TransactionItem[],
+  refundItem: TransactionItem,
+): TransactionItem | undefined {
+  const asKey = (value: unknown) =>
+    typeof value === "string" || typeof value === "number"
+      ? String(value)
+      : "";
+
+  const id = asKey(refundItem?.id);
+  const productId = asKey(refundItem?.productId);
+  const names = [asKey(refundItem?.groupName), id].filter(Boolean);
+  const sameName = (ti: TransactionItem) =>
+    !!ti?.groupName && names.includes(String(ti.groupName));
+
+  if (id) {
+    const byId = transactionItems.find((ti) => asKey(ti?.id) === id);
+    if (byId) return byId;
+  }
+
+  if (productId) {
+    const byProduct = transactionItems.filter(
+      (ti) => asKey(ti?.productId) === productId,
+    );
+    if (byProduct.length > 0) return byProduct.find(sameName) ?? byProduct[0];
+  }
+
+  return names.length > 0 ? transactionItems.find(sameName) : undefined;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,11 +78,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = await request.json();
-    const { transactionId, customerUid, reason, items, qrCodeImage, itemPhotos } = body;
+    const customerUid = await getUidFromAuthHeader(
+      request.headers.get("authorization"),
+    );
+    if (!customerUid) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    }
+
+    const body = await request.json().catch(() => null);
+    const { transactionId, reason, items, qrCodeImage, itemPhotos } = body ?? {};
 
     // Validate required fields
-    if (!transactionId || !customerUid || !items || !Array.isArray(items)) {
+    if (
+      !transactionId ||
+      (typeof transactionId !== "string" && typeof transactionId !== "number") ||
+      !items ||
+      !Array.isArray(items)
+    ) {
       return NextResponse.json(
         { error: "Missing required fields" },
         { status: 400 }
@@ -102,11 +180,11 @@ export async function POST(request: NextRequest) {
       // Allow refund request for cancelled paid orders without cancellationRefund
     }
 
-    // Check if already has a pending refund request
+    // Never overwrite a request the owner has not decided on yet.
     if (transaction.refundRequest?.status === "pending") {
       return NextResponse.json(
         { error: "A refund request is already pending" },
-        { status: 400 }
+        { status: 409 }
       );
     }
 
@@ -128,14 +206,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate refund items against original transaction items
-    const transactionItems = transaction.items || [];
-    for (const refundItem of items) {
-      if (refundItem.quantity <= 0) continue;
+    // Validate refund items against original transaction items, remembering
+    // which stored line each one refers to so its price comes from there.
+    const transactionItems: TransactionItem[] = Array.isArray(transaction.items)
+      ? transaction.items
+      : [];
+    const sanitizedItems: Array<{
+      id: string;
+      productId: string;
+      quantity: number;
+      unitPrice: number;
+      groupName: string;
+    }> = [];
 
-      const originalItem = transactionItems.find(
-        (ti: any) => ti.id === refundItem.id || ti.productId === refundItem.productId
-      );
+    for (const refundItem of items) {
+      if (!(refundItem?.quantity > 0)) continue;
+
+      const originalItem = findOriginalItem(transactionItems, refundItem);
 
       if (!originalItem) {
         return NextResponse.json(
@@ -149,7 +236,7 @@ export async function POST(request: NextRequest) {
         .filter((ri: any) => ri.id === refundItem.id)
         .reduce((sum: number, ri: any) => sum + (ri.quantity || 0), 0);
 
-      const available = (originalItem.quantity || 0) - alreadyRefunded;
+      const available = (Number(originalItem.quantity) || 0) - alreadyRefunded;
 
       if (refundItem.quantity > available) {
         return NextResponse.json(
@@ -159,18 +246,21 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
-    }
 
-    // Sanitize items array - only keep serializable fields
-    const sanitizedItems = items
-      .filter((item: any) => item.quantity > 0)
-      .map((item: any) => ({
-        id: item.id || "",
-        productId: item.productId || "",
-        quantity: Number(item.quantity) || 0,
-        unitPrice: Number(item.unitPrice) || 0,
-        groupName: item.groupName || "",
-      }));
+      // Only serializable fields. `id` keeps the client's value because the POS
+      // pairs requested items with transaction lines by `id` or `groupName`;
+      // price and name are the stored ones.
+      sanitizedItems.push({
+        id:
+          typeof refundItem.id === "string" && refundItem.id
+            ? refundItem.id
+            : String(originalItem.id ?? ""),
+        productId: String(originalItem.productId ?? refundItem.productId ?? ""),
+        quantity: Number(refundItem.quantity) || 0,
+        unitPrice: Number(originalItem.unitPrice) || 0,
+        groupName: String(originalItem.groupName ?? ""),
+      });
+    }
 
     // Firestore caps a document at 1MiB, and this request embeds the QR image
     // Sanitize item photos array - ensure all are strings
@@ -206,11 +296,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create refund request
-    await transactionsRef.doc(transactionDoc.id).update({
-      refundRequest,
-      updatedAt: FieldValue.serverTimestamp(),
+    // Create refund request. The pending check is repeated inside a transaction
+    // so two submissions racing each other cannot both write.
+    const db = adminDb;
+    const docRef = transactionsRef.doc(transactionDoc.id);
+    const written = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(docRef);
+      if (fresh.data()?.refundRequest?.status === "pending") return false;
+      tx.update(docRef, {
+        refundRequest,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return true;
     });
+
+    if (!written) {
+      return NextResponse.json(
+        { error: "A refund request is already pending" },
+        { status: 409 }
+      );
+    }
 
     // Create an owner-facing notification so it shows up in the POS
     // notification bell/page and routes to the return requests page.
@@ -241,7 +346,7 @@ export async function POST(request: NextRequest) {
         event: {
           type: "refund_requested",
           order: {
-            orderRef: transactionId,
+            orderRef: String(transactionId),
             totalAmount: Number(transaction.total || 0),
             paymentMethod: transaction.paymentMethod || "",
             paymentStatus: transaction.paymentStatus || "",

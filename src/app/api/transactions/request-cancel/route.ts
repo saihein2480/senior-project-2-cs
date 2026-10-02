@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase-admin";
+import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { exceedsDocBudget } from "@/lib/documentBudget";
 
+/**
+ * POST /api/transactions/request-cancel
+ *   headers: Authorization: Bearer <firebase id token>
+ *   body: { transactionId, reason?, qrCodeImage? }
+ *
+ * The requesting customer is taken from the ID token only. A `customerUid` in
+ * the body (sent by older clients) is ignored; it used to be trusted, so anyone
+ * could file a cancellation against another customer's order.
+ */
 export async function POST(request: NextRequest) {
   try {
     if (!adminDb) {
@@ -12,11 +21,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = await request.json();
-    const { transactionId, customerUid, reason, qrCodeImage } = body;
+    const customerUid = await getUidFromAuthHeader(
+      request.headers.get("authorization"),
+    );
+    if (!customerUid) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    }
+
+    const body = await request.json().catch(() => null);
+    const { transactionId, reason, qrCodeImage } = body ?? {};
 
     // Validate required fields
-    if (!transactionId || !customerUid) {
+    if (
+      !transactionId ||
+      (typeof transactionId !== "string" && typeof transactionId !== "number")
+    ) {
       return NextResponse.json(
         { error: "Missing required fields" },
         { status: 400 }
@@ -48,9 +67,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if transaction is in a cancellable state
+    // Check if transaction is in a cancellable state. A partial refund means
+    // items were already returned, so the order is past cancelling too.
     const status = (transaction.status || "").toLowerCase();
-    if (status === "cancelled" || status === "refunded") {
+    if (
+      status === "cancelled" ||
+      status === "refunded" ||
+      status === "partially_refunded"
+    ) {
       return NextResponse.json(
         { error: "Transaction is already cancelled or refunded" },
         { status: 400 }
@@ -145,7 +169,7 @@ export async function POST(request: NextRequest) {
         event: {
           type: "cancellation_requested",
           order: {
-            orderRef: transactionId,
+            orderRef: String(transactionId),
             totalAmount: Number(transaction.total || 0),
             paymentMethod: transaction.paymentMethod || "",
             paymentStatus: transaction.paymentStatus || "",

@@ -8,6 +8,7 @@ import {
 import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid";
 import { normalizeDeliveryFee } from "../../../../lib/deliveryFee";
 import {
+  isSettledPaymentStatus,
   orderStatusFor,
   shouldApplyCallback,
   type MmpayCallbackStatus,
@@ -149,7 +150,11 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
         : 0;
   const hasExchangeRate = exchangeRate > 0;
 
-  await transactionDocRef.set({
+  // `create` fails if the document already exists. MyanMyanPay can deliver the
+  // same SUCCESS twice at once; with a get-then-set both copies could pass the
+  // existence check above and award points and consume the coupon twice.
+  try {
+    await transactionDocRef.create({
     transactionId,
     source: "online",
     onlineOrderId: payload.orderId,
@@ -215,7 +220,13 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
       condition: payload.condition,
       transactionRefId: payload.transactionRefId || "",
     },
-  });
+    });
+  } catch (error) {
+    // gRPC ALREADY_EXISTS: another delivery of this callback recorded it.
+    const code = (error as { code?: unknown })?.code;
+    if (code === 6 || code === "already-exists") return;
+    throw error;
+  }
 
   // Award loyalty points for successful payment
   const customerUid = (order.customer as Record<string, unknown> | undefined)?.uid;
@@ -227,6 +238,7 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
     if (couponId && couponCode) {
       try {
         const { CouponService } = await import("@/lib/couponService");
+        // eslint-disable-next-line react-hooks/rules-of-hooks -- not a React hook; the `use` prefix only looks like one
         const couponUsed = await CouponService.useCouponAdmin(
           adminDb,
           customerUid,
@@ -251,7 +263,9 @@ async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
       const loyaltyResult = await LoyaltyService.awardPoints({
         customerId: customerUid,
         transactionId,
-        transactionAmount: subtotal,
+        // Same basis as COD: what was paid for goods, not delivery. This used
+        // to be the pre-discount subtotal, so QR orders earned more points.
+        transactionAmount: Math.max(0, total - deliveryFee),
         source: 'online',
         description: `Online payment for order ${payload.orderId}`,
       });
@@ -338,9 +352,80 @@ export async function POST(req: Request) {
       );
     }
 
+    if (!payload?.orderId || typeof payload.orderId !== "string") {
+      return NextResponse.json(
+        { error: "Callback payload has no orderId" },
+        { status: 400 },
+      );
+    }
+
     const orderRef = adminDb.collection("onlineOrders").doc(payload.orderId);
     const currentSnap = await orderRef.get();
-    const currentPaymentStatus = currentSnap.data()?.paymentStatus;
+
+    // A signed callback for an order we never created: record nothing (a
+    // merge-write would create a stray order) but answer 200 so it is not
+    // retried forever.
+    if (!currentSnap.exists) {
+      console.warn(`MMPay callback for unknown order ${payload.orderId}`);
+      return NextResponse.json({ ok: true, applied: false, reason: "unknown_order" });
+    }
+
+    const currentOrder = (currentSnap.data() || {}) as Record<string, unknown>;
+    const currentPaymentStatus = currentOrder.paymentStatus;
+
+    // The signature proves MyanMyanPay sent this, not that the customer paid
+    // what the order costs. The QR amount comes from our own server-side
+    // total, so a SUCCESS for any other amount is never treated as payment:
+    // it is parked for the owner to review instead of becoming a sale.
+    if (
+      payload.status === "SUCCESS" &&
+      !isSettledPaymentStatus(currentPaymentStatus)
+    ) {
+      const expectedMmk = Math.round(Number(currentOrder.amountMmk));
+      const receivedMmk = Math.round(Number(payload.amount));
+
+      if (
+        !Number.isFinite(expectedMmk) ||
+        !Number.isFinite(receivedMmk) ||
+        expectedMmk <= 0 ||
+        expectedMmk !== receivedMmk
+      ) {
+        console.error(
+          `MMPay amount mismatch for ${payload.orderId}: expected ${expectedMmk}, received ${receivedMmk}`,
+        );
+
+        await orderRef.set(
+          {
+            paymentStatus: "AMOUNT_MISMATCH",
+            status: "payment_review",
+            callbackPayload: payload,
+            amountMismatch: {
+              expectedMmk: Number.isFinite(expectedMmk) ? expectedMmk : null,
+              receivedMmk: Number.isFinite(receivedMmk) ? receivedMmk : null,
+              receivedAt: new Date().toISOString(),
+            },
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true },
+        );
+
+        try {
+          await adminDb.collection("notifications").add({
+            type: "online_order",
+            title: "Payment needs review",
+            message: `Order #${payload.orderId}: MyanMyanPay reported ${Number.isFinite(receivedMmk) ? receivedMmk.toLocaleString() : "an unknown amount"} MMK, but the order total is ${Number.isFinite(expectedMmk) ? expectedMmk.toLocaleString() : "unknown"} MMK. The order was not marked paid.`,
+            link: "/owner/sales/online-orders",
+            metadata: { orderId: payload.orderId },
+            read: false,
+            createdAt: new Date(),
+          });
+        } catch (notifError) {
+          console.error("Could not create amount-mismatch notification:", notifError);
+        }
+
+        return NextResponse.json({ ok: true, applied: false, reason: "amount_mismatch" });
+      }
+    }
 
     if (!shouldApplyCallback(currentPaymentStatus, payload.status)) {
       // Keep the evidence without touching the order's state, so a late QR

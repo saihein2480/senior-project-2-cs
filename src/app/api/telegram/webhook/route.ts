@@ -9,8 +9,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { handleTelegramUpdate } from "../../../../lib/telegram/bot-service";
-
-const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET;
+import { safeEqual } from "../../../../lib/safeEqual";
 
 /**
  * Telegram allows up to 60s to answer a webhook, and we now finish the work
@@ -19,18 +18,32 @@ const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET;
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
-  try {
-    // Verify webhook secret token
-    const secretToken = req.headers.get("x-telegram-bot-api-secret-token");
-    
-    if (WEBHOOK_SECRET && secretToken !== WEBHOOK_SECRET) {
-      console.error("❌ Invalid webhook secret token");
-      return NextResponse.json(
-        { error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+  // Fail closed. Anyone can POST to this URL, and an update is trusted to say
+  // which chat it came from, so without the secret a forged update could act as
+  // any linked customer. This used to skip the check when the variable was
+  // unset. `setup-webhook` registers the webhook with this same secret, and
+  // Telegram echoes it back in the header below on every delivery.
+  const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    console.error(
+      "❌ TELEGRAM_WEBHOOK_SECRET is not set; refusing Telegram webhook update",
+    );
+    return NextResponse.json(
+      { error: "Webhook is not configured" },
+      { status: 503 }
+    );
+  }
 
+  const secretToken = req.headers.get("x-telegram-bot-api-secret-token");
+  if (!safeEqual(secretToken, webhookSecret)) {
+    console.error("❌ Missing or invalid webhook secret token");
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
+  try {
     // Parse update from Telegram
     const update = await req.json();
     

@@ -1,87 +1,42 @@
 import { NextResponse } from "next/server";
 import { MMPaySDK } from "mmpay-node-sdk";
-import { adminDb } from "../../../../lib/firebase-admin";
+import { adminDb, getUidFromAuthHeader } from "../../../../lib/firebase-admin";
 import {
   createOrderWithStockReservation,
   releaseStaleReservations,
   releaseStockReservation,
 } from "../../../../lib/onlineStockService";
-import { DELIVERY_AREA_NOTICE, isDeliverableAddress } from "../../../../lib/deliveryArea";
-import { getDeliveryFeeTHB } from "../../../../lib/storeSettings";
+import { buildGatewayItems } from "../../../../lib/orderPricing";
 import {
-  deliveryFeeChangedMessage,
-  isSameDeliveryFee,
-} from "../../../../lib/deliveryFee";
+  assertCustomerSawQuote,
+  isQuoteError,
+  orderLineRecords,
+  parseRequestedLines,
+  quoteErrorBody,
+  quoteOrder,
+} from "../../../../lib/server/orderQuote";
 
+/**
+ * POST /api/mmpay/create-order
+ *   headers: Authorization: Bearer <firebase id token>
+ *   body: {
+ *     lines: Array<{ productId, variantId?, color?, size?, quantity }>,
+ *     couponId?: string | null,
+ *     // What the checkout page showed; the order is refused if these differ
+ *     // from the server's own figures.
+ *     deliveryFee: number, expectedTotalTHB: number, expectedTotalMMK: number,
+ *   }
+ *
+ * The customer is the caller identified by the ID token. Every amount stored on
+ * the order and the amount sent to MyanMyanPay is computed here from
+ * Firestore (see lib/server/orderQuote.ts); the request carries no prices.
+ */
 type CreateOrderRequest = {
-  amountMmk: number;
-  items: Array<{ name: string; amount: number; quantity: number }>;
-  cartItems?: Array<{
-    productId: string;
-    productName: string;
-    variantId?: string;
-    color?: string;
-    size?: string;
-    image?: string;
-    /** Unit price actually charged, after the winning promotion. */
-    priceTHB: number;
-    /** Catalogue unit price before any promotion. */
-    originalPriceTHB?: number;
-    /** What this line saved. */
-    lineDiscountTHB?: number;
-    promotionId?: string;
-    promotionName?: string;
-    promotionDiscountType?: string;
-    promotionDiscountValue?: number;
-    quantity: number;
-  }>;
-  customer: {
-    uid: string;
-    email: string;
-    displayName?: string;
-    phone?: string;
-    address?: string;
-  };
-  product: {
-    productId: string;
-    productName: string;
-    variantId?: string;
-    color?: string;
-    size?: string;
-    image?: string;
-    priceTHB: number;
-    originalPriceTHB?: number;
-    lineDiscountTHB?: number;
-    promotionId?: string;
-    promotionName?: string;
-    quantity: number;
-  };
-  // Financial breakdown fields
-  subtotal?: number; // THB subtotal before discount and tax
-  tax?: number; // THB tax amount
-  taxRate?: number; // Tax rate as a percentage (e.g. 7 for 7%)
-  discount?: number; // THB discount amount (same as couponDiscountTHB)
-  deliveryFee?: number; // THB delivery fee the customer was shown at checkout
-  total?: number; // THB total amount, including the delivery fee
-  exchangeRate?: number; // THB -> MMK rate used at checkout
-  /**
-   * Promotions that reduced this order, named.
-   *
-   * Recorded with the order because promotion documents are edited and
-   * deactivated over time, so they cannot be looked up after the fact to
-   * explain an old invoice.
-   */
-  appliedPromotions?: Array<{
-    promotionId: string;
-    name: string;
-    discountType?: string;
-    discountValue?: number;
-    discountTHB: number;
-  }>;
-  // Coupon fields
-  couponCode?: string;
-  couponId?: string;
-  couponDiscountTHB?: number;
+  lines?: unknown;
+  couponId?: unknown;
+  deliveryFee?: unknown;
+  expectedTotalTHB?: unknown;
+  expectedTotalMMK?: unknown;
 };
 
 function getMmpay() {
@@ -234,50 +189,63 @@ export async function POST(req: Request) {
       );
     }
 
-    const body = (await req.json()) as CreateOrderRequest;
-    if (!body?.customer?.uid || !body?.items?.length || !body?.amountMmk) {
-      return NextResponse.json(
-        { error: "Invalid order payload" },
-        { status: 400 },
-      );
+    const uid = await getUidFromAuthHeader(req.headers.get("authorization"));
+    if (!uid) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    // Delivery is Tachileik-only; enforced here because the payload is
-    // client-supplied, not just on the checkout page.
-    if (!isDeliverableAddress(body.customer.address)) {
-      return NextResponse.json(
-        { error: DELIVERY_AREA_NOTICE },
-        { status: 400 },
-      );
-    }
+    const body = ((await req.json().catch(() => null)) ||
+      {}) as CreateOrderRequest;
 
-    // The delivery fee is owned by POS Settings. Checked before any stock is
-    // reserved or a QR is issued, so a customer whose page still shows an old
-    // fee is asked to review the new total instead of being charged it.
-    let deliveryFee: number;
+    // Price the order from Firestore and check it against what the customer
+    // was shown, before any stock is reserved or a QR is issued.
+    let quote: Awaited<ReturnType<typeof quoteOrder>>;
     try {
-      deliveryFee = await getDeliveryFeeTHB();
-    } catch (feeError) {
-      console.error("Could not read delivery fee for QR order:", feeError);
-      return NextResponse.json(
-        { error: "Could not load the delivery fee. Please try again." },
-        { status: 503 },
+      quote = await quoteOrder(adminDb, {
+        uid,
+        lines: parseRequestedLines(body.lines),
+        couponId: typeof body.couponId === "string" ? body.couponId : null,
+      });
+      assertCustomerSawQuote(
+        quote.pricing,
+        {
+          deliveryFee: body.deliveryFee,
+          totalTHB: body.expectedTotalTHB,
+          totalMMK: body.expectedTotalMMK,
+        },
+        { checkMmk: true },
       );
+    } catch (error) {
+      if (isQuoteError(error)) {
+        return NextResponse.json(quoteErrorBody(error), {
+          status: error.status,
+        });
+      }
+      throw error;
     }
 
-    if (!isSameDeliveryFee(body.deliveryFee, deliveryFee)) {
+    const { customer, pricing, coupon } = quote;
+    const cartItems = orderLineRecords(quote);
+    const gatewayItems = buildGatewayItems(
+      pricing,
+      quote.lines.map((line) => ({
+        name: line.productName,
+        color: line.color,
+        size: line.size,
+      })),
+    );
+
+    if (pricing.totalMMK <= 0 || gatewayItems.length === 0) {
       return NextResponse.json(
-        { error: deliveryFeeChangedMessage(deliveryFee), deliveryFee },
-        { status: 409 },
+        { error: "This order has nothing to pay." },
+        { status: 400 },
       );
     }
 
     // Free stock held by checkouts nobody is going to pay for, including this
     // customer's own earlier QR that has run out, before reserving again.
     try {
-      await releaseStaleReservations(adminDb, {
-        customerUid: body.customer.uid,
-      });
+      await releaseStaleReservations(adminDb, { customerUid: uid });
     } catch (error) {
       console.error("Failed to release stale stock reservations:", error);
     }
@@ -292,32 +260,33 @@ export async function POST(req: Request) {
       await createOrderWithStockReservation(adminDb, orderId, {
         orderId,
         source: "online",
-        customer: body.customer,
-        ...(body.product ? { product: body.product } : {}),
-        cartItems: body.cartItems || [],
-        items: body.items,
-        amountMmk: body.amountMmk,
-        // Store financial breakdown for accurate order display
-        subtotal: Number(body.subtotal || body.total || 0),
-        tax: Number(body.tax || 0),
-        taxRate: Number(body.taxRate || 0),
-        discount: Number(body.discount || 0),
-        // Server-read fee (verified equal to what the customer saw above).
-        deliveryFee,
-        appliedPromotions: body.appliedPromotions || [],
-        total: Number(body.total || 0),
-        exchangeRate: Number(body.exchangeRate || 0),
+        customer,
+        ...(cartItems.length === 1 ? { product: cartItems[0] } : {}),
+        cartItems,
+        items: gatewayItems,
+        // Every figure below is the server's own (lib/server/orderQuote.ts).
+        amountMmk: pricing.totalMMK,
+        subtotal: pricing.subtotalTHB,
+        tax: pricing.taxTHB,
+        taxRate: pricing.taxRatePercent,
+        discount: pricing.promotionDiscountTHB, // promotions only; coupon below
+        deliveryFee: pricing.deliveryFeeTHB,
+        appliedPromotions: pricing.appliedPromotions,
+        total: pricing.totalTHB,
+        exchangeRate: pricing.mmkRate,
+        pricedBy: "server",
         status: "pending",
         paymentStatus: "PENDING",
         paymentMethod: "scan", // QR scan payment method
         provider: "MMPAY",
-        // Store coupon information
-        ...(body.couponCode && {
-          couponCode: body.couponCode,
-          appliedCouponCode: body.couponCode,
-          couponId: body.couponId,
-          couponDiscountTHB: body.couponDiscountTHB || 0,
-        }),
+        ...(coupon
+          ? {
+              couponCode: coupon.code,
+              appliedCouponCode: coupon.code,
+              couponId: coupon.id,
+              couponDiscountTHB: pricing.couponDiscountTHB,
+            }
+          : {}),
         orderSource: "web_storefront",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -342,10 +311,11 @@ export async function POST(req: Request) {
       }
     };
 
+    // The amount charged is the server's total; the itemisation adds up to it.
     const paymentPayload = {
       orderId,
-      amount: body.amountMmk,
-      items: body.items,
+      amount: pricing.totalMMK,
+      items: gatewayItems,
       callbackUrl,
       customMessage: `Order ${orderId}`,
     };
@@ -414,11 +384,14 @@ export async function POST(req: Request) {
       orderId,
       paymentUrl,
       qr,
-      payResponse: safePayResponse,
+      totalTHB: pricing.totalTHB,
+      totalMMK: pricing.totalMMK,
     });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to create payment";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("Error creating MyanMyanPay order:", error);
+    return NextResponse.json(
+      { error: "Failed to create payment. Please try again." },
+      { status: 500 },
+    );
   }
 }

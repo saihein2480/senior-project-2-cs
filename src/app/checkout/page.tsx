@@ -13,7 +13,8 @@ import { useCustomerAuth } from "../../contexts/CustomerAuthContext";
 import { useCart } from "../../contexts/CartContext";
 import { useLanguage } from "../../contexts/LanguageContext";
 import { useOnlinePromotions } from "../../hooks/useOnlinePromotions";
-import { applyBestPromotionToLine } from "../../lib/onlinePromotion";
+import { useCatalogPrices } from "../../hooks/useCatalogPrices";
+import { priceOrder } from "../../lib/orderPricing";
 import { CouponService, type Coupon } from "../../lib/couponService";
 import { isDeliverableAddress } from "../../lib/deliveryArea";
 
@@ -38,6 +39,15 @@ type CheckoutItem = {
 /** How long a generated MyanMyanPay QR stays scannable, in seconds. */
 const QR_VALIDITY_SECONDS = 180;
 
+/**
+ * The sandbox "complete payment" shortcut. Shown in `next dev`, or when a demo
+ * deployment opts in with NEXT_PUBLIC_MMPAY_TEST_MODE=true; never to real
+ * customers otherwise. The route enforces the same rule on the server.
+ */
+const SHOW_TEST_PAYMENT =
+  process.env.NODE_ENV !== "production" ||
+  process.env.NEXT_PUBLIC_MMPAY_TEST_MODE === "true";
+
 /** Render a remaining-seconds count as m:ss. */
 function formatCountdown(totalSeconds: number) {
   const safe = Math.max(0, totalSeconds);
@@ -52,14 +62,13 @@ export default function CheckoutPage() {
   const { user, profile, loading, isEmailVerified } = useCustomerAuth();
   const { t } = useLanguage();
   const { rate: mmkRate } = useCurrencyRate();
-  const { taxRate, taxRatePercent, hasTaxRate } = useTaxRate();
+  const { taxRatePercent, hasTaxRate } = useTaxRate();
   // Same settings response as the tax rate, so it is loaded whenever
   // `hasTaxRate` is true and the pay button is enabled.
   const { deliveryFeeTHB } = useDeliveryFee();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
   const {
     items: cartItems,
-    subtotalTHB,
     clearCart,
     // Aliased: `isLoading` below already refers to the product query.
     isLoading: cartLoading,
@@ -147,105 +156,83 @@ export default function CheckoutPage() {
     return directItem ? [directItem] : [];
   }, [cartItems, directItem]);
 
-  const baseTotalTHB =
-    cartItems.length > 0
-      ? subtotalTHB
-      : checkoutItems.reduce(
-          (sum, item) => sum + item.unitPriceTHB * item.quantity,
-          0,
-        );
-  const lineResults = checkoutItems.map((item) =>
-    applyBestPromotionToLine({
-      unitPriceTHB: item.unitPriceTHB,
-      quantity: item.quantity,
-      productId: item.productId,
-      variantId: item.variantId,
-      promotions: onlinePromotions,
-    }),
+  // Price cart lines at today's catalogue price. The price a cart line stored
+  // when it was added may be out of date, and older carts stored a price that
+  // already had the promotion taken off, which checkout then discounted again.
+  // (A direct "Buy now" item already reads the live product.)
+  const { prices: livePrices, isLoading: pricesLoading } = useCatalogPrices(
+    cartItems.length > 0 ? checkoutItems.map((item) => item.productId) : [],
   );
 
-  /**
-   * Pair every checkout line with the promotion that won for it.
-   *
-   * Only the aggregate discount used to be persisted, so an invoice could say
-   * "Promotion -฿40" but never which promotion earned it, and the per-line
-   * saving was gone entirely. Carrying the promotion identity and the line
-   * maths here means both order-writing paths below persist the same detail.
-   */
-  const checkoutLines = checkoutItems.map((item, index) => {
-    const result = lineResults[index];
-    const discountedUnitPriceTHB =
-      item.quantity > 0
-        ? result.finalSubtotalTHB / item.quantity
-        : item.unitPriceTHB;
-
+  const pricedItems = checkoutItems.map((item) => {
+    if (cartItems.length === 0) {
+      return { ...item, available: item.unitPriceTHB > 0 };
+    }
+    const live = livePrices[item.productId];
     return {
-      item,
-      result,
-      discountedUnitPriceTHB,
-      promotionId: result.promotion?.id || "",
-      promotionName: result.promotion?.name || "",
-      promotionDiscountType: result.promotion?.discountType || "",
-      promotionDiscountValue: Number(result.promotion?.discountValue || 0),
-      lineDiscountTHB: result.discountTHB,
+      ...item,
+      unitPriceTHB: typeof live === "number" ? live : item.unitPriceTHB,
+      available: live !== null,
     };
   });
+  const unavailableItems = pricedItems.filter((item) => !item.available);
 
-  /** Distinct promotions that actually reduced this order, with their totals. */
-  const appliedPromotions = Object.values(
-    checkoutLines.reduce<
-      Record<
-        string,
-        {
-          promotionId: string;
-          name: string;
-          discountType: string;
-          discountValue: number;
-          discountTHB: number;
+  /**
+   * The whole order, priced by the same function the order routes run on the
+   * server (lib/orderPricing.ts). The routes recompute it from Firestore and
+   * refuse the order if their total differs from the one shown here.
+   */
+  const pricing = priceOrder({
+    lines: pricedItems.map((item) => ({
+      productId: item.productId,
+      variantId: item.variantId,
+      quantity: item.quantity,
+      unitPriceTHB: item.unitPriceTHB,
+    })),
+    promotions: onlinePromotions,
+    coupon: activeCoupon
+      ? {
+          id: String(activeCoupon.id),
+          code: String(activeCoupon.code || ""),
+          discountType: String(activeCoupon.discountType || ""),
+          discountValue: Number(activeCoupon.discountValue) || 0,
         }
-      >
-    >((acc, line) => {
-      if (!line.promotionId || line.lineDiscountTHB <= 0) return acc;
+      : null,
+    taxRatePercent,
+    deliveryFeeTHB,
+    mmkRate,
+  });
 
-      const existing = acc[line.promotionId];
-      if (existing) {
-        existing.discountTHB += line.lineDiscountTHB;
-        return acc;
-      }
-
-      acc[line.promotionId] = {
-        promotionId: line.promotionId,
-        name: line.promotionName,
-        discountType: line.promotionDiscountType,
-        discountValue: line.promotionDiscountValue,
-        discountTHB: line.lineDiscountTHB,
-      };
-      return acc;
-    }, {}),
-  );
-
-  const discountTHB = lineResults.reduce(
-    (sum, row) => sum + row.discountTHB,
-    0,
-  );
-  const subtotalAfterDiscount = Math.max(0, baseTotalTHB - discountTHB);
-  
-  // Calculate coupon discount
-  const couponDiscount = activeCoupon
-    ? CouponService.calculateDiscount(subtotalAfterDiscount, activeCoupon)
-    : { discountAmount: 0, finalAmount: subtotalAfterDiscount };
-  
-  const subtotalAfterCoupon = couponDiscount.finalAmount;
-  const taxTHB = subtotalAfterCoupon * taxRate; // Use dynamic tax rate from POS settings
-  // Delivery is a flat fee from POS Settings, added after tax: it is not taxed
-  // and promotions/coupons never reduce it.
-  const totalTHB = subtotalAfterCoupon + taxTHB + deliveryFeeTHB;
+  const baseTotalTHB = pricing.subtotalTHB;
+  const discountTHB = pricing.promotionDiscountTHB;
+  const couponDiscountTHB = pricing.couponDiscountTHB;
+  const taxTHB = pricing.taxTHB;
+  const totalTHB = pricing.totalTHB;
+  const totalMMK = pricing.totalMMK;
   const promotionTitle =
-    lineResults.find((row) => row.promotion?.name)?.promotion?.name ||
+    pricing.lines.find((line) => line.promotion?.name)?.promotion?.name ||
     "Promotion";
-  const totalMMK = Math.round(totalTHB * mmkRate);
-  // Cannot exceed totalMMK: rounding is monotonic and the fee is part of it.
-  const deliveryFeeMMK = Math.round(deliveryFeeTHB * mmkRate);
+
+  /** What the order routes need: which items, never their prices. */
+  const orderLines = pricedItems.map((item) => ({
+    productId: item.productId,
+    variantId: item.variantId || "",
+    color: item.color || "",
+    size: item.size || "",
+    quantity: item.quantity,
+  }));
+
+  /** `fetch` with the customer's ID token; the routes identify them by it. */
+  const authedFetch = useCallback(
+    async (path: string, init: RequestInit = {}) => {
+      if (!user) throw new Error("Please sign in to continue.");
+      const idToken = await user.getIdToken();
+      const headers = new Headers(init.headers);
+      headers.set("Authorization", `Bearer ${idToken}`);
+      return fetch(path, { ...init, headers });
+    },
+    [user],
+  );
 
   const missingProfileFields = useMemo(() => {
     const missing: string[] = [];
@@ -295,10 +282,10 @@ export default function CheckoutPage() {
     setCouponActionId(couponId);
     setError(null);
     try {
-      const response = await fetch("/api/loyalty/use-coupon", {
+      const response = await authedFetch("/api/loyalty/use-coupon", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ customerId: user.uid, couponId }),
+        body: JSON.stringify({ couponId }),
       });
       const data = await response.json();
 
@@ -320,8 +307,8 @@ export default function CheckoutPage() {
     setCouponActionId(couponId);
     setError(null);
     try {
-      const response = await fetch(
-        `/api/loyalty/use-coupon?customerId=${encodeURIComponent(user.uid)}&couponId=${encodeURIComponent(couponId)}`,
+      const response = await authedFetch(
+        `/api/loyalty/use-coupon?couponId=${encodeURIComponent(couponId)}`,
         { method: "DELETE" },
       );
       const data = await response.json();
@@ -386,119 +373,18 @@ export default function CheckoutPage() {
     setSecondsLeft(0);
 
     try {
-      // The gateway itemisation must add up to the amount we actually charge.
-      // Building lines straight from item prices would ignore the coupon and
-      // tax, so the customer would be shown (and possibly charged) the
-      // undiscounted total. Instead, allocate the final MMK total across the
-      // lines in proportion to their value, letting the last line absorb any
-      // rounding remainder so the sum matches totalMMK exactly.
-      // The delivery fee is its own gateway line, so only the goods (plus tax)
-      // are spread across the product lines.
-      const goodsMmk = totalMMK - deliveryFeeMMK;
-      const linePromoTotalsTHB = checkoutLines.map(
-        (line) => line.result.finalSubtotalTHB,
-      );
-      const linesTotalTHB = linePromoTotalsTHB.reduce(
-        (sum, value) => sum + value,
-        0,
-      );
-
-      let allocatedMmk = 0;
-      const productItems = checkoutItems.map((item, index) => {
-        const isLastLine = index === checkoutItems.length - 1;
-        const share =
-          linesTotalTHB > 0
-            ? linePromoTotalsTHB[index] / linesTotalTHB
-            : 1 / checkoutItems.length;
-
-        const lineMmk = isLastLine
-          ? goodsMmk - allocatedMmk
-          : Math.max(0, Math.round(goodsMmk * share));
-        allocatedMmk += lineMmk;
-
-        const variantLabel = [item.color, item.size].filter(Boolean).join(", ");
-        const nameParts = [item.name];
-        if (variantLabel) nameParts.push(`(${variantLabel})`);
-        if (item.quantity > 1) nameParts.push(`x${item.quantity}`);
-
-        // quantity is 1 because `amount` already covers the whole line; the
-        // real quantity is kept in the label so the payment page still shows it.
-        return {
-          name: nameParts.join(" "),
-          amount: lineMmk,
-          quantity: 1,
-        };
-        // Zero-value lines are dropped below; they contribute nothing to the
-        // sum, so the itemisation still reconciles with totalMMK.
-      });
-
-      const payloadItems = [
-        ...productItems,
-        { name: "Delivery fee", amount: deliveryFeeMMK, quantity: 1 },
-      ].filter((line) => line.amount > 0);
-
-      const response = await fetch("/api/mmpay/create-order", {
+      // Only what to buy and what the customer was shown. The server prices
+      // the order itself, builds the MyanMyanPay itemisation and charges its
+      // own total, refusing the order if that differs from the one on screen.
+      const response = await authedFetch("/api/mmpay/create-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          amountMmk: totalMMK,
-          // Pass complete financial breakdown
-          subtotal: baseTotalTHB, // Original subtotal before any discounts
-          discount: discountTHB, // Promotion discount only; coupon tracked separately
-          tax: taxTHB, // Tax amount
-          taxRate: taxRatePercent, // Rate actually applied, for accurate display later
-          deliveryFee: deliveryFeeTHB, // Flat fee shown to the customer; checked server-side
-          total: totalTHB, // Final total, including the delivery fee
-          exchangeRate: mmkRate, // Rate used for the MMK amount
-          customer: {
-            uid: user.uid,
-            email: user.email || profile.email,
-            displayName: profile.displayName,
-            phone: profile.phone,
-            address: profile.address,
-          },
-          items: payloadItems,
-          // Promotions that reduced this order, named so the invoice can say so
-          appliedPromotions,
-          // Add coupon information
-          ...(activeCoupon && {
-            couponCode: activeCoupon.code,
-            couponId: activeCoupon.id,
-            couponDiscountTHB: couponDiscount.discountAmount,
-          }),
-          cartItems: checkoutLines.map((line) => ({
-            priceTHB: line.discountedUnitPriceTHB,
-            originalPriceTHB: line.item.unitPriceTHB,
-            lineDiscountTHB: line.lineDiscountTHB,
-            promotionId: line.promotionId,
-            promotionName: line.promotionName,
-            promotionDiscountType: line.promotionDiscountType,
-            promotionDiscountValue: line.promotionDiscountValue,
-            productId: line.item.productId,
-            productName: line.item.name,
-            variantId: line.item.variantId || "",
-            color: line.item.color || "",
-            size: line.item.size || "",
-            image: line.item.image || "",
-            quantity: line.item.quantity,
-          })),
-          product:
-            checkoutLines.length === 1
-              ? {
-                  productId: checkoutLines[0].item.productId,
-                  productName: checkoutLines[0].item.name,
-                  variantId: checkoutLines[0].item.variantId || "",
-                  color: checkoutLines[0].item.color || "",
-                  size: checkoutLines[0].item.size || "",
-                  image: checkoutLines[0].item.image || "",
-                  priceTHB: checkoutLines[0].discountedUnitPriceTHB,
-                  originalPriceTHB: checkoutLines[0].item.unitPriceTHB,
-                  lineDiscountTHB: checkoutLines[0].lineDiscountTHB,
-                  promotionId: checkoutLines[0].promotionId,
-                  promotionName: checkoutLines[0].promotionName,
-                  quantity: checkoutLines[0].item.quantity,
-                }
-              : undefined,
+          lines: orderLines,
+          couponId: activeCoupon?.id || null,
+          deliveryFee: deliveryFeeTHB,
+          expectedTotalTHB: totalTHB,
+          expectedTotalMMK: totalMMK,
         }),
       });
 
@@ -535,11 +421,10 @@ export default function CheckoutPage() {
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : "Payment creation failed";
 
-      // No order was created, so hand the coupon back (COD already does this).
-      if (activeCoupon && user) {
-        await CouponService.releaseCoupon(user.uid, activeCoupon.id);
-        await refreshCoupons();
-      }
+      // The coupon stays selected: nothing consumed it, and a retry (for
+      // example after a "prices changed" refusal) should still apply it.
+      // Re-read it in case the server refused it as no longer usable.
+      if (activeCoupon) await refreshCoupons();
 
       // Make limit errors more user-friendly
       if (errorMessage.toLowerCase().includes("limit")) {
@@ -566,49 +451,16 @@ export default function CheckoutPage() {
     setError(null);
 
     try {
-      // Create COD transaction directly in Firebase
-      const response = await fetch("/api/transactions/create-cod", {
+      // The server prices the order from Firestore and refuses it if the
+      // total differs from the one on screen; no prices are sent.
+      const response = await authedFetch("/api/transactions/create-cod", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          customer: {
-            uid: user!.uid,
-            email: user!.email || profile!.email,
-            displayName: profile!.displayName,
-            phone: profile!.phone,
-            address: profile!.address,
-          },
-          items: checkoutLines.map((line) => ({
-            productId: line.item.productId,
-            productName: line.item.name,
-            variantId: line.item.variantId || "",
-            color: line.item.color || "",
-            size: line.item.size || "",
-            image: line.item.image || "",
-            quantity: line.item.quantity,
-            unitPriceTHB: line.item.unitPriceTHB,
-            discountedPriceTHB: line.discountedUnitPriceTHB,
-            // Per-line promotion detail, so the invoice can show what each
-            // line saved and which promotion did it.
-            lineDiscountTHB: line.lineDiscountTHB,
-            promotionId: line.promotionId,
-            promotionName: line.promotionName,
-            promotionDiscountType: line.promotionDiscountType,
-            promotionDiscountValue: line.promotionDiscountValue,
-          })),
-          subtotalTHB: baseTotalTHB,
-          discountTHB: discountTHB,
-          appliedPromotions,
-          couponDiscountTHB: activeCoupon ? couponDiscount.discountAmount : 0,
-          couponCode: activeCoupon?.code || null,
+          lines: orderLines,
           couponId: activeCoupon?.id || null,
-          taxTHB: taxTHB,
-          taxRatePercent: taxRatePercent,
-          // Fee the customer was shown; the server rejects the order if the
-          // owner has changed it since, rather than charging a different total.
           deliveryFeeTHB: deliveryFeeTHB,
-          totalTHB: totalTHB,
-          exchangeRate: mmkRate,
+          expectedTotalTHB: totalTHB,
         }),
       });
 
@@ -629,11 +481,10 @@ export default function CheckoutPage() {
       router.push("/account/purchases");
     } catch (e) {
       setError(e instanceof Error ? e.message : "COD order creation failed");
-      
-      // Release coupon if order creation failed
-      if (activeCoupon) {
-        await CouponService.releaseCoupon(user!.uid, activeCoupon.id);
-      }
+
+      // Nothing consumed the coupon, so it stays selected for a retry. Re-read
+      // it in case the server refused it as no longer usable.
+      if (activeCoupon) await refreshCoupons();
     } finally {
       setSubmitting(false);
     }
@@ -656,7 +507,7 @@ export default function CheckoutPage() {
     setCompletingTest(true);
     setError(null);
     try {
-      const response = await fetch("/api/mmpay/test-complete", {
+      const response = await authedFetch("/api/mmpay/test-complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ orderId: onlineOrderId }),
@@ -711,7 +562,8 @@ export default function CheckoutPage() {
     let mounted = true;
     const intervalId = setInterval(async () => {
       try {
-        const response = await fetch(
+        // Only the customer who placed the order may read its status.
+        const response = await authedFetch(
           `/api/mmpay/order-status?orderId=${encodeURIComponent(onlineOrderId)}`,
           { cache: "no-store" },
         );
@@ -739,7 +591,7 @@ export default function CheckoutPage() {
       mounted = false;
       clearInterval(intervalId);
     };
-  }, [onlineOrderId, qrValue, qrExpired, router, productId, clearCart]);
+  }, [onlineOrderId, qrValue, qrExpired, router, productId, clearCart, authedFetch]);
 
   // `!cartLoading` guards against announcing an empty cart before the signed-in
   // customer's server cart has arrived — the skeleton below covers that gap.
@@ -946,7 +798,7 @@ export default function CheckoutPage() {
           Order Items
         </h2>
         <div className="space-y-4">
-          {checkoutItems.map((item) => (
+          {pricedItems.map((item) => (
             <div key={item.key} className="flex gap-4">
               <div className="shrink-0 overflow-hidden rounded-xl border border-rose-100 bg-gradient-to-br from-rose-50/60 via-white to-white">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -982,6 +834,11 @@ export default function CheckoutPage() {
                     ฿ {item.unitPriceTHB.toFixed(2)}
                   </div>
                 </div>
+                {!item.available && (
+                  <p className="mt-2 text-xs font-semibold text-red-600">
+                    No longer available. Remove it from your cart to continue.
+                  </p>
+                )}
               </div>
             </div>
           ))}
@@ -1038,7 +895,7 @@ export default function CheckoutPage() {
           ) : null}
           
           {/* Coupon Discount */}
-          {activeCoupon && couponDiscount.discountAmount > 0 && (
+          {activeCoupon && couponDiscountTHB > 0 && (
             <div className="flex items-center justify-between gap-3 py-1">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-medium text-purple-700">
@@ -1048,7 +905,7 @@ export default function CheckoutPage() {
                   {activeCoupon.code}
                 </span>
               </div>
-              <span className="text-sm font-semibold text-purple-700">-฿ {couponDiscount.discountAmount.toFixed(2)}</span>
+              <span className="text-sm font-semibold text-purple-700">-฿ {couponDiscountTHB.toFixed(2)}</span>
             </div>
           )}
           
@@ -1245,7 +1102,7 @@ export default function CheckoutPage() {
                 Open payment page instead
               </a>
             )}
-            {onlineOrderId && !qrExpired && (
+            {SHOW_TEST_PAYMENT && onlineOrderId && !qrExpired && (
               <button
                 type="button"
                 onClick={completePaymentForTest}
@@ -1307,7 +1164,9 @@ export default function CheckoutPage() {
               !user ||
               !isEmailVerified ||
               !isProfileComplete ||
-              !hasTaxRate
+              !hasTaxRate ||
+              pricesLoading ||
+              unavailableItems.length > 0
             }
             className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-rose-500 to-pink-500 px-5 py-3 text-sm font-semibold text-white shadow-md transition-all hover:from-rose-600 hover:to-pink-600 hover:shadow-lg disabled:cursor-not-allowed disabled:from-gray-300 disabled:to-gray-300 disabled:shadow-none"
           >
@@ -1323,7 +1182,11 @@ export default function CheckoutPage() {
                   ? "Complete Profile to Continue"
                   : !hasTaxRate
                     ? "Loading tax settings..."
-                    : paymentMethod === "cod"
+                    : pricesLoading
+                      ? "Checking prices..."
+                      : unavailableItems.length > 0
+                        ? "Remove unavailable items"
+                        : paymentMethod === "cod"
                       ? "Place COD Order"
                       : "Pay with MyanMyanPay"}
           </button>

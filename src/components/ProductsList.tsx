@@ -94,7 +94,7 @@ export default function ProductsList({
   } = useProducts();
   const { rate: mmkRate } = useCurrencyRate();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
-  const { data: shopsData = [] } = useShops();
+  const { data: shopsData = [], isLoading: shopsLoading } = useShops();
 
   const [error, setError] = useState<string | null>(null);
 
@@ -438,13 +438,21 @@ export default function ProductsList({
   // loading — before data arrives `totalPages` is artificially `1`, which
   // would otherwise wipe out a page number restored from the URL (e.g.
   // after using the browser back button from a product detail page).
+  //
+  // The same applies to everything else the result set depends on: the
+  // best-sellers ranking (no ids yet means an empty list) and the branch list
+  // (products stored under a branch name match nothing until it arrives).
+  const resultsSettling =
+    loading ||
+    (sortByTopSelling && topSellingLoading) ||
+    (!!filterBranch && shopsLoading);
   useEffect(() => {
-    if (loading) return;
+    if (resultsSettling) return;
     if (currentPage > totalPages) {
       setCurrentPage(totalPages);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, totalPages, setCurrentPage]);
+  }, [resultsSettling, totalPages, setCurrentPage]);
 
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;

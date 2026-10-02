@@ -963,9 +963,10 @@ export default function ProductDetailPage() {
                               variantId: String(effectiveVariantId || "0"),
                               color: effectiveColor,
                               size: selectedSize,
-                              unitPriceTHB: Number(
-                                displayFinalPrice || displayPrice || 0,
-                              ),
+                              // The catalogue price. Promotions are applied
+                              // once, at the cart and checkout; storing the
+                              // promoted price here made them apply twice.
+                              unitPriceTHB: Number(displayPrice || 0),
                               quantity: selectedPurchaseQty,
                               maxQuantity: selectedQty,
                             });

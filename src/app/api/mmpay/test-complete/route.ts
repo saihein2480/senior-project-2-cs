@@ -1,8 +1,29 @@
 import { NextResponse } from "next/server";
-import { adminDb } from "../../../../lib/firebase-admin";
+import { adminDb, getUidFromAuthHeader } from "../../../../lib/firebase-admin";
 import { deductStockForPaidOnlineOrder } from "../../../../lib/onlineStockService";
 import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid";
 import { normalizeDeliveryFee } from "../../../../lib/deliveryFee";
+import { isSettledPaymentStatus } from "../../../../lib/mmpayCallback";
+
+/**
+ * POST /api/mmpay/test-complete   body: { orderId }
+ *   headers: Authorization: Bearer <firebase id token>
+ *
+ * Marks a sandbox QR order as paid without a real payment, for demos and
+ * local testing. Because it creates a "paid" sale, it is fenced in:
+ *   - only with sandbox MyanMyanPay keys,
+ *   - only in `next dev`, or when NEXT_PUBLIC_MMPAY_TEST_MODE=true is set
+ *     explicitly (e.g. a demo deployment),
+ *   - only by the signed-in customer who placed the order,
+ *   - only while the order is still unpaid.
+ */
+function isTestCompleteEnabled() {
+  return (
+    isSandboxMode() &&
+    (process.env.NODE_ENV !== "production" ||
+      process.env.NEXT_PUBLIC_MMPAY_TEST_MODE === "true")
+  );
+}
 
 type CompleteTestRequest = {
   orderId?: string;
@@ -235,11 +256,9 @@ async function createTransactionFromOnlineOrder(payload: PaymentCallbackLike) {
 
 export async function POST(req: Request) {
   try {
-    if (!isSandboxMode()) {
-      return NextResponse.json(
-        { error: "Test complete is only allowed in sandbox mode" },
-        { status: 403 },
-      );
+    if (!isTestCompleteEnabled()) {
+      // 404, not 403: in production the endpoint should simply not exist.
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
     if (!adminDb) {
@@ -249,9 +268,15 @@ export async function POST(req: Request) {
       );
     }
 
-    const body = (await req.json()) as CompleteTestRequest;
-    const orderId = body?.orderId || "";
-    if (!orderId) {
+    const uid = await getUidFromAuthHeader(req.headers.get("authorization"));
+    if (!uid) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    }
+
+    const body = ((await req.json().catch(() => null)) ||
+      {}) as CompleteTestRequest;
+    const orderId = typeof body.orderId === "string" ? body.orderId.trim() : "";
+    if (!orderId || orderId.includes("/")) {
       return NextResponse.json(
         { error: "orderId is required" },
         { status: 400 },
@@ -260,11 +285,20 @@ export async function POST(req: Request) {
 
     const orderDocRef = adminDb.collection("onlineOrders").doc(orderId);
     const orderSnap = await orderDocRef.get();
-    if (!orderSnap.exists) {
+    const order = (orderSnap.data() || {}) as Record<string, unknown>;
+    const ownerUid = (order.customer as { uid?: unknown } | undefined)?.uid;
+
+    // Someone else's order looks exactly like a missing one.
+    if (!orderSnap.exists || ownerUid !== uid) {
       return NextResponse.json({ error: "Order not found" }, { status: 404 });
     }
 
-    const order = orderSnap.data() as Record<string, unknown>;
+    if (isSettledPaymentStatus(order.paymentStatus)) {
+      return NextResponse.json(
+        { error: "This order is already paid or refunded" },
+        { status: 409 },
+      );
+    }
     const payload: PaymentCallbackLike = {
       orderId,
       amount: Number(order.amountMmk || 0),

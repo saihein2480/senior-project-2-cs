@@ -40,8 +40,8 @@ import {
   storefrontBaseUrl,
 } from "./keyboards";
 import { searchProducts, type SearchProduct } from "../productSearch";
-import { findOrderByRef } from "../orderSupport";
-import { getCustomerByTelegramId } from "./customer-service";
+import { findOrderByRefForCustomer } from "../orderSupport";
+import { getCustomerByTelegramId, getLinkedCustomerUid } from "./customer-service";
 import { linkTelegramToCustomer } from "./auth-service";
 import {
   getTelegramCart,
@@ -783,6 +783,23 @@ async function handleOrdersCommand(ctx: BotContext): Promise<void> {
 }
 
 /**
+ * Reply for an order command from a chat that is not linked to a customer.
+ *
+ * Orders are only ever shown to the account that placed them, and the linked
+ * account is the only identity a Telegram chat has, so there is nothing to look
+ * up until the chat is linked.
+ */
+async function sendLinkRequired(ctx: BotContext, action: string): Promise<void> {
+  await sendMessage({
+    chat_id: ctx.chatId,
+    text:
+      `👤 Please link your account first to ${escapeMarkdown(action)}\\.\n\n` +
+      `Use /link to link your account\\.`,
+    reply_markup: createBackButton(),
+  });
+}
+
+/**
  * Handle /track command
  */
 async function handleTrackCommand(ctx: BotContext, orderRef: string): Promise<void> {
@@ -798,6 +815,13 @@ async function handleTrackCommand(ctx: BotContext, orderRef: string): Promise<vo
   await sendChatAction(ctx.chatId, "typing");
 
   try {
+    // Orders are private: only the customer linked to this chat may see one.
+    const customerUid = await getLinkedCustomerUid(ctx.chatId);
+    if (!customerUid) {
+      await sendLinkRequired(ctx, "track orders");
+      return;
+    }
+
     // Prices are quoted here, so the owner's rate has to be loaded first.
     // Without this the message falls back to NEXT_PUBLIC_MMK_RATE and quotes MMK
     // at the wrong rate.
@@ -805,7 +829,12 @@ async function handleTrackCommand(ctx: BotContext, orderRef: string): Promise<vo
 
     // References are stored upper-case (all 249 of them) and are Firestore
     // document ids, so a lower-case copy/paste would otherwise never match.
-    const order = await findOrderByRef(orderRef.trim().toUpperCase());
+    // Someone else's order comes back as null, so it gets the same "not found"
+    // reply as a reference that does not exist.
+    const order = await findOrderByRefForCustomer(
+      orderRef.trim().toUpperCase(),
+      customerUid,
+    );
 
     if (!order) {
       await sendMessage({
@@ -1133,11 +1162,22 @@ async function handleCancelOrderCommand(ctx: BotContext, orderRef: string): Prom
   await sendChatAction(ctx.chatId, "typing");
 
   try {
+    // Same scoping as /track: only the linked customer's own orders.
+    const customerUid = await getLinkedCustomerUid(ctx.chatId);
+    if (!customerUid) {
+      await sendLinkRequired(ctx, "cancel orders");
+      return;
+    }
+
     // Same two corrections as /track: the confirmation quotes a price, and the
     // reference has to be matched in the case it is stored in.
     await primeCurrency();
 
-    const order = await findOrderByRef(orderRef.trim().toUpperCase());
+    // Not-yours and not-found get the same reply, so references can't be probed.
+    const order = await findOrderByRefForCustomer(
+      orderRef.trim().toUpperCase(),
+      customerUid,
+    );
 
     if (!order) {
       await sendMessage({

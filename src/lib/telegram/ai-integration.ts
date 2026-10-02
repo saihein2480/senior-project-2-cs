@@ -12,19 +12,29 @@ import {
   generateOutfitRecommendation,
 } from "../outfitRecommendation";
 import { isPromotionQuery, getPromotionResponse } from "../promotions";
-import { isOrderInquiry, findOrderByRef } from "../orderSupport";
+import { isOrderInquiry, findOrderByRefForCustomer } from "../orderSupport";
 import { isSizeRecommendationQuery, extractMeasurements, recommendSize } from "../storeInfo";
 import { formatProduct, formatPrice, escapeMarkdown } from "./formatters";
 import { createProductKeyboard } from "./keyboards";
 
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
+/** Who is asking, as far as the caller has verified it. */
+export interface ProcessWithAIContext {
+  /**
+   * uid of the customer the chat is linked to (see `getLinkedCustomerUid`).
+   * Without it no order details are ever returned.
+   */
+  customerUid?: string | null;
+}
+
 /**
  * Process message with AI assistant
  */
 export async function processWithAI(
   message: string,
-  chatHistory: Array<{ role: "user" | "assistant"; content: string }> = []
+  chatHistory: Array<{ role: "user" | "assistant"; content: string }> = [],
+  context: ProcessWithAIContext = {},
 ): Promise<{
   text: string;
   products?: any[];
@@ -49,14 +59,34 @@ export async function processWithAI(
       return { text: response };
     }
 
-    // 2. Order inquiries
+    // 2. Order inquiries. An order reference alone proves nothing, so details
+    // are only shown for an order placed by the customer linked to this chat.
+    // Not-linked, not-found and someone-else's-order never reach the AI, which
+    // could otherwise be steered into confirming that a reference exists.
     const orderQuery = isOrderInquiry(message);
     if (orderQuery.isInquiry && orderQuery.orderRef) {
-      const order = await findOrderByRef(orderQuery.orderRef);
+      if (!context.customerUid) {
+        return {
+          text: escapeMarkdown(
+            "To check an order, link your account with /link, then send /track followed by your order reference.",
+          ),
+        };
+      }
+
+      const order = await findOrderByRefForCustomer(
+        orderQuery.orderRef,
+        context.customerUid,
+      );
       if (order) {
         const { formatOrder } = await import("./formatters");
         return { text: formatOrder(order) };
       }
+
+      return {
+        text: escapeMarkdown(
+          `I couldn't find order ${orderQuery.orderRef} on your account. Use /orders to see your recent orders, or /track followed by your order reference.`,
+        ),
+      };
     }
 
     // 3. Size recommendations

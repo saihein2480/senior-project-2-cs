@@ -174,9 +174,13 @@ export default function NotificationsPage() {
           // Continue to fetch from transactions even if notifications query fails
         }
 
-        // PART 2: Fetch all transactions and filter by customer.uid (EXISTING)
+        // PART 2: This customer's transactions only. The Firestore rules refuse
+        // a listing of the whole collection, and it would expose every other
+        // customer's orders anyway. Same query (and composite index) as the
+        // purchases page; the uid check below stays as a belt-and-braces filter.
         const txnQuery = query(
           collection(db!, "transactions"),
+          where("customer.uid", "==", user.uid),
           orderBy("timestamp", "desc")
         );
 

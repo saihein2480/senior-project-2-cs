@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase-admin";
+import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
 import { LoyaltyService } from "@/lib/loyaltyService";
 
+/**
+ * GET /api/loyalty/summary
+ *   headers: Authorization: Bearer <firebase id token>
+ *
+ * The signed-in customer's points, coupons and redeemable packages. The
+ * customer comes from the ID token only; a `customerId` query parameter (sent
+ * by older clients) is ignored.
+ */
 export async function GET(request: NextRequest) {
   try {
     if (!adminDb) {
@@ -11,18 +19,15 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get customer ID from query params (passed from client)
-    const { searchParams } = new URL(request.url);
-    const customerId = searchParams.get("customerId");
-
-    if (!customerId) {
+    const uid = await getUidFromAuthHeader(request.headers.get("authorization"));
+    if (!uid) {
       return NextResponse.json(
-        { success: false, error: "Customer ID required" },
-        { status: 400 }
+        { success: false, error: "Not authenticated" },
+        { status: 401 }
       );
     }
 
-    const result = await LoyaltyService.getLoyaltySummary(customerId);
+    const result = await LoyaltyService.getLoyaltySummary(uid);
 
     if (!result.success) {
       return NextResponse.json(

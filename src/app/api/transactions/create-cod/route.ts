@@ -1,15 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebase-admin";
-import { Timestamp, FieldValue } from "firebase-admin/firestore";
+import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { syncOnlineCustomerToPos } from "@/lib/updateCustomerStats";
-import { DELIVERY_AREA_NOTICE, isDeliverableAddress } from "@/lib/deliveryArea";
 import { createCodOrderWithStock } from "@/lib/onlineStockService";
-import { getDeliveryFeeTHB } from "@/lib/storeSettings";
 import {
-  deliveryFeeChangedMessage,
-  isSameDeliveryFee,
-} from "@/lib/deliveryFee";
+  assertCustomerSawQuote,
+  isQuoteError,
+  orderLineRecords,
+  parseRequestedLines,
+  quoteErrorBody,
+  quoteOrder,
+} from "@/lib/server/orderQuote";
 
+/**
+ * POST /api/transactions/create-cod
+ *   headers: Authorization: Bearer <firebase id token>
+ *   body: {
+ *     lines: Array<{ productId, variantId?, color?, size?, quantity }>,
+ *     couponId?: string | null,
+ *     // What the checkout page showed; the order is refused if these differ
+ *     // from the server's own figures.
+ *     deliveryFeeTHB: number, expectedTotalTHB: number,
+ *   }
+ *
+ * The customer is the caller identified by the ID token. Prices, promotions,
+ * the coupon's value, tax, rate, delivery fee, and the customer's name, phone
+ * and address all come from Firestore (see lib/server/orderQuote.ts). Before
+ * this, every one of them was taken from the request body.
+ */
 export async function POST(request: NextRequest) {
   try {
     if (!adminDb) {
@@ -19,60 +37,42 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = await request.json();
-    const {
-      customer,
-      items,
-      subtotalTHB,
-      discountTHB,
-      taxTHB,
-      taxRatePercent,
-      deliveryFeeTHB,
-      totalTHB,
-      exchangeRate,
-      couponCode,
-      couponId,
-      couponDiscountTHB,
-      appliedPromotions,
-    } = body;
-
-    // Validate required fields
-    if (!customer || !items || !Array.isArray(items) || items.length === 0) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 }
-      );
+    const uid = await getUidFromAuthHeader(request.headers.get("authorization"));
+    if (!uid) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    // Delivery is Tachileik-only; the checkout page checks this too, but the
-    // payload is client-supplied so it is enforced here as well.
-    if (!isDeliverableAddress(customer.address)) {
-      return NextResponse.json(
-        { error: DELIVERY_AREA_NOTICE },
-        { status: 400 }
-      );
-    }
+    const body = ((await request.json().catch(() => null)) || {}) as Record<
+      string,
+      unknown
+    >;
 
-    // The delivery fee comes from POS Settings, not the request. If the owner
-    // changed it after the customer loaded checkout, stop here so the customer
-    // re-confirms the new total instead of being billed a different amount.
-    let deliveryFee: number;
+    // Price first, so an invalid or out-of-date order does not burn a receipt
+    // number from the counter below.
+    let quote: Awaited<ReturnType<typeof quoteOrder>>;
     try {
-      deliveryFee = await getDeliveryFeeTHB();
-    } catch (feeError) {
-      console.error("Could not read delivery fee for COD order:", feeError);
-      return NextResponse.json(
-        { error: "Could not load the delivery fee. Please try again." },
-        { status: 503 }
+      quote = await quoteOrder(adminDb, {
+        uid,
+        lines: parseRequestedLines(body.lines),
+        couponId: typeof body.couponId === "string" ? body.couponId : null,
+      });
+      assertCustomerSawQuote(
+        quote.pricing,
+        { deliveryFee: body.deliveryFeeTHB, totalTHB: body.expectedTotalTHB },
+        // COD is settled in cash on delivery; the MMK figure is display only.
+        { checkMmk: false },
       );
+    } catch (error) {
+      if (isQuoteError(error)) {
+        return NextResponse.json(quoteErrorBody(error), {
+          status: error.status,
+        });
+      }
+      throw error;
     }
 
-    if (!isSameDeliveryFee(deliveryFeeTHB, deliveryFee)) {
-      return NextResponse.json(
-        { error: deliveryFeeChangedMessage(deliveryFee), deliveryFee },
-        { status: 409 }
-      );
-    }
+    const { customer, pricing, coupon } = quote;
+    const cartItems = orderLineRecords(quote);
 
     // Generate sequential transaction ID
     const counterRef = adminDb.collection("counters").doc("transactionCounter");
@@ -107,98 +107,52 @@ export async function POST(request: NextRequest) {
         .toUpperCase()}`;
     }
 
-    // Use values from checkout page (already calculated with tax)
-    const subtotal = subtotalTHB || items.reduce(
-      (sum: number, item: any) =>
-        sum + (item.discountedPriceTHB || item.unitPriceTHB) * item.quantity,
-      0
-    );
-    const discount = discountTHB || 0;
-    const tax = taxTHB || 0; // Use tax from checkout page, or 0 if not provided
-    const taxRate = Number(taxRatePercent || 0); // Percentage actually applied
-    const couponDiscount = Number(couponDiscountTHB || 0);
-    const total =
-      totalTHB ||
-      Math.max(0, subtotal - discount - couponDiscount) + tax + deliveryFee;
-
-    /**
-     * Promotions that reduced this order, named.
-     *
-     * Kept as its own field so an invoice rendered months later can still say
-     * *which* promotion applied; the promotion documents themselves are edited
-     * and deactivated over time and cannot be trusted as a lookup after the fact.
-     */
-    const promotions = Array.isArray(appliedPromotions)
-      ? appliedPromotions
-          .filter(
-            (promo: unknown): promo is Record<string, unknown> =>
-              !!promo && typeof promo === "object",
-          )
-          .map((promo) => ({
-            promotionId: String(promo.promotionId || ""),
-            name: String(promo.name || ""),
-            discountType: String(promo.discountType || ""),
-            discountValue: Number(promo.discountValue || 0),
-            discountTHB: Number(promo.discountTHB || 0),
-          }))
-      : [];
-
-    /** Line-level pricing detail shared by both documents written below. */
-    const lineDetails = items.map((item: any) => ({
-      unitPrice: item.discountedPriceTHB || item.unitPriceTHB,
-      originalPrice: item.unitPriceTHB,
-      discountedPrice: item.discountedPriceTHB,
-      lineDiscount: Number(item.lineDiscountTHB || 0),
-      promotionId: item.promotionId || "",
-      promotionName: item.promotionName || "",
-      promotionDiscountType: item.promotionDiscountType || "",
-      promotionDiscountValue: Number(item.promotionDiscountValue || 0),
-    }));
-
     // Generate unique online order ID (different from transaction ID)
     const orderId = `COD-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
-    // Prefer the rate the customer actually saw at checkout.
-    const mmkRate =
-      Number(exchangeRate || 0) > 0
-        ? Number(exchangeRate)
-        : Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
-    const amountMmk = mmkRate > 0 ? total * mmkRate : total;
+    const couponFields = coupon
+      ? {
+          couponCode: coupon.code,
+          appliedCouponCode: coupon.code,
+          couponId: coupon.id,
+          couponDiscountTHB: pricing.couponDiscountTHB,
+        }
+      : {};
 
     // Prepare transaction data for Firebase
     const transactionData = {
       transactionId,
       onlineOrderId: orderId, // Link to online order
       source: "online", // Mark as online transaction for filtering
-      customer: {
-        uid: customer.uid, // Include UID in customer object for purchase history filtering
-        email: customer.email,
-        displayName: customer.displayName,
-        phone: customer.phone,
-        address: customer.address,
-        customerType: "online",
-      },
-      items: items.map((item: any, index: number) => ({
-        id: `${item.productId}_${item.variantId}_${item.size}`,
-        productId: item.productId,
-        stockId: item.productId, // Use productId as stockId for web orders
-        groupName: item.productName,
-        selectedColor: item.color,
-        selectedSize: item.size,
+      customer: { ...customer, customerType: "online" },
+      items: cartItems.map((line) => ({
+        id: `${line.productId}_${line.variantId}_${line.size}`,
+        productId: line.productId,
+        stockId: line.productId, // Use productId as stockId for web orders
+        groupName: line.productName,
+        selectedColor: line.color,
+        selectedSize: line.size,
         colorCode: "", // Will be populated from product data
-        image: item.image,
-        quantity: item.quantity,
-        ...lineDetails[index],
+        image: line.image,
+        quantity: line.quantity,
+        unitPrice: line.priceTHB,
+        originalPrice: line.originalPriceTHB,
+        discountedPrice: line.priceTHB,
+        lineDiscount: line.lineDiscountTHB,
+        promotionId: line.promotionId,
+        promotionName: line.promotionName,
+        promotionDiscountType: line.promotionDiscountType,
+        promotionDiscountValue: line.promotionDiscountValue,
       })),
-      subtotal,
-      tax,
-      taxRate,
-      discount,
-      deliveryFee, // Flat THB fee from POS Settings; already included in `total`
-      total,
-      appliedPromotions: promotions,
-      amountPaid: total, // For COD, amount paid equals total (will be paid on delivery)
-      amountMmk, // Add MMK amount for display
+      subtotal: pricing.subtotalTHB,
+      tax: pricing.taxTHB,
+      taxRate: pricing.taxRatePercent,
+      discount: pricing.promotionDiscountTHB,
+      deliveryFee: pricing.deliveryFeeTHB, // already included in `total`
+      total: pricing.totalTHB,
+      appliedPromotions: pricing.appliedPromotions,
+      amountPaid: pricing.totalTHB, // For COD, amount paid equals total (will be paid on delivery)
+      amountMmk: pricing.totalMMK,
       change: 0,
       paymentMethod: "cod",
       status: "pending", // COD orders start as pending
@@ -206,85 +160,53 @@ export async function POST(request: NextRequest) {
       createdAt: FieldValue.serverTimestamp(),
       branchName: "Online Store",
       sellingCurrency: "THB",
-      exchangeRate: mmkRate || 1,
-      sellingTotal: amountMmk,
+      exchangeRate: pricing.mmkRate,
+      sellingTotal: pricing.totalMMK,
+      pricedBy: "server",
       discountBreakdown: {
         wholesaleSavings: 0,
         groupPercentSavings: 0,
         groupFixedTotal: 0,
         variantPercentSavings: 0,
         variantFixedTotal: 0,
-        cartDiscount: discount,
+        cartDiscount: pricing.promotionDiscountTHB,
         cartDiscountPercent: 0,
       },
-      // Coupon information
-      ...(couponCode && {
-        couponCode,
-        appliedCouponCode: couponCode,
-        couponId,
-        couponDiscountTHB: couponDiscountTHB || 0,
-      }),
+      ...couponFields,
       // Delivery tracking fields
       deliveryStatus: "pending", // pending, confirmed, shipped, delivered, cancelled
       orderSource: "web_storefront",
-      customerUid: customer.uid,
+      customerUid: uid,
     };
-
-    // Convert items to cartItems format for onlineOrders
-    const cartItems = items.map((item: any, index: number) => ({
-      productId: item.productId,
-      productName: item.productName,
-      variantId: item.variantId,
-      color: item.color,
-      size: item.size,
-      image: item.image,
-      priceTHB: item.discountedPriceTHB || item.unitPriceTHB,
-      originalPriceTHB: item.unitPriceTHB,
-      lineDiscountTHB: lineDetails[index].lineDiscount,
-      promotionId: lineDetails[index].promotionId,
-      promotionName: lineDetails[index].promotionName,
-      quantity: item.quantity,
-    }));
 
     const onlineOrderData = {
       orderId,
       transactionId, // Link to the transaction
       source: "online",
-      customer: {
-        uid: customer.uid,
-        email: customer.email,
-        displayName: customer.displayName,
-        phone: customer.phone,
-        address: customer.address,
-      },
+      customer,
       cartItems,
-      items: items.map((item: any) => ({
-        name: item.productName,
-        amount: (item.discountedPriceTHB || item.unitPriceTHB) * item.quantity,
-        quantity: item.quantity,
+      items: cartItems.map((line) => ({
+        name: line.productName,
+        amount: line.priceTHB * line.quantity,
+        quantity: line.quantity,
       })),
       // Financial breakdown
-      subtotal,
-      tax,
-      taxRate,
-      discount,
-      deliveryFee,
-      appliedPromotions: promotions,
-      total, // THB total amount, including the delivery fee
-      amountMmk,
-      exchangeRate: mmkRate,
+      subtotal: pricing.subtotalTHB,
+      tax: pricing.taxTHB,
+      taxRate: pricing.taxRatePercent,
+      discount: pricing.promotionDiscountTHB,
+      deliveryFee: pricing.deliveryFeeTHB,
+      appliedPromotions: pricing.appliedPromotions,
+      total: pricing.totalTHB, // THB total amount, including the delivery fee
+      amountMmk: pricing.totalMMK,
+      exchangeRate: pricing.mmkRate,
+      pricedBy: "server",
       status: "pending",
       paymentStatus: "PENDING",
       paymentMethod: "cod",
       provider: "COD",
       paymentProvider: "COD",
-      // Coupon information
-      ...(couponCode && {
-        couponCode,
-        appliedCouponCode: couponCode,
-        couponId,
-        couponDiscountTHB: couponDiscountTHB || 0,
-      }),
+      ...couponFields,
       deliveryStatus: "pending",
       orderSource: "web_storefront",
       createdAt: new Date().toISOString(),
@@ -292,10 +214,8 @@ export async function POST(request: NextRequest) {
     };
 
     // Take the stock and write the transaction and the online order in one
-    // transaction. Before this, COD orders never touched stock at all, yet the
-    // POS put stock back when one was cancelled or returned, so every
-    // cancelled COD order inflated the count. If another buyer got the last
-    // unit first, nothing is written and the customer is told now.
+    // transaction. If another buyer got the last unit first, nothing is
+    // written and the customer is told now.
     let transactionDocId: string;
     try {
       ({ transactionDocId } = await createCodOrderWithStock(adminDb, {
@@ -312,9 +232,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Sync customer to POS system's customers collection
-    if (customer.uid) {
-      await syncOnlineCustomerToPos(customer.uid);
-    }
+    await syncOnlineCustomerToPos(uid);
 
     // Create an owner-facing notification so it shows up in the POS
     // notification bell/page and routes to the online orders page.
@@ -337,30 +255,29 @@ export async function POST(request: NextRequest) {
 
     // Confirm the order to the customer by email, Telegram and the in-app bell.
     // Best-effort: the order exists either way, so nothing here may throw.
-    if (customer.uid) {
-      try {
-        const { notifyCustomer } = await import("@/lib/notifications/dispatch");
-        await notifyCustomer({
-          customerId: customer.uid,
-          fallbackEmail: customer.email,
-          fallbackDisplayName: customer.displayName,
-          event: {
-            type: "order_placed",
-            order: {
-              orderRef: orderId,
-              totalAmount: Number(total || 0),
-              paymentMethod: "cod",
-              paymentStatus: "pending",
-              items: items.map((item: any) => ({
-                name: item.productName,
-                quantity: item.quantity,
-              })),
-            },
+    try {
+      const { notifyCustomer } = await import("@/lib/notifications/dispatch");
+      await notifyCustomer({
+        customerId: uid,
+        // From the customer's own record, never from the request.
+        fallbackEmail: customer.email,
+        fallbackDisplayName: customer.displayName,
+        event: {
+          type: "order_placed",
+          order: {
+            orderRef: orderId,
+            totalAmount: pricing.totalTHB,
+            paymentMethod: "cod",
+            paymentStatus: "pending",
+            items: cartItems.map((line) => ({
+              name: line.productName,
+              quantity: line.quantity,
+            })),
           },
-        });
-      } catch (notifyError) {
-        console.error("Error sending COD order confirmation to customer:", notifyError);
-      }
+        },
+      });
+    } catch (notifyError) {
+      console.error("Error sending COD order confirmation to customer:", notifyError);
     }
 
     console.log(
@@ -370,23 +287,18 @@ export async function POST(request: NextRequest) {
     );
 
     // Mark coupon as used and deduct points if a coupon was applied
-    if (customer.uid && couponId) {
+    if (coupon) {
       try {
         const { CouponService } = await import("@/lib/couponService");
+        // eslint-disable-next-line react-hooks/rules-of-hooks -- not a React hook; the `use` prefix only looks like one
         const couponUsed = await CouponService.useCouponAdmin(
           adminDb,
-          customer.uid,
-          couponId,
+          uid,
+          coupon.id,
           transactionId
         );
 
-        if (couponUsed) {
-          console.log("Coupon marked as used and points deducted:", {
-            customerId: customer.uid,
-            couponId,
-            couponCode,
-          });
-        } else {
+        if (!couponUsed) {
           console.warn("Failed to mark coupon as used, but order will proceed");
         }
       } catch (couponError) {
@@ -396,29 +308,27 @@ export async function POST(request: NextRequest) {
     }
 
     // Award loyalty points for COD order
-    if (customer.uid) {
-      try {
-        const { LoyaltyService } = await import("@/lib/loyaltyService");
-        const loyaltyResult = await LoyaltyService.awardPoints({
-          customerId: customer.uid,
-          transactionId,
-          // Points are for what was bought, not for delivery.
-          transactionAmount: Math.max(0, total - deliveryFee),
-          source: 'online',
-          description: `Online COD order ${orderId}`,
-        });
+    try {
+      const { LoyaltyService } = await import("@/lib/loyaltyService");
+      const loyaltyResult = await LoyaltyService.awardPoints({
+        customerId: uid,
+        transactionId,
+        // Points are for what was bought, not for delivery.
+        transactionAmount: Math.max(0, pricing.totalTHB - pricing.deliveryFeeTHB),
+        source: 'online',
+        description: `Online COD order ${orderId}`,
+      });
 
-        if (loyaltyResult.success) {
-          console.log("Loyalty points awarded for COD order:", {
-            points: loyaltyResult.pointsAwarded,
-            newTotal: loyaltyResult.newTotalPoints,
-            coupons: loyaltyResult.couponsGenerated.length,
-          });
-        }
-      } catch (loyaltyError) {
-        // Don't fail the order if loyalty fails
-        console.error("Error awarding loyalty points for COD:", loyaltyError);
+      if (loyaltyResult.success) {
+        console.log("Loyalty points awarded for COD order:", {
+          points: loyaltyResult.pointsAwarded,
+          newTotal: loyaltyResult.newTotalPoints,
+          coupons: loyaltyResult.couponsGenerated.length,
+        });
       }
+    } catch (loyaltyError) {
+      // Don't fail the order if loyalty fails
+      console.error("Error awarding loyalty points for COD:", loyaltyError);
     }
 
     return NextResponse.json({
@@ -426,17 +336,13 @@ export async function POST(request: NextRequest) {
       transactionId,
       firestoreId: transactionDocId,
       orderId,
+      totalTHB: pricing.totalTHB,
       message: "COD order created successfully",
     });
   } catch (error) {
     console.error("Error creating COD transaction:", error);
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to create COD order",
-      },
+      { error: "Failed to create COD order. Please try again." },
       { status: 500 }
     );
   }

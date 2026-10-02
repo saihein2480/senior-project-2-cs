@@ -1,4 +1,4 @@
-import type { OnlinePromotion } from "../hooks/useOnlinePromotions";
+import type { OnlinePromotion } from "./onlinePromotionDoc";
 
 export type AppliedPromotionResult = {
   promotion: OnlinePromotion | null;
@@ -12,22 +12,57 @@ function safeNumber(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function isActiveNow(promo: OnlinePromotion): boolean {
+/**
+ * The store's clock: Myanmar Time (UTC+06:30), where Tachileik is.
+ *
+ * Promotion dates are calendar days picked in the POS (`<input type="date">`,
+ * "YYYY-MM-DD"). They used to be evaluated in whatever timezone the code ran
+ * in, so the browser (Myanmar) and the order route (UTC on the server) disagreed
+ * for six and a half hours around every start and end date. Pinning the
+ * timezone makes both sides agree, which the server-side price check relies on.
+ */
+const STORE_UTC_OFFSET_MS = 390 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Start (inclusive) and end (inclusive) of a calendar day in store time, as epoch ms. */
+function storeDayBounds(value: string): { start: number; end: number } | null {
+  const trimmed = value.trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+
+  let dayStartUtc: number;
+  if (dateOnly) {
+    dayStartUtc =
+      Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3])) -
+      STORE_UTC_OFFSET_MS;
+  } else {
+    // Anything else (an ISO timestamp): use the store-time day it falls on.
+    const parsed = new Date(trimmed).getTime();
+    if (Number.isNaN(parsed)) return null;
+    const shifted = new Date(parsed + STORE_UTC_OFFSET_MS);
+    dayStartUtc =
+      Date.UTC(
+        shifted.getUTCFullYear(),
+        shifted.getUTCMonth(),
+        shifted.getUTCDate(),
+      ) - STORE_UTC_OFFSET_MS;
+  }
+
+  if (Number.isNaN(dayStartUtc)) return null;
+  return { start: dayStartUtc, end: dayStartUtc + DAY_MS - 1 };
+}
+
+/** Active from 00:00 on startDate to 23:59:59.999 on endDate, store time. */
+function isActiveNow(promo: OnlinePromotion, now: number = Date.now()): boolean {
   if (!promo.isActive) return false;
 
-  const now = new Date();
-
   if (promo.startDate) {
-    const start = new Date(promo.startDate);
-    if (!Number.isNaN(start.getTime()) && now < start) return false;
+    const bounds = storeDayBounds(promo.startDate);
+    if (bounds && now < bounds.start) return false;
   }
 
   if (promo.endDate) {
-    const end = new Date(promo.endDate);
-    if (!Number.isNaN(end.getTime())) {
-      end.setHours(23, 59, 59, 999);
-      if (now > end) return false;
-    }
+    const bounds = storeDayBounds(promo.endDate);
+    if (bounds && now > bounds.end) return false;
   }
 
   return true;

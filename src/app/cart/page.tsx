@@ -5,41 +5,53 @@ import { useRouter } from "next/navigation";
 import { useCart } from "../../contexts/CartContext";
 import { useCurrencyRate, useDeliveryFee } from "../../hooks/useSettings";
 import { useOnlinePromotions } from "../../hooks/useOnlinePromotions";
-import { applyBestPromotionToLine } from "../../lib/onlinePromotion";
+import { useCatalogPrices } from "../../hooks/useCatalogPrices";
+import { priceOrder } from "../../lib/orderPricing";
 
 export default function CartPage() {
   const router = useRouter();
-  const { items, subtotalTHB, isLoading, removeItem, updateQuantity, clearCart } =
+  const { items, isLoading, removeItem, updateQuantity, clearCart } =
     useCart();
   const { rate: mmkRate } = useCurrencyRate();
   // Not shown until settings arrive, so "Free delivery" never flashes first.
   const { deliveryFeeTHB, isLoading: deliveryFeeLoading } = useDeliveryFee();
   const { data: onlinePromotions = [] } = useOnlinePromotions();
 
-  const discountTHB = items.reduce((sum, item) => {
-    const applied = applyBestPromotionToLine({
-      unitPriceTHB: item.unitPriceTHB,
-      quantity: item.quantity,
+  // Today's catalogue price for each line, not the one stored when it was
+  // added (which may be stale, or on older carts already promotion-reduced).
+  const { prices: livePrices } = useCatalogPrices(
+    items.map((item) => item.productId),
+  );
+  const pricedItems = items.map((item) => {
+    const live = livePrices[item.productId];
+    return {
+      ...item,
+      unitPriceTHB: typeof live === "number" ? live : item.unitPriceTHB,
+      unavailable: live === null,
+    };
+  });
+
+  // Same pricing as checkout and the order routes; tax, coupon and delivery
+  // are added at checkout.
+  const pricing = priceOrder({
+    lines: pricedItems.map((item) => ({
       productId: item.productId,
       variantId: item.variantId,
-      promotions: onlinePromotions,
-    });
-    return sum + applied.discountTHB;
-  }, 0);
+      quantity: item.quantity,
+      unitPriceTHB: item.unitPriceTHB,
+    })),
+    promotions: onlinePromotions,
+    coupon: null,
+    taxRatePercent: 0,
+    deliveryFeeTHB: 0,
+    mmkRate,
+  });
 
-  const promoTitle = (() => {
-    for (const item of items) {
-      const applied = applyBestPromotionToLine({
-        unitPriceTHB: item.unitPriceTHB,
-        quantity: item.quantity,
-        productId: item.productId,
-        variantId: item.variantId,
-        promotions: onlinePromotions,
-      });
-      if (applied.promotion?.name) return applied.promotion.name;
-    }
-    return "Promotion";
-  })();
+  const subtotalTHB = pricing.subtotalTHB;
+  const discountTHB = pricing.promotionDiscountTHB;
+  const promoTitle =
+    pricing.lines.find((line) => line.promotion?.name)?.promotion?.name ||
+    "Promotion";
 
   const finalSubtotalTHB = Math.max(0, subtotalTHB - discountTHB);
   const finalSubtotalMMK = Math.round(finalSubtotalTHB * mmkRate);
@@ -212,7 +224,7 @@ export default function CartPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8 items-start">
           {/* Items */}
           <div className="lg:col-span-2 space-y-4">
-            {items.map((item) => (
+            {pricedItems.map((item) => (
               <div
                 key={item.id}
                 className="overflow-hidden rounded-2xl border border-rose-100 bg-white shadow-sm transition-shadow hover:shadow-md"
@@ -277,6 +289,11 @@ export default function CartPage() {
                         <div className="mt-0.5 text-sm font-semibold text-gray-900">
                           ฿ {item.unitPriceTHB.toFixed(2)}
                         </div>
+                        {item.unavailable && (
+                          <div className="mt-1 text-xs font-semibold text-red-600">
+                            No longer available
+                          </div>
+                        )}
                       </div>
 
                       {/* Quantity stepper */}

@@ -66,9 +66,13 @@ function NavBarContent() {
 
       setMembershipLoading(true);
       try {
-        const response = await fetch(`/api/loyalty/summary?customerId=${user.uid}`);
-        const data = await response.json();
-        if (data.success && data.data) {
+        // The route identifies the customer from the ID token, not a uid.
+        const idToken = await user.getIdToken();
+        const response = await fetch("/api/loyalty/summary", {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        const data = await response.json().catch(() => null);
+        if (response.ok && data?.success && data.data) {
           setIsMember(data.data.isMember || false);
         } else {
           setIsMember(false);
@@ -270,6 +274,17 @@ function NavBarContent() {
   React.useEffect(() => {
     const id = setTimeout(() => {
       const term = searchQuery.trim();
+
+      // Only touch the URL when the typed term actually differs from the one
+      // already in it. This effect also runs on every route change, and
+      // rewriting the URL then (buildSearchUrl drops `page`) sent a shopper
+      // who pressed Back from a product straight to page 1 of the listing.
+      const urlTerm =
+        typeof window !== "undefined"
+          ? (new URLSearchParams(window.location.search).get("q") || "").trim()
+          : "";
+      if (term === urlTerm) return;
+
       updateUrlQuery(term);
     }, 350);
     return () => clearTimeout(id);

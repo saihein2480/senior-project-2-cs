@@ -1,46 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
+
+type StoredCoupon = {
+  id?: string;
+  code?: string;
+  discountType?: string;
+  discountValue?: number;
+  expiresAt?: unknown;
+  inUse?: boolean;
+  status?: string;
+};
 
 /**
  * GET /api/loyalty/active-coupon
- * Get the customer's currently "in use" coupon for checkout
+ *   headers: Authorization: Bearer <firebase id token>
+ *
+ * Get the signed-in customer's currently "in use" coupon for checkout. The
+ * customer comes from the ID token only; a `customerId` query parameter is
+ * ignored.
  */
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const customerId = searchParams.get("customerId");
-
-    if (!customerId) {
-      return NextResponse.json(
-        { success: false, error: "Customer ID is required" },
-        { status: 400 }
-      );
-    }
-
-    if (!db) {
+    if (!adminDb) {
       return NextResponse.json(
         { success: false, error: "Database not configured" },
         { status: 500 }
       );
     }
 
-    // Get customer document
-    const customerRef = doc(db, "customers", customerId);
-    const customerSnap = await getDoc(customerRef);
+    const uid = await getUidFromAuthHeader(request.headers.get("authorization"));
+    if (!uid) {
+      return NextResponse.json(
+        { success: false, error: "Not authenticated" },
+        { status: 401 }
+      );
+    }
 
-    if (!customerSnap.exists()) {
+    // Get customer document
+    const customerSnap = await adminDb.collection("customers").doc(uid).get();
+
+    if (!customerSnap.exists) {
       return NextResponse.json(
         { success: false, error: "Customer not found" },
         { status: 404 }
       );
     }
 
-    const customerData = customerSnap.data();
-    const coupons = customerData.coupons || [];
+    const customerData = customerSnap.data() || {};
+    const coupons: StoredCoupon[] = Array.isArray(customerData.coupons)
+      ? customerData.coupons
+      : [];
 
     // Find the "in use" coupon
-    const activeCoupon = coupons.find((c: any) => c.inUse === true && c.status === "active");
+    const activeCoupon = coupons.find(
+      (c) => c?.inUse === true && c?.status === "active",
+    );
 
     if (!activeCoupon) {
       return NextResponse.json({
@@ -52,9 +66,13 @@ export async function GET(request: NextRequest) {
 
     // Check if coupon is expired
     const now = new Date();
-    const expiresAt = activeCoupon.expiresAt?.toDate
-      ? activeCoupon.expiresAt.toDate()
-      : new Date(activeCoupon.expiresAt);
+    const rawExpiry = activeCoupon.expiresAt;
+    const expiresAt =
+      rawExpiry &&
+      typeof rawExpiry === "object" &&
+      typeof (rawExpiry as { toDate?: unknown }).toDate === "function"
+        ? (rawExpiry as { toDate: () => Date }).toDate()
+        : new Date(rawExpiry as string | number | Date);
 
     if (expiresAt < now) {
       return NextResponse.json({

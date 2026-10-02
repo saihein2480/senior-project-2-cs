@@ -56,6 +56,40 @@ export async function getCustomerByTelegramId(
 }
 
 /**
+ * The uid of the customer this Telegram chat is linked to, or null.
+ *
+ * This is the only identity an inbound bot message carries, so anything that
+ * reveals or acts on customer data (order lookups, cancellations) must be scoped
+ * to it. `telegramChatId` is always written as a string (see
+ * `linkTelegramToCustomer`), so the chat id is matched as one; linking also
+ * guarantees a chat id is held by at most one customer.
+ */
+export async function getLinkedCustomerUid(
+  chatId: string | number,
+): Promise<string | null> {
+  if (!adminDb) {
+    console.error("Firebase Admin not configured");
+    return null;
+  }
+
+  const key = String(chatId ?? "").trim();
+  if (!key) return null;
+
+  try {
+    const snap = await adminDb
+      .collection("customers")
+      .where("telegramChatId", "==", key)
+      .limit(1)
+      .get();
+
+    return snap.empty ? null : snap.docs[0].id;
+  } catch (error) {
+    console.error("Error resolving linked customer for Telegram chat:", error);
+    return null;
+  }
+}
+
+/**
  * Get customer by ID
  */
 export async function getCustomerById(
