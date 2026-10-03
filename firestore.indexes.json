@@ -27,6 +27,20 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "onlineOrders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "stockReservationStatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "stockReservationExpiresAt",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": []

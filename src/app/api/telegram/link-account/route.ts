@@ -26,13 +26,20 @@ import { formatSuccess } from "../../../../lib/telegram/formatters";
 
 export async function POST(req: NextRequest) {
   try {
-    const { token, customerId: claimedCustomerId } = await req.json();
+    const body = await req.json().catch(() => null);
+    const token: unknown = body?.token;
+    const claimedCustomerId: unknown = body?.customerId;
 
     if (!token) {
       return NextResponse.json(
         { error: "Missing required fields" },
         { status: 400 }
       );
+    }
+
+    // The token is looked up as a document id.
+    if (typeof token !== "string" || token.length > 200 || token.includes("/")) {
+      return NextResponse.json({ error: "Invalid token" }, { status: 400 });
     }
 
     const customerId = await getUidFromAuthHeader(
@@ -102,9 +109,7 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error("Link account error:", error);
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to link account",
-      },
+      { error: "Failed to link account" },
       { status: 500 }
     );
   }

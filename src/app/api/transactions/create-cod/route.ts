@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { syncOnlineCustomerToPos } from "@/lib/updateCustomerStats";
-import { createCodOrderWithStock } from "@/lib/onlineStockService";
+import {
+  createCodOrderWithStock,
+  isStockShortageError,
+  releaseStaleReservations,
+} from "@/lib/onlineStockService";
 import {
   assertCustomerSawQuote,
   isQuoteError,
@@ -47,8 +51,8 @@ export async function POST(request: NextRequest) {
       unknown
     >;
 
-    // Price first, so an invalid or out-of-date order does not burn a receipt
-    // number from the counter below.
+    // Price first, so an invalid or out-of-date order is refused before any
+    // stock or receipt number is touched.
     let quote: Awaited<ReturnType<typeof quoteOrder>>;
     try {
       quote = await quoteOrder(adminDb, {
@@ -74,38 +78,9 @@ export async function POST(request: NextRequest) {
     const { customer, pricing, coupon } = quote;
     const cartItems = orderLineRecords(quote);
 
-    // Generate sequential transaction ID
-    const counterRef = adminDb.collection("counters").doc("transactionCounter");
-    let transactionId: string;
-
-    try {
-      transactionId = await adminDb.runTransaction(async (transaction) => {
-        const counterDoc = await transaction.get(counterRef);
-
-        let newCount: number;
-        if (!counterDoc.exists) {
-          newCount = 1;
-          transaction.set(counterRef, {
-            count: newCount,
-            lastUpdated: FieldValue.serverTimestamp(),
-          });
-        } else {
-          newCount = (counterDoc.data()?.count || 0) + 1;
-          transaction.update(counterRef, {
-            count: newCount,
-            lastUpdated: FieldValue.serverTimestamp(),
-          });
-        }
-
-        return `TXN-${newCount.toString().padStart(13, "0")}`;
-      });
-    } catch (error) {
-      console.error("Error generating transaction ID:", error);
-      transactionId = `TXN-${Date.now()}-${Math.random()
-        .toString(36)
-        .substring(2, 8)
-        .toUpperCase()}`;
-    }
+    // The sequential receipt number (`transactionId`) is allocated inside the
+    // same Firestore transaction that takes the stock and writes both
+    // documents (see createCodOrderWithStock), and added to both there.
 
     // Generate unique online order ID (different from transaction ID)
     const orderId = `COD-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
@@ -120,8 +95,8 @@ export async function POST(request: NextRequest) {
       : {};
 
     // Prepare transaction data for Firebase
+    // `transactionId` is added inside the stock transaction.
     const transactionData = {
-      transactionId,
       onlineOrderId: orderId, // Link to online order
       source: "online", // Mark as online transaction for filtering
       customer: { ...customer, customerType: "online" },
@@ -179,9 +154,10 @@ export async function POST(request: NextRequest) {
       customerUid: uid,
     };
 
+    // `transactionId` (the link to the transaction) is added inside the stock
+    // transaction.
     const onlineOrderData = {
       orderId,
-      transactionId, // Link to the transaction
       source: "online",
       customer,
       cartItems,
@@ -213,22 +189,42 @@ export async function POST(request: NextRequest) {
       updatedAt: new Date().toISOString(),
     };
 
+    // A customer who switches from a QR to cash on delivery would otherwise be
+    // blocked by their own unpaid QR order holding the last unit or the
+    // coupon. Placing this order gives that one up (as a new QR checkout
+    // does), and releases a small batch of anyone's expired reservations on
+    // the way. Best-effort.
+    try {
+      await releaseStaleReservations(adminDb, { customerUid: uid });
+    } catch (error) {
+      console.error("Failed to release stale stock reservations:", error);
+    }
+
     // Take the stock and write the transaction and the online order in one
     // transaction. If another buyer got the last unit first, nothing is
     // written and the customer is told now.
     let transactionDocId: string;
+    let transactionId: string;
     try {
-      ({ transactionDocId } = await createCodOrderWithStock(adminDb, {
-        orderId,
-        orderData: onlineOrderData,
-        transactionData,
-      }));
-    } catch (stockError) {
-      const message =
-        stockError instanceof Error
-          ? stockError.message
-          : "Some items are no longer in stock";
-      return NextResponse.json({ error: message }, { status: 409 });
+      ({ transactionDocId, transactionId } = await createCodOrderWithStock(
+        adminDb,
+        {
+          orderId,
+          orderData: onlineOrderData,
+          transactionData,
+        },
+      ));
+    } catch (error) {
+      if (isStockShortageError(error)) {
+        return NextResponse.json({ error: error.message }, { status: 409 });
+      }
+      // Counter contention, a Firestore outage, ... Nothing was written, so
+      // the customer can simply try again; there is no fallback receipt id.
+      console.error("Error creating COD order transaction:", error);
+      return NextResponse.json(
+        { error: "Could not create your order right now. Please try again." },
+        { status: 503 },
+      );
     }
 
     // Sync customer to POS system's customers collection
@@ -307,29 +303,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Award loyalty points for COD order
-    try {
-      const { LoyaltyService } = await import("@/lib/loyaltyService");
-      const loyaltyResult = await LoyaltyService.awardPoints({
-        customerId: uid,
-        transactionId,
-        // Points are for what was bought, not for delivery.
-        transactionAmount: Math.max(0, pricing.totalTHB - pricing.deliveryFeeTHB),
-        source: 'online',
-        description: `Online COD order ${orderId}`,
-      });
-
-      if (loyaltyResult.success) {
-        console.log("Loyalty points awarded for COD order:", {
-          points: loyaltyResult.pointsAwarded,
-          newTotal: loyaltyResult.newTotalPoints,
-          coupons: loyaltyResult.couponsGenerated.length,
-        });
-      }
-    } catch (loyaltyError) {
-      // Don't fail the order if loyalty fails
-      console.error("Error awarding loyalty points for COD:", loyaltyError);
-    }
+    // No loyalty points here: a COD order is not paid yet and may still be
+    // cancelled or refused at the door. The POS awards them when the order is
+    // delivered/completed, and marks the transaction with `loyaltyAward` so
+    // they are never awarded twice. The coupon above stays consumed at
+    // placement so it cannot be reused meanwhile; the POS gives it back if the
+    // order is cancelled.
 
     return NextResponse.json({
       success: true,

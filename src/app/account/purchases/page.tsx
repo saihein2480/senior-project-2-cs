@@ -2883,6 +2883,14 @@ function PurchaseRow({
           )}
         </div>
       </td>
+      {/* Included in the amount; orders from before delivery fees have none. */}
+      <td className="px-4 py-3 text-gray-700">
+        {normalizeDeliveryFee(row.deliveryFee) > 0 ? (
+          `฿ ${normalizeDeliveryFee(row.deliveryFee).toFixed(2)}`
+        ) : (
+          <span className="text-gray-400">-</span>
+        )}
+      </td>
       <td className="px-4 py-3 text-gray-700">
         {row.paymentMethod === "cash" ? "💵 Cash" :
          row.paymentMethod === "scan" ? "📱 QR Scan" :
@@ -3122,6 +3130,16 @@ function PurchaseCard({
           </p>
           <p className="font-semibold text-gray-900">
             Ks {Number(row.amountMmk || row.sellingTotal || 0).toLocaleString()}
+          </p>
+        </div>
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Delivery Fee
+          </p>
+          <p className="text-gray-800">
+            {normalizeDeliveryFee(row.deliveryFee) > 0
+              ? `฿ ${normalizeDeliveryFee(row.deliveryFee).toFixed(2)}`
+              : "-"}
           </p>
         </div>
         <div>
@@ -4155,6 +4173,7 @@ export default function PurchaseHistoryPage() {
             <tr className="text-[11px] font-semibold uppercase tracking-wide text-rose-600">
               <th className="px-4 py-3.5">Order ID</th>
               <th className="px-4 py-3.5">Amount (THB / MMK)</th>
+              <th className="px-4 py-3.5">Delivery Fee</th>
               <th className="px-4 py-3.5">Payment Method</th>
               <th className="px-4 py-3.5">Payment Status</th>
               <th className="px-4 py-3.5">Order Status</th>
@@ -4166,7 +4185,7 @@ export default function PurchaseHistoryPage() {
           <tbody>
             {sortedFilteredRows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-12 text-center">
+                <td colSpan={9} className="px-4 py-12 text-center">
                   <span className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
                     <svg
                       className="h-6 w-6 text-rose-400"

@@ -4,7 +4,7 @@
 
 import type { InlineKeyboard, InlineKeyboardButton } from "./types";
 import type { SearchProduct } from "../productSearch";
-import type { OrderInfo } from "../orderSupport";
+import { canCancelOrder, type OrderInfo } from "../orderSupport";
 import { publicSiteUrl } from "../publicUrl";
 
 /**
@@ -396,7 +396,10 @@ export function createCartItemKeyboard(itemId: string): InlineKeyboard {
 /**
  * Create order detail keyboard
  */
-export function createOrderKeyboard(order: OrderInfo): InlineKeyboard {
+export function createOrderKeyboard(
+  order: OrderInfo,
+  options: { canCancel?: boolean } = {},
+): InlineKeyboard {
   const buttons: InlineKeyboardButton[][] = [];
 
   // Add action buttons based on order status
@@ -409,10 +412,12 @@ export function createOrderKeyboard(order: OrderInfo): InlineKeyboard {
     });
   }
 
-  if (
-    order.status.toLowerCase() === "pending" ||
-    order.status.toLowerCase() === "confirmed"
-  ) {
+  // Only when the request would be accepted (same rules as the server). The
+  // button opens the /cancel confirmation, which re-checks with the
+  // transaction loaded. `options.canCancel` lets a caller that has already
+  // checked pass its exact answer.
+  const canCancel = options.canCancel ?? canCancelOrder(order).canCancel;
+  if (canCancel && isCancelCallbackRef(order.orderRef, "order_cancel_")) {
     actionRow.push({
       text: "❌ Cancel Order",
       callback_data: `order_cancel_${order.orderRef}`,
@@ -443,16 +448,90 @@ export function createOrderKeyboard(order: OrderInfo): InlineKeyboard {
  */
 export function createConfirmationKeyboard(
   confirmData: string,
-  cancelData: string = "menu_main"
+  cancelData: string = "menu_main",
+  labels: { confirm?: string; cancel?: string } = {},
 ): InlineKeyboard {
   return {
     inline_keyboard: [
       [
-        { text: "✅ Confirm", callback_data: confirmData },
-        { text: "❌ Cancel", callback_data: cancelData },
+        { text: labels.confirm || "✅ Confirm", callback_data: confirmData },
+        { text: labels.cancel || "❌ Cancel", callback_data: cancelData },
       ],
     ],
   };
+}
+
+/**
+ * Callback data for the order-cancellation confirmation.
+ *
+ *   confirm_cancel_<orderRef>   "Yes, cancel it": files the request
+ *   keep_order_<orderRef>       "No, keep it": dismisses the question
+ *
+ * The reference is only a pointer. The handler re-resolves the customer from
+ * the chat and re-checks ownership and eligibility, because callback data is
+ * whatever the client sends back.
+ */
+export const CANCEL_CONFIRM_PREFIX = "confirm_cancel_";
+export const CANCEL_KEEP_PREFIX = "keep_order_";
+
+/** Telegram's limit on callback_data, in bytes. */
+const MAX_CALLBACK_DATA_BYTES = 64;
+
+/**
+ * Order references as checkout writes them ("COD-1787817058191-SPKH3D",
+ * "ONL-...") and as the document id they are: letters, digits, "-" and "_".
+ */
+const ORDER_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{2,}$/;
+
+/** Can `orderRef` ride in a callback after `prefix` and be read back intact? */
+export function isCancelCallbackRef(orderRef: string, prefix: string): boolean {
+  return (
+    ORDER_REF_PATTERN.test(orderRef) &&
+    prefix.length + orderRef.length <= MAX_CALLBACK_DATA_BYTES
+  );
+}
+
+/** Yes/No keyboard for cancelling `orderRef`, or null if it can't be encoded. */
+export function createCancelOrderConfirmationKeyboard(
+  orderRef: string,
+): InlineKeyboard | null {
+  if (
+    !isCancelCallbackRef(orderRef, CANCEL_CONFIRM_PREFIX) ||
+    !isCancelCallbackRef(orderRef, CANCEL_KEEP_PREFIX)
+  ) {
+    return null;
+  }
+  return createConfirmationKeyboard(
+    `${CANCEL_CONFIRM_PREFIX}${orderRef}`,
+    `${CANCEL_KEEP_PREFIX}${orderRef}`,
+    { confirm: "✅ Yes, cancel it", cancel: "↩️ No, keep it" },
+  );
+}
+
+export type CancelOrderCallback =
+  | { action: "confirm"; orderRef: string }
+  | { action: "keep"; orderRef: string };
+
+/**
+ * Read a cancellation button press back. Null for anything that is not one of
+ * ours or carries a malformed reference, so a forged payload never reaches a
+ * Firestore lookup.
+ */
+export function parseCancelOrderCallback(
+  data: unknown,
+): CancelOrderCallback | null {
+  if (typeof data !== "string" || data.length > MAX_CALLBACK_DATA_BYTES) return null;
+
+  for (const [prefix, action] of [
+    [CANCEL_CONFIRM_PREFIX, "confirm"],
+    [CANCEL_KEEP_PREFIX, "keep"],
+  ] as const) {
+    if (data.startsWith(prefix)) {
+      const orderRef = data.slice(prefix.length);
+      return ORDER_REF_PATTERN.test(orderRef) ? { action, orderRef } : null;
+    }
+  }
+  return null;
 }
 
 /**

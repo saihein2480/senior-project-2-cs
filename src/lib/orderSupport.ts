@@ -12,6 +12,11 @@
  */
 
 import { adminDb } from "./firebase-admin";
+import { isSettledPaymentStatus } from "./mmpayCallback";
+import {
+  evaluateCancellation,
+  type CancellationRefusalCode,
+} from "./server/cancellationRequest";
 
 export interface OrderInfo {
   orderId: string;
@@ -317,64 +322,58 @@ export function getOrderStatusDisplay(status: string): {
 }
 
 /**
- * Check if order can be cancelled
+ * Can the customer ask to cancel this order (from the bot)?
+ *
+ * Decided by `evaluateCancellation`, the same rules
+ * /api/transactions/request-cancel and the bot's Confirm button enforce, so the
+ * bot never offers a cancellation the server will refuse. The previous version
+ * tested statuses online orders never carry ("confirmed", "processing",
+ * "shipped"), looked for a payment status of "paid" where MyanMyanPay writes
+ * "SUCCESS", and invented a 24-hour limit nothing enforced.
+ *
+ * Pass the order's `transactions` document (or null when it has none) for an
+ * exact answer — only it records a pending request or the delivery state. When
+ * it is not passed, a cash-on-delivery or paid order is assumed to have one with
+ * nothing pending.
+ *
+ * Scan/wallet orders come back `canCancel: false` with code
+ * "needs_payment_proof": the refund needs the customer's payment QR, which only
+ * the website's purchases page collects.
  */
-export function canCancelOrder(order: OrderInfo): {
+export function canCancelOrder(
+  order: OrderInfo,
+  transaction?: Record<string, unknown> | null,
+): {
   canCancel: boolean;
   reason?: string;
+  code?: CancellationRefusalCode;
 } {
-  // Already cancelled
-  if (order.status.toLowerCase() === "cancelled") {
-    return { canCancel: false, reason: "Order is already cancelled" };
+  const onlineOrder = {
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+  };
+
+  let sale: Record<string, unknown> | null;
+  if (transaction !== undefined) {
+    sale = transaction;
+  } else {
+    const method = order.paymentMethod.toLowerCase();
+    const isCod =
+      method === "cod" || order.paymentProvider.toUpperCase() === "COD";
+    sale =
+      isCod || isSettledPaymentStatus(order.paymentStatus)
+        ? {
+            // QR orders written without a method are scan payments (the
+            // webhook records them as such).
+            paymentMethod: isCod ? "cod" : method === "mmpay" ? "scan" : method,
+          }
+        : null;
   }
 
-  // Already delivered
-  if (order.status.toLowerCase() === "delivered") {
-    return { canCancel: false, reason: "Order has been delivered" };
-  }
-
-  // COD orders can always be cancelled before delivery
-  if (order.paymentMethod.toUpperCase() === "COD") {
-    if (
-      ["pending", "confirmed", "processing", "shipped"].includes(
-        order.status.toLowerCase()
-      )
-    ) {
-      return { canCancel: true };
-    }
-  }
-
-  // Online payment orders - check time limit (24 hours for paid orders)
-  if (order.paymentStatus.toLowerCase() === "paid") {
-    const hoursSinceOrder =
-      (Date.now() - order.createdAt.getTime()) / (1000 * 60 * 60);
-
-    if (hoursSinceOrder > 24) {
-      return {
-        canCancel: false,
-        reason: "Online payment orders can only be cancelled within 24 hours",
-      };
-    }
-
-    if (order.status.toLowerCase() === "shipped") {
-      return {
-        canCancel: false,
-        reason: "Order has already been shipped",
-      };
-    }
-
-    return { canCancel: true };
-  }
-
-  // Unpaid online orders can be cancelled
-  if (
-    order.paymentStatus.toLowerCase() === "pending" &&
-    order.status.toLowerCase() !== "shipped"
-  ) {
-    return { canCancel: true };
-  }
-
-  return { canCancel: false, reason: "This order cannot be cancelled" };
+  const check = evaluateCancellation({ transaction: sale, onlineOrder });
+  return check.eligible
+    ? { canCancel: true }
+    : { canCancel: false, reason: check.message, code: check.code };
 }
 
 /**
@@ -453,7 +452,11 @@ export function formatOrderInfo(order: OrderInfo): string {
   // Cancellation info
   if (cancelInfo.canCancel) {
     parts.push(
-      `✅ **Can Cancel:** Yes - You can cancel this order${order.paymentMethod.toUpperCase() === "COD" ? " anytime before delivery" : " within 24 hours"}`
+      `✅ **Can Cancel:** Yes - You can ask to cancel while the order is pending or being packed; the shop reviews every request`
+    );
+  } else if (cancelInfo.code === "needs_payment_proof") {
+    parts.push(
+      `ℹ️ **Cancel:** Request it from your purchases page on the website, with a screenshot of your payment QR so the shop can refund you`
     );
   } else if (cancelInfo.reason) {
     parts.push(`❌ **Cannot Cancel:** ${cancelInfo.reason}`);

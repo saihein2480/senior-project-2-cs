@@ -57,10 +57,7 @@ export async function GET() {
   } catch (error) {
     console.error("Error fetching loyalty settings:", error);
     return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to fetch settings",
-      },
+      { success: false, error: "Failed to fetch settings" },
       { status: 500 }
     );
   }

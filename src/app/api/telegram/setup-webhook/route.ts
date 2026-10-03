@@ -95,9 +95,7 @@ export async function GET(req: NextRequest) {
   } catch (error) {
     console.error("❌ Setup webhook error:", error);
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to setup webhook",
-      },
+      { error: "Failed to setup webhook" },
       { status: 500 }
     );
   }

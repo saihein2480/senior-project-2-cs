@@ -99,6 +99,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "customerId is required" }, { status: 400 });
   }
 
+  // A document id: a string without "/" and of bounded length.
+  if (
+    typeof customerId !== "string" ||
+    customerId.length > 128 ||
+    customerId.includes("/")
+  ) {
+    return NextResponse.json({ error: "Invalid customerId" }, { status: 400 });
+  }
+
   try {
     // The old "promotion" type addressed a single customer, so honour that by
     // narrowing the broadcast audience to just them.
@@ -115,9 +124,10 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json({ success: true, result });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to send notification";
     console.error("Send notification error:", error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to send notification" },
+      { status: 500 },
+    );
   }
 }

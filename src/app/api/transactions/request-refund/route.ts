@@ -2,6 +2,48 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { exceedsDocBudget } from "@/lib/documentBudget";
+import {
+  validateImageList,
+  validateOptionalImage,
+  validateOptionalText,
+  validateTransactionRef,
+} from "@/lib/server/requestValidation";
+
+/** More lines than any order has; bounds the work one request can cause. */
+const MAX_REFUND_ITEMS = 100;
+const MAX_ITEM_KEY_LENGTH = 200;
+
+/**
+ * Shape check for the requested lines. Quantities must be whole numbers; the
+ * route skips lines with quantity 0, as before.
+ */
+function invalidRefundItems(items: unknown[]): string | null {
+  if (items.length > MAX_REFUND_ITEMS) return "Too many items in this request";
+
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return "Invalid item in this request";
+    }
+    const { quantity, id, productId, groupName } = item as Record<string, unknown>;
+    if (
+      typeof quantity !== "number" ||
+      !Number.isInteger(quantity) ||
+      quantity < 0 ||
+      quantity > 10000
+    ) {
+      return "Item quantities must be whole numbers";
+    }
+    for (const key of [id, productId, groupName]) {
+      if (key === undefined || key === null) continue;
+      if (typeof key === "number") continue;
+      if (typeof key !== "string" || key.length > MAX_ITEM_KEY_LENGTH) {
+        return "Invalid item in this request";
+      }
+    }
+  }
+
+  return null;
+}
 
 /**
  * POST /api/transactions/request-refund
@@ -86,12 +128,18 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json().catch(() => null);
-    const { transactionId, reason, items, qrCodeImage, itemPhotos } = body ?? {};
+    const {
+      transactionId: rawTransactionId,
+      reason: rawReason,
+      items,
+      qrCodeImage: rawQrCodeImage,
+      itemPhotos: rawItemPhotos,
+    } = body ?? {};
 
     // Validate required fields
     if (
-      !transactionId ||
-      (typeof transactionId !== "string" && typeof transactionId !== "number") ||
+      !rawTransactionId ||
+      (typeof rawTransactionId !== "string" && typeof rawTransactionId !== "number") ||
       !items ||
       !Array.isArray(items)
     ) {
@@ -100,6 +148,32 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const transactionRef = validateTransactionRef(rawTransactionId);
+    if (!transactionRef.ok) {
+      return NextResponse.json({ error: transactionRef.error }, { status: 400 });
+    }
+    const itemsError = invalidRefundItems(items);
+    if (itemsError) {
+      return NextResponse.json({ error: itemsError }, { status: 400 });
+    }
+    const reasonCheck = validateOptionalText(rawReason, "Reason");
+    if (!reasonCheck.ok) {
+      return NextResponse.json({ error: reasonCheck.error }, { status: 400 });
+    }
+    // Images are JPEG data URLs from the purchases page (or images on the
+    // store's own storage host); at most five item photos.
+    const qrCheck = validateOptionalImage(rawQrCodeImage, "QR code image");
+    if (!qrCheck.ok) {
+      return NextResponse.json({ error: qrCheck.error }, { status: 400 });
+    }
+    const photosCheck = validateImageList(rawItemPhotos, "Item photos");
+    if (!photosCheck.ok) {
+      return NextResponse.json({ error: photosCheck.error }, { status: 400 });
+    }
+    const transactionId = transactionRef.value;
+    const reason = reasonCheck.value;
+    const qrCodeImage = qrCheck.value;
 
     // Validate that at least one item is being refunded
     const hasItems = items.some((item: any) => item.quantity > 0);
@@ -262,11 +336,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Firestore caps a document at 1MiB, and this request embeds the QR image
-    // Sanitize item photos array - ensure all are strings
-    const sanitizedPhotos = Array.isArray(itemPhotos) 
-      ? itemPhotos.filter((photo: any) => typeof photo === 'string')
-      : [];
+    // Validated above: up to five image data URLs / storage-host URLs.
+    const sanitizedPhotos = photosCheck.value;
 
     const refundRequest = {
       type: refundType, // "cancellation" or "return"
@@ -367,12 +438,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error creating refund request:", error);
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to create refund request",
-      },
+      { error: "Failed to create refund request" },
       { status: 500 }
     );
   }

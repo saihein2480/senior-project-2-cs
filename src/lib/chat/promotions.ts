@@ -1,4 +1,6 @@
 import { adminDb } from "../firebase-admin";
+import { getAdvertisedPromotions, promotionTimeNote } from "../promotions";
+import { formatStoreDate, storeTimeZoneLabel } from "../storeTime";
 
 /**
  * Promotion and coupon facts for the chatbot.
@@ -7,15 +9,25 @@ import { adminDb } from "../firebase-admin";
  * hardcoded array that advertised a `WELCOME10` code and a free-shipping
  * threshold that do not exist, which meant the bot promised discounts the
  * checkout would reject.
+ *
+ * Store-wide promotions come from `lib/promotions.ts`, which judges them with
+ * the same function checkout prices with (store time zone, same target and
+ * discount rules), so the chat cannot advertise a deal the order would not get.
  */
 
 export interface ChatPromotion {
   name: string;
   description?: string;
   productName?: string;
-  /** "20% off" or "5000 off", already formatted. */
+  /** "20% off (max ฿100 off)" or "฿50 off each", already formatted. */
   discount: string;
+  /** Last day, in store time ("2 Oct 2026 (end of day, Myanmar time)"). */
   endsAt?: string;
+  /** Branch the promoted product belongs to, when recorded. */
+  branchName?: string;
+  /** One unit before and after the promotion, in THB, when known. */
+  priceTHB?: number;
+  promotedPriceTHB?: number;
 }
 
 export interface ChatCoupon {
@@ -36,6 +48,8 @@ export interface ChatRewardTier {
 
 export interface PromotionSnapshot {
   promotions: ChatPromotion[];
+  /** How to read the promotion dates (store time zone). */
+  promotionNote?: string;
   /** Only present when the customer is signed in. */
   coupons?: ChatCoupon[];
   loyaltyPoints?: number;
@@ -64,27 +78,6 @@ function toIso(value: unknown): string | undefined {
   return undefined;
 }
 
-/** Mirrors isActiveNow in lib/onlinePromotion.ts: flag plus date window. */
-function isPromotionLive(data: Record<string, unknown>): boolean {
-  if (data.isActive === false) return false;
-
-  const now = Date.now();
-
-  const start = data.startDate ? new Date(String(data.startDate)) : null;
-  if (start && !Number.isNaN(start.getTime()) && now < start.getTime()) {
-    return false;
-  }
-
-  const end = data.endDate ? new Date(String(data.endDate)) : null;
-  if (end && !Number.isNaN(end.getTime())) {
-    // End date is inclusive of the whole day.
-    end.setHours(23, 59, 59, 999);
-    if (now > end.getTime()) return false;
-  }
-
-  return true;
-}
-
 function isCouponUsable(coupon: Record<string, unknown>): boolean {
   if (coupon.status !== "active") return false;
 
@@ -111,22 +104,29 @@ export async function getPromotionSnapshot(
   if (!adminDb) return snapshot;
 
   // --- Store-wide product promotions ---
+  // Activity used to be decided here with `setHours` in the server's own time
+  // zone (UTC on the host), which ended promotions 6.5 hours after checkout did.
   try {
-    const promoSnap = await adminDb.collection("online_promotions").get();
+    const promotions = await getAdvertisedPromotions();
 
-    snapshot.promotions = promoSnap.docs
-      .map((doc) => doc.data() as Record<string, unknown>)
-      .filter(isPromotionLive)
-      .map((data) => ({
-        name: String(data.name || "Promotion"),
-        description: data.description ? String(data.description) : undefined,
-        productName: data.productName ? String(data.productName) : undefined,
-        discount: formatDiscount(
-          String(data.discountType || "percentage"),
-          Number(data.discountValue || 0),
-        ),
-        endsAt: data.endDate ? String(data.endDate) : undefined,
-      }));
+    snapshot.promotions = promotions.map((entry) => {
+      const end = formatStoreDate(entry.promotion.endDate);
+      return {
+        name: entry.promotion.name || "Promotion",
+        description: entry.promotion.description || undefined,
+        productName: entry.appliesTo || undefined,
+        discount: entry.discountText,
+        endsAt: end
+          ? `${end} (end of day, ${storeTimeZoneLabel()})`
+          : undefined,
+        branchName: entry.promotion.branchName || undefined,
+        priceTHB: entry.unitPriceTHB,
+        promotedPriceTHB: entry.promotedUnitPriceTHB,
+      };
+    });
+    if (snapshot.promotions.length > 0) {
+      snapshot.promotionNote = promotionTimeNote();
+    }
   } catch (error) {
     console.error("Error loading promotions for chat:", error);
   }

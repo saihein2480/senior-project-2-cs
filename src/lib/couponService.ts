@@ -206,13 +206,18 @@ export class CouponService {
 
         const pointsCost = resolvePointsCost(coupon);
 
-        coupons[couponIndex] = {
+        const usedCoupon: Record<string, unknown> = {
           ...coupon,
           status: "used",
           usedAt: new Date(),
           usedInTransaction: transactionId,
           inUse: false,
         };
+        // A used coupon is no longer held by a pending QR order
+        // (see createOrderWithStockReservation).
+        delete usedCoupon.reservedForOrderId;
+        delete usedCoupon.reservedUntil;
+        coupons[couponIndex] = usedCoupon;
 
         const currentPoints = Number(customerData.loyaltyPoints || 0);
         const newPoints = Math.max(0, currentPoints - pointsCost);

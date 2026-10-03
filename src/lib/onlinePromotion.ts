@@ -1,4 +1,5 @@
 import type { OnlinePromotion } from "./onlinePromotionDoc";
+import { isWithinStoreWindow } from "./storeTime";
 
 export type AppliedPromotionResult = {
   promotion: OnlinePromotion | null;
@@ -13,59 +14,38 @@ function safeNumber(value: unknown): number {
 }
 
 /**
- * The store's clock: Myanmar Time (UTC+06:30), where Tachileik is.
+ * Is this promotion switched on and inside its date window right now?
  *
- * Promotion dates are calendar days picked in the POS (`<input type="date">`,
- * "YYYY-MM-DD"). They used to be evaluated in whatever timezone the code ran
- * in, so the browser (Myanmar) and the order route (UTC on the server) disagreed
- * for six and a half hours around every start and end date. Pinning the
- * timezone makes both sides agree, which the server-side price check relies on.
+ * The single definition of "active", used by the product cards, the checkout
+ * page, the order routes (through `priceOrder`) and the Telegram bot / AI chat,
+ * so none of them can disagree about whether a deal applies.
+ *
+ * Dates are evaluated in the store's time zone (`lib/storeTime.ts`, Myanmar
+ * Time unless `NEXT_PUBLIC_STORE_TIME_ZONE` says otherwise), never the time zone
+ * of the browser or server: a "YYYY-MM-DD" start date begins at 00:00 store
+ * time, an end date runs to 23:59:59.999 store time, and a full timestamp is
+ * the absolute instant it names. This used to pin a fixed +06:30 offset and
+ * widen timestamps to the whole day they fell on.
  */
-const STORE_UTC_OFFSET_MS = 390 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** Start (inclusive) and end (inclusive) of a calendar day in store time, as epoch ms. */
-function storeDayBounds(value: string): { start: number; end: number } | null {
-  const trimmed = value.trim();
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
-
-  let dayStartUtc: number;
-  if (dateOnly) {
-    dayStartUtc =
-      Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3])) -
-      STORE_UTC_OFFSET_MS;
-  } else {
-    // Anything else (an ISO timestamp): use the store-time day it falls on.
-    const parsed = new Date(trimmed).getTime();
-    if (Number.isNaN(parsed)) return null;
-    const shifted = new Date(parsed + STORE_UTC_OFFSET_MS);
-    dayStartUtc =
-      Date.UTC(
-        shifted.getUTCFullYear(),
-        shifted.getUTCMonth(),
-        shifted.getUTCDate(),
-      ) - STORE_UTC_OFFSET_MS;
-  }
-
-  if (Number.isNaN(dayStartUtc)) return null;
-  return { start: dayStartUtc, end: dayStartUtc + DAY_MS - 1 };
+export function isPromotionActiveNow(
+  promo: Pick<OnlinePromotion, "isActive" | "startDate" | "endDate">,
+  now: number = Date.now(),
+): boolean {
+  if (!promo.isActive) return false;
+  return isWithinStoreWindow(promo.startDate, promo.endDate, now);
 }
 
-/** Active from 00:00 on startDate to 23:59:59.999 on endDate, store time. */
-function isActiveNow(promo: OnlinePromotion, now: number = Date.now()): boolean {
-  if (!promo.isActive) return false;
-
-  if (promo.startDate) {
-    const bounds = storeDayBounds(promo.startDate);
-    if (bounds && now < bounds.start) return false;
+/**
+ * Could this promotion ever take money off a line at checkout? Same conditions
+ * `applyBestPromotionToLine` needs: a target product (and variant, for a
+ * variant-scoped one) and a positive discount. Activity is separate.
+ */
+export function isPromotionApplicable(promo: OnlinePromotion): boolean {
+  if (!promo.productId) return false;
+  if (promo.scope === "variant" && !String(promo.variantId || "").trim()) {
+    return false;
   }
-
-  if (promo.endDate) {
-    const bounds = storeDayBounds(promo.endDate);
-    if (bounds && now > bounds.end) return false;
-  }
-
-  return true;
+  return safeNumber(promo.discountValue) > 0;
 }
 
 function matchesTarget(
@@ -115,15 +95,18 @@ export function applyBestPromotionToLine(params: {
   quantity: number;
   productId: string;
   variantId?: string;
-  promotions: OnlinePromotion[];
+  promotions: readonly OnlinePromotion[];
+  /** Evaluation instant (epoch ms). Defaults to now; tests pin it. */
+  now?: number;
 }): AppliedPromotionResult {
   const unit = Math.max(0, safeNumber(params.unitPriceTHB));
   const qty = Math.max(1, Math.floor(safeNumber(params.quantity)));
   const baseSubtotalTHB = unit * qty;
+  const now = params.now ?? Date.now();
 
   const matching = (params.promotions || []).filter(
     (promo) =>
-      isActiveNow(promo) &&
+      isPromotionActiveNow(promo, now) &&
       matchesTarget(promo, params.productId, params.variantId),
   );
 

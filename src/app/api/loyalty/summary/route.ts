@@ -30,8 +30,21 @@ export async function GET(request: NextRequest) {
     const result = await LoyaltyService.getLoyaltySummary(uid);
 
     if (!result.success) {
+      // The service returns raw exception text on unexpected failures; only
+      // its own fixed messages are passed through.
+      const safeMessages = new Set([
+        "Customer not found",
+        "Firebase Admin is not configured",
+      ]);
+      const message =
+        result.error && safeMessages.has(result.error)
+          ? result.error
+          : "Failed to fetch loyalty summary";
+      if (message !== result.error) {
+        console.error("Loyalty summary failed:", result.error);
+      }
       return NextResponse.json(
-        { success: false, error: result.error || "Failed to fetch loyalty summary" },
+        { success: false, error: message },
         { status: 500 }
       );
     }
@@ -43,10 +56,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error("Error fetching loyalty summary:", error);
     return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to fetch loyalty summary",
-      },
+      { success: false, error: "Failed to fetch loyalty summary" },
       { status: 500 }
     );
   }

@@ -1,5 +1,4 @@
-import { db } from "./firebase";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import { getCatalogDocs, isCatalogConfigured } from "./server/catalogCache";
 
 interface Product {
   id: string;
@@ -114,18 +113,21 @@ const occasionStyles: Record<
  * Get all available products from Firebase
  */
 async function getAllProducts(branchFilter?: string): Promise<Product[]> {
-  if (!db) {
+  if (!isCatalogConfigured()) {
     console.error("❌ Firebase DB not initialized");
     return [];
   }
 
   try {
-    const stocksRef = collection(db, "stocks");
-    const querySnapshot = await getDocs(stocksRef);
+    // Shared per-minute catalogue snapshot (lib/server/catalogCache.ts), in
+    // the same document-id order the full collection read returned.
+    const docs = await getCatalogDocs();
 
     const products: Product[] = [];
-    querySnapshot.forEach((doc) => {
-      const data = doc.data();
+    docs.forEach((doc) => {
+      // Same loose typing the Firestore `doc.data()` result had here.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data = doc.data as Record<string, any>;
       
       // Filter by branch if specified (uses 'shop' field in database)
       if (branchFilter && data.shop !== branchFilter) {

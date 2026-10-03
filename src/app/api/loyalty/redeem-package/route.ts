@@ -34,6 +34,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (packageId.length > 200) {
+      return NextResponse.json(
+        { success: false, error: "Invalid package ID" },
+        { status: 400 },
+      );
+    }
+
     const result = await LoyaltyService.redeemPackage({
       customerId,
       packageId,
@@ -55,11 +62,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error in POST /api/loyalty/redeem-package:", error);
     return NextResponse.json(
-      {
-        success: false,
-        error:
-          error instanceof Error ? error.message : "Failed to redeem reward",
-      },
+      { success: false, error: "Failed to redeem reward" },
       { status: 500 },
     );
   }

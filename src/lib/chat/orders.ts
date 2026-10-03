@@ -1,4 +1,5 @@
 import { adminDb } from "../firebase-admin";
+import { evaluateCancellation } from "../server/cancellationRequest";
 
 /**
  * Order lookup for the chatbot.
@@ -140,28 +141,17 @@ function mapOrder(data: Record<string, unknown>): ChatOrder {
     }),
   );
 
-  // --- Cancellation eligibility (mirrors request-cancel + purchases page) ---
-  let canCancel = true;
-  let cancelBlockedReason: string | undefined;
-
-  if (orderStatus === "cancelled" || paymentStatus.toLowerCase() === "refunded") {
-    canCancel = false;
-    cancelBlockedReason = "this order is already cancelled or refunded";
-  } else if (cancellationRequestStatus === "pending") {
-    canCancel = false;
-    cancelBlockedReason =
-      "a cancellation request is already pending owner approval";
-  } else if (
-    data.deliveryStatus === "delivered" ||
-    orderStatus === "delivered"
-  ) {
-    canCancel = false;
-    cancelBlockedReason =
-      "the order has been delivered, so a return/refund is the right route instead";
-  } else if (orderStatus !== "pending" && orderStatus !== "packaging") {
-    canCancel = false;
-    cancelBlockedReason = `the order is already ${orderStatus.replace("_", " ")}`;
-  }
+  // --- Cancellation eligibility ---
+  // The same rule the request-cancel route and the Telegram bot apply
+  // (lib/server/cancellationRequest.ts), so the chat never offers a
+  // cancellation the server refuses. The payment-QR requirement for
+  // scan/wallet orders is reported separately (cancelNeedsPaymentProof).
+  const cancellation = evaluateCancellation({
+    transaction: data,
+    hasPaymentProof: true,
+  });
+  const canCancel = cancellation.eligible;
+  const cancelBlockedReason = cancellation.eligible ? undefined : cancellation.message;
 
   // --- Return eligibility (mirrors the purchases page buttons) ---
   const isPaidOrder = paymentMethod === "cash" || paymentMethod === "scan";

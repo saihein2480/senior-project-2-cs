@@ -9,6 +9,7 @@ import {
   sendPhotoSafe,
   answerCallbackQuery,
   sendChatAction,
+  editMessageReplyMarkup,
 } from "./api-client";
 import {
   formatWelcomeMessage,
@@ -38,9 +39,11 @@ import {
   createCartKeyboard,
   createBackButton,
   storefrontBaseUrl,
+  orderDetailUrl,
 } from "./keyboards";
 import { searchProducts, type SearchProduct } from "../productSearch";
 import { findOrderByRefForCustomer } from "../orderSupport";
+import type { CancellationRefusalCode } from "../server/cancellationRequest";
 import { getCustomerByTelegramId, getLinkedCustomerUid } from "./customer-service";
 import { linkTelegramToCustomer } from "./auth-service";
 import {
@@ -1128,13 +1131,56 @@ async function handlePromotionsCommand(ctx: BotContext): Promise<void> {
   await sendChatAction(ctx.chatId, "typing");
 
   try {
-    const { getActivePromotions, formatPromotions } = await import("../promotions");
-    const promotions = getActivePromotions();
-    const promotionsText = `🎁 *Current Promotions*\n\n` + formatPromotions(promotions);
+    // Live `online_promotions`, judged with the same function checkout uses
+    // (store time zone, same target and discount rules), so every deal listed
+    // here is one the order will actually get. Prices are quoted, so the
+    // owner's rate goes in first.
+    await primeCurrency();
+    const { getAdvertisedPromotions, promotionTimeNote } = await import("../promotions");
+    const promotions = await getAdvertisedPromotions({ formatMoney: formatPrice });
+
+    // HTML: names, prices and dates are full of characters MarkdownV2 rejects
+    // ("-", ".", "(", "!"), which used to fail the whole message.
+    const lines: string[] = ["🎁 <b>Current Promotions</b>", ""];
+    if (promotions.length === 0) {
+      lines.push(
+        "We don't have any promotions running right now. Check back soon! 🎉",
+      );
+    } else {
+      promotions.forEach((entry, index) => {
+        lines.push(
+          `${index + 1}. <b>${escapeHtml(entry.promotion.name || "Promotion")}</b>`,
+        );
+        lines.push(
+          `   💰 ${escapeHtml(entry.discountText)}` +
+            (entry.appliesTo ? ` · ${escapeHtml(entry.appliesTo)}` : ""),
+        );
+        if (
+          entry.unitPriceTHB !== undefined &&
+          entry.promotedUnitPriceTHB !== undefined
+        ) {
+          lines.push(
+            `   🏷️ Now ${escapeHtml(formatPrice(entry.promotedUnitPriceTHB))} ` +
+              `<s>${escapeHtml(formatPrice(entry.unitPriceTHB))}</s>`,
+          );
+        }
+        if (entry.promotion.branchName) {
+          lines.push(`   🏬 ${escapeHtml(entry.promotion.branchName)}`);
+        }
+        if (entry.validity) lines.push(`   ⏰ ${escapeHtml(entry.validity)}`);
+        if (entry.promotion.description) {
+          lines.push(`   <i>${escapeHtml(entry.promotion.description)}</i>`);
+        }
+        lines.push("");
+      });
+      lines.push(escapeHtml(promotionTimeNote()));
+    }
 
     await sendMessage({
       chat_id: ctx.chatId,
-      text: promotionsText,
+      text: lines.join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
       reply_markup: createBackButton(),
     });
   } catch (error) {
@@ -1146,6 +1192,43 @@ async function handlePromotionsCommand(ctx: BotContext): Promise<void> {
   }
 }
 
+/** Escape the three characters that mean something to Telegram's HTML parser. */
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Why a cancellation can't go ahead, worded for this chat.
+ *
+ * Mostly the server's own message. Two cases read better here: the request
+ * already pending (a double tap lands on this) and scan/wallet orders, whose
+ * refund needs a QR screenshot that only the website collects.
+ */
+function cancellationRefusalHtml(
+  code: CancellationRefusalCode,
+  message: string,
+  orderRef: string,
+): string {
+  const ref = `<b>${escapeHtml(orderRef)}</b>`;
+  switch (code) {
+    case "already_pending":
+      return (
+        `⏳ You've already asked to cancel order ${ref}.\n\n` +
+        `The shop is reviewing it, and you'll be told here and by email once they decide.`
+      );
+    case "needs_payment_proof":
+      return (
+        `💳 Order ${ref} was paid by QR, so the shop needs a screenshot of your payment QR to refund you.\n\n` +
+        `Please request the cancellation from your purchases page on our website:\n` +
+        `${escapeHtml(orderDetailUrl(orderRef))}`
+      );
+    case "not_found":
+      return `❌ Order ${ref} was not found on your account.`;
+    default:
+      return `❌ Order ${ref} can't be cancelled.\n\n${escapeHtml(message)}`;
+  }
+}
+
 /**
  * Handle /cancel command
  */
@@ -1153,7 +1236,12 @@ async function handleCancelOrderCommand(ctx: BotContext, orderRef: string): Prom
   if (!orderRef || orderRef.trim() === "") {
     await sendMessage({
       chat_id: ctx.chatId,
-      text: "❌ *Cancel Order*\n\nUsage: /cancel \\<orderRef\\>\n\nExample: /cancel OR12345678",
+      text:
+        "❌ <b>Cancel Order</b>\n\n" +
+        "Usage: /cancel &lt;order reference&gt;\n\n" +
+        "Example: /cancel COD-1787817058191-SPKH3D\n\n" +
+        "Use /orders to see your order references.",
+      parse_mode: "HTML",
       reply_markup: createBackButton(),
     });
     return;
@@ -1172,43 +1260,83 @@ async function handleCancelOrderCommand(ctx: BotContext, orderRef: string): Prom
     // Same two corrections as /track: the confirmation quotes a price, and the
     // reference has to be matched in the case it is stored in.
     await primeCurrency();
+    const ref = orderRef.trim().toUpperCase();
 
     // Not-yours and not-found get the same reply, so references can't be probed.
-    const order = await findOrderByRefForCustomer(
-      orderRef.trim().toUpperCase(),
-      customerUid,
-    );
+    const order = await findOrderByRefForCustomer(ref, customerUid);
 
     if (!order) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: formatError(`Order ${orderRef.trim()} not found.`),
+        text: cancellationRefusalHtml("not_found", "", orderRef.trim()),
+        parse_mode: "HTML",
+        reply_markup: createBackButton(),
       });
       return;
     }
 
-    const { canCancelOrder } = await import("../orderSupport");
-    const cancelInfo = canCancelOrder(order);
+    // The same check the Confirm button (and the website's request route)
+    // runs, with the sales transaction loaded, so the button is only offered
+    // when the request would be accepted.
+    const { checkOrderCancellation } = await import("../server/cancellationRequest");
+    const status = await checkOrderCancellation({
+      uid: customerUid,
+      orderRef: order.orderId,
+    });
 
-    if (!cancelInfo.canCancel) {
+    if (!status.found) {
       await sendMessage({
         chat_id: ctx.chatId,
-        text: formatError(cancelInfo.reason || "This order cannot be cancelled."),
+        text: cancellationRefusalHtml("not_found", "", order.orderRef),
+        parse_mode: "HTML",
+        reply_markup: createBackButton(),
       });
       return;
     }
 
-    const confirmText = `❌ *Cancel Order*\n\n` +
-      `Order: ${escapeMarkdown(order.orderRef)}\n` +
-      `Total: ${escapeMarkdown(formatPrice(order.totalAmount))}\n\n` +
-      `Are you sure you want to cancel this order?`;
+    if (!status.check.eligible) {
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: cancellationRefusalHtml(
+          status.check.code,
+          status.check.message,
+          order.orderRef,
+        ),
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: createBackButton(),
+      });
+      return;
+    }
 
-    const { createConfirmationKeyboard } = await import("./keyboards");
+    const { createCancelOrderConfirmationKeyboard } = await import("./keyboards");
+    const keyboard = createCancelOrderConfirmationKeyboard(status.orderRef);
+
+    if (!keyboard) {
+      // A reference too long for a button: the website can still do it.
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text:
+          `❌ <b>Cancel Order</b>\n\n` +
+          `Please request this cancellation from your purchases page:\n` +
+          `${escapeHtml(orderDetailUrl(order.orderRef))}`,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: createBackButton(),
+      });
+      return;
+    }
 
     await sendMessage({
       chat_id: ctx.chatId,
-      text: confirmText,
-      reply_markup: createConfirmationKeyboard(`confirm_cancel_${order.orderRef}`),
+      text:
+        `❌ <b>Cancel Order</b>\n\n` +
+        `Order: <b>${escapeHtml(order.orderRef)}</b>\n` +
+        `Total: ${escapeHtml(formatPrice(order.totalAmount))}\n\n` +
+        `Send a cancellation request for this order? The shop reviews every ` +
+        `request before the order is cancelled.`,
+      parse_mode: "HTML",
+      reply_markup: keyboard,
     });
   } catch (error) {
     console.error("Cancel error:", error);
@@ -1217,6 +1345,126 @@ async function handleCancelOrderCommand(ctx: BotContext, orderRef: string): Prom
       text: formatError("Failed to process cancellation. Please try again."),
     });
   }
+}
+
+/** Acknowledge a button press; cosmetic, so it is never allowed to throw. */
+async function acknowledgeCallback(queryId: string, text?: string): Promise<void> {
+  try {
+    await answerCallbackQuery({
+      callback_query_id: queryId,
+      ...(text ? { text } : {}),
+    });
+  } catch (error) {
+    console.error("Could not acknowledge callback (continuing):", error);
+  }
+}
+
+/** Take the buttons off a message so it can't be pressed again. Best effort. */
+async function removeButtons(ctx: BotContext): Promise<void> {
+  if (!ctx.messageId) return;
+  try {
+    await editMessageReplyMarkup({
+      chat_id: ctx.chatId,
+      message_id: ctx.messageId,
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (error) {
+    // Already edited (a double tap), or too old to edit: nothing to do.
+    console.error("Could not remove cancellation buttons (continuing):", error);
+  }
+}
+
+/**
+ * The cancellation confirmation's buttons: `confirm_cancel_<orderRef>` files the
+ * request, `keep_order_<orderRef>` dismisses it.
+ *
+ * Nothing in the callback is trusted. The customer is the one linked to this
+ * chat, the reference must parse, and `requestOrderCancellation` re-checks
+ * ownership and eligibility inside a Firestore transaction — the same function
+ * the website's request route uses. A second tap finds the first request
+ * pending and gets a friendly "already requested".
+ */
+async function handleCancelOrderCallback(
+  ctx: BotContext,
+  queryId: string,
+  data: string,
+): Promise<void> {
+  const { parseCancelOrderCallback } = await import("./keyboards");
+  const parsed = parseCancelOrderCallback(data);
+
+  if (!parsed) {
+    await acknowledgeCallback(queryId, "This button is no longer valid.");
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: "❌ That button is no longer valid. Use /orders to find the order, then /cancel followed by its reference.",
+      parse_mode: "HTML",
+      reply_markup: createBackButton(),
+    });
+    return;
+  }
+
+  if (parsed.action === "keep") {
+    await acknowledgeCallback(queryId, "Okay, your order stays as it is.");
+    await removeButtons(ctx);
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text: `👍 No problem. Order <b>${escapeHtml(parsed.orderRef)}</b> stays as it is.`,
+      parse_mode: "HTML",
+      reply_markup: createBackButton(),
+    });
+    return;
+  }
+
+  const customerUid = await getLinkedCustomerUid(ctx.chatId);
+  if (!customerUid) {
+    await acknowledgeCallback(queryId, "Please link your account first.");
+    await sendLinkRequired(ctx, "cancel orders");
+    return;
+  }
+
+  // Off the buttons first, so the request cannot be fired twice from here.
+  await removeButtons(ctx);
+  await sendChatAction(ctx.chatId, "typing").catch(() => undefined);
+
+  const { requestOrderCancellation } = await import("../server/cancellationRequest");
+  const result = await requestOrderCancellation({
+    uid: customerUid,
+    orderRef: parsed.orderRef,
+    channel: "telegram",
+  });
+
+  if (result.ok) {
+    await acknowledgeCallback(queryId, "Cancellation request sent.");
+    await sendMessage({
+      chat_id: ctx.chatId,
+      text:
+        `✅ <b>Cancellation request sent</b>\n\n` +
+        `Order <b>${escapeHtml(parsed.orderRef)}</b>: the shop will review your request ` +
+        `and you'll be told here and by email once they decide. Nothing changes until then.`,
+      parse_mode: "HTML",
+      reply_markup: createBackButton(),
+    });
+    return;
+  }
+
+  await acknowledgeCallback(
+    queryId,
+    result.code === "already_pending"
+      ? "Already requested."
+      : result.status >= 500
+        ? "Something went wrong."
+        : "This order can't be cancelled.",
+  );
+  await sendMessage({
+    chat_id: ctx.chatId,
+    text:
+      result.status >= 500
+        ? "❌ We couldn't send your cancellation request just now. Please try /cancel again in a moment."
+        : cancellationRefusalHtml(result.code, result.error, parsed.orderRef),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: createBackButton(),
+  });
 }
 
 /**
@@ -1230,6 +1478,14 @@ async function handleCallbackQuery(query: any): Promise<void> {
 
   console.log(`🔘 Callback from ${userId}: ${callbackData}`);
 
+  // The cancellation buttons answer the query themselves, with the outcome as
+  // the toast ("Cancellation request sent."); a query can only be answered once.
+  const answersItself =
+    typeof callbackData === "string" &&
+    !!chatId &&
+    (callbackData.startsWith("confirm_cancel_") ||
+      callbackData.startsWith("keep_order_"));
+
   // Acknowledge the callback so Telegram stops the button's spinner.
   //
   // Deliberately not allowed to fail the whole update: this used to be an
@@ -1237,13 +1493,11 @@ async function handleCallbackQuery(query: any): Promise<void> {
   // id, a transient network fault — threw before the button's actual work was
   // routed, and the press was silently dropped. The acknowledgement is cosmetic;
   // the action is not.
-  try {
-    await answerCallbackQuery({ callback_query_id: query.id });
-  } catch (error) {
-    console.error("Could not acknowledge callback (continuing):", error);
+  if (!answersItself) {
+    await acknowledgeCallback(query.id);
   }
 
-  if (!chatId) return;
+  if (!chatId || typeof callbackData !== "string") return;
 
   const ctx: BotContext = {
     chatId: chatId.toString(),
@@ -1274,6 +1528,11 @@ async function handleCallbackQuery(query: any): Promise<void> {
       await handleColourPickCallback(ctx, callbackData);
     } else if (callbackData.startsWith("cart_")) {
       await handleCartCallback(ctx, callbackData);
+    } else if (answersItself) {
+      await handleCancelOrderCallback(ctx, query.id, callbackData);
+    } else if (callbackData.startsWith("order_cancel_")) {
+      // The order keyboard's "Cancel Order": same path as /cancel <ref>.
+      await handleCancelOrderCommand(ctx, callbackData.slice("order_cancel_".length));
     } else if (callbackData.startsWith("order_")) {
       await handleOrderCallback(ctx, callbackData);
     } else if (callbackData === "unlink_confirm") {
@@ -1281,6 +1540,18 @@ async function handleCallbackQuery(query: any): Promise<void> {
     }
   } catch (error) {
     console.error("Error handling callback:", error);
+    if (answersItself) {
+      // Stop the spinner if the handler never got to answer (a second answer
+      // is refused by Telegram and only logged). The request may or may not
+      // have been filed, so point at where to check rather than guess.
+      await acknowledgeCallback(query.id, "Something went wrong.");
+      await sendMessage({
+        chat_id: ctx.chatId,
+        text: formatError(
+          "Something went wrong. Use /orders to check the order, and /cancel again if it still needs cancelling.",
+        ),
+      }).catch(() => undefined);
+    }
   }
 }
 

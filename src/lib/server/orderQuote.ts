@@ -280,17 +280,25 @@ export async function quoteOrder(
       ? resolveSizeIndex(variant.sizeQuantities || [], stockLine)
       : -1;
 
+    // resolveVariantIndex matches exactly or not at all, so an old cart line
+    // (variant since removed or re-made) is refused here, by name, rather
+    // than priced and reserved against a different colour.
     if (!variant || sizeIndex < 0) {
       const detail = [line.color, line.size].filter(Boolean).join(" / ");
       throw new QuoteError(
-        `${productName}${detail ? ` (${detail})` : ""} is no longer available.`,
+        `${productName}${detail ? ` (${detail})` : ""} is no longer available in that colour and size. Please remove it from your cart and add it again.`,
         409,
         "item_unavailable",
+        { productId: line.productId },
       );
     }
 
     quotedLines.push({
       ...line,
+      // The variant actually matched, by its own id when it has one, so the
+      // stock reservation, its release and the POS all act on exactly this
+      // variant. Id-less legacy variants keep what the page sent.
+      variantId: variant.id ? String(variant.id) : line.variantId,
       productName,
       image: String(
         variant.image || stock.groupImage || stock.image || "",

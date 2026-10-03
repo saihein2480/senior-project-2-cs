@@ -1,5 +1,6 @@
 import { adminDb } from "./firebase-admin";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Timestamp, type Firestore } from "firebase-admin/firestore";
+import { normalizeDeliveryFee } from "./deliveryFee";
 
 const CUSTOMERS_COLLECTION = "customers";
 const SETTINGS_COLLECTION = "business_settings";
@@ -203,6 +204,147 @@ export interface AwardPointsParams {
   transactionAmount: number;
   source: 'pos' | 'online';
   description?: string;
+}
+
+/**
+ * The marker a loyalty award leaves on its `transactions` document.
+ *
+ * Shared contract with the POS (which awards COD orders on delivery or
+ * completion): whoever finds `loyaltyAward` on a transaction must not award
+ * points for it again. Field names are part of the contract.
+ */
+export interface LoyaltyAwardMarker {
+  points: number;
+  /** THB the points were judged on: total minus the delivery fee. */
+  basis: number;
+  customerId: string;
+  awardedAt: Timestamp;
+  source: "online_payment";
+}
+
+/**
+ * What a purchase earns points on: its THB total minus the delivery fee
+ * (the fee earns no points), never below 0.
+ */
+export function loyaltyPointsBasis(total: unknown, deliveryFee: unknown): number {
+  const amount = Number(total);
+  const goods = (Number.isFinite(amount) ? amount : 0) - normalizeDeliveryFee(deliveryFee);
+  return Math.max(0, Math.round(goods * 100) / 100);
+}
+
+export type OnlinePaymentAwardResult = {
+  outcome:
+    | "awarded"
+    | "not_eligible"
+    | "already_awarded"
+    | "no_customer"
+    | "no_transaction";
+  points: number;
+  basis: number;
+};
+
+/**
+ * Award the points for a paid online (MyanMyanPay) order, exactly once.
+ *
+ * Runs in one Firestore transaction that reads the sale's `transactions`
+ * document, refuses if it already carries `loyaltyAward`, and otherwise
+ * credits the customer and writes the marker together. A repeated or
+ * concurrent callback therefore finds the marker (or loses the transaction
+ * and retries into it) and awards nothing.
+ *
+ * The basis is the sale's own stored THB figures: `total - deliveryFee`. The
+ * rest is the same rule as `LoyaltyService.awardPoints`: the programme must be
+ * enabled, the basis must reach `minimumSpendAmount`, and a qualifying
+ * purchase earns `pointsPerPurchase`. When it does not qualify the marker is
+ * still written, with 0 points, so the decision is not taken again later.
+ */
+export async function awardPointsForOnlinePayment(
+  db: Firestore,
+  params: { transactionDocId: string; description?: string },
+): Promise<OnlinePaymentAwardResult> {
+  const saleRef = db.collection("transactions").doc(params.transactionDocId);
+  const settingsRef = db.collection(SETTINGS_COLLECTION).doc("main");
+
+  return db.runTransaction<OnlinePaymentAwardResult>(async (tx) => {
+    const [saleSnap, settingsSnap] = await Promise.all([
+      tx.get(saleRef),
+      tx.get(settingsRef),
+    ]);
+    if (!saleSnap.exists) {
+      return { outcome: "no_transaction", points: 0, basis: 0 };
+    }
+
+    const sale = (saleSnap.data() || {}) as Record<string, unknown>;
+    const basis = loyaltyPointsBasis(sale.total, sale.deliveryFee);
+
+    const existing = sale.loyaltyAward as Partial<LoyaltyAwardMarker> | undefined;
+    if (existing) {
+      return {
+        outcome: "already_awarded",
+        points: Number(existing.points) || 0,
+        basis: Number(existing.basis) || basis,
+      };
+    }
+
+    const customer = (sale.customer || {}) as { uid?: unknown };
+    const customerId =
+      typeof sale.customerUid === "string" && sale.customerUid
+        ? sale.customerUid
+        : typeof customer.uid === "string"
+          ? customer.uid
+          : "";
+    if (!customerId || customerId.includes("/")) {
+      return { outcome: "no_customer", points: 0, basis };
+    }
+
+    const customerRef = db.collection(CUSTOMERS_COLLECTION).doc(customerId);
+    const customerSnap = await tx.get(customerRef);
+    if (!customerSnap.exists) {
+      return { outcome: "no_customer", points: 0, basis };
+    }
+
+    const settings = (settingsSnap.data()?.loyaltySettings || null) as
+      | LoyaltySettings
+      | null;
+    const perPurchase = Number(settings?.pointsPerPurchase);
+    const points =
+      settings?.enabled &&
+      LoyaltyService.doesQualifyForPoints(basis, settings) &&
+      Number.isFinite(perPurchase) &&
+      perPurchase > 0
+        ? perPurchase
+        : 0;
+
+    if (points > 0) {
+      const history: LoyaltyPointsHistory = {
+        id: `points_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        pointsEarned: points,
+        transactionId: params.transactionDocId,
+        transactionAmount: basis,
+        earnedAt: new Date(),
+        source: "online",
+        description:
+          params.description || `Earned ${points} point(s) from purchase`,
+      };
+      tx.update(customerRef, {
+        loyaltyPoints: FieldValue.increment(points),
+        totalPointsEarned: FieldValue.increment(points),
+        pointsHistory: FieldValue.arrayUnion(history),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    const marker: LoyaltyAwardMarker = {
+      points,
+      basis,
+      customerId,
+      awardedAt: Timestamp.now(),
+      source: "online_payment",
+    };
+    tx.update(saleRef, { loyaltyAward: marker });
+
+    return { outcome: points > 0 ? "awarded" : "not_eligible", points, basis };
+  });
 }
 
 export class LoyaltyService {

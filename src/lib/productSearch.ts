@@ -1,13 +1,7 @@
 import {
-  collection,
-  getDocs,
-  query,
-  orderBy,
-  where,
-  Query,
-  DocumentData,
-} from "firebase/firestore";
-import { db } from "./firebase";
+  getCatalogDocsByNewest,
+  isCatalogConfigured,
+} from "./server/catalogCache";
 import { variantMatchesColor } from "./colorFamily";
 import { productImageCandidates } from "./productImage";
 import { categoryMatches } from "./categorySynonyms";
@@ -174,19 +168,19 @@ function mapStockDocToSearchProduct(
 export async function searchProducts(
   filters: SearchFilters,
 ): Promise<SearchProduct[]> {
-  if (!db) {
+  if (!isCatalogConfigured()) {
     throw new Error("Firebase not configured");
   }
 
   try {
-    // Fetch all products
-    const q = query(collection(db, "stocks"), orderBy("createdAt", "desc"));
-    const snap = await getDocs(q);
+    // The whole catalogue, newest first, from the shared per-minute snapshot
+    // (lib/server/catalogCache.ts) rather than a full collection read per call.
+    const docs = await getCatalogDocsByNewest();
 
     // Map documents to products and keep reference to original data for filtering
-    const productsWithDocs = snap.docs.map((d) => ({
-      product: mapStockDocToSearchProduct(d.id, d.data() as FirestoreStockDoc),
-      docData: d.data() as FirestoreStockDoc,
+    const productsWithDocs = docs.map((d) => ({
+      product: mapStockDocToSearchProduct(d.id, d.data as FirestoreStockDoc),
+      docData: d.data as FirestoreStockDoc,
     }));
 
     // Filter by branch if specified (uses 'shop' field in database)

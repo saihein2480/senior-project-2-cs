@@ -65,22 +65,37 @@ export async function POST(req: Request) {
       ? Math.floor(raw.maxRecipients)
       : undefined;
 
+  // Customer ids are document ids: non-empty, no "/", bounded length. A list
+  // with an invalid entry is refused outright rather than filtered, because
+  // filtering it down to nothing would turn a targeted send into a store-wide
+  // one (an empty list means "everyone" to broadcastToCustomers).
+  let onlyCustomerIds: string[] | undefined;
+  if (Array.isArray(raw.onlyCustomerIds)) {
+    const ids = raw.onlyCustomerIds.filter(
+      (id): id is string => typeof id === "string" && !!id.trim(),
+    );
+    if (ids.some((id) => id.length > 128 || id.includes("/"))) {
+      return NextResponse.json(
+        { error: "onlyCustomerIds contains an invalid id" },
+        { status: 400 },
+      );
+    }
+    onlyCustomerIds = ids;
+  }
+
   try {
     const result = await broadcastToCustomers(parsed.value, {
       maxRecipients,
       includeInApp: raw.includeInApp !== false,
-      onlyCustomerIds: Array.isArray(raw.onlyCustomerIds)
-        ? raw.onlyCustomerIds.filter(
-            (id): id is string => typeof id === "string" && !!id.trim(),
-          )
-        : undefined,
+      onlyCustomerIds,
     });
 
     return NextResponse.json({ success: true, result });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to broadcast notification";
     console.error("notifications/broadcast failed:", error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to broadcast notification" },
+      { status: 500 },
+    );
   }
 }

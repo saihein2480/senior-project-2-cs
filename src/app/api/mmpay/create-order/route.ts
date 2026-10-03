@@ -3,10 +3,13 @@ import { MMPaySDK } from "mmpay-node-sdk";
 import { adminDb, getUidFromAuthHeader } from "../../../../lib/firebase-admin";
 import {
   createOrderWithStockReservation,
+  isCheckoutConflictError,
+  isStockShortageError,
   releaseStaleReservations,
   releaseStockReservation,
 } from "../../../../lib/onlineStockService";
 import { buildGatewayItems } from "../../../../lib/orderPricing";
+import { createRateLimiter, getClientIp } from "../../../../lib/server/rateLimit";
 import {
   assertCustomerSawQuote,
   isQuoteError,
@@ -30,6 +33,12 @@ import {
  * The customer is the caller identified by the ID token. Every amount stored on
  * the order and the amount sent to MyanMyanPay is computed here from
  * Firestore (see lib/server/orderQuote.ts); the request carries no prices.
+ *
+ * 429 (with Retry-After) past 5 attempts per customer or 20 per IP in 10
+ * minutes. A customer has at most one open QR order: a new one first releases
+ * the previous unpaid one (stock and coupon). The reservation expires after
+ * STOCK_RESERVATION_TTL_SECONDS and is released server-side (order-status,
+ * the next checkout, or the release-expired cron).
  */
 type CreateOrderRequest = {
   lines?: unknown;
@@ -38,6 +47,30 @@ type CreateOrderRequest = {
   expectedTotalTHB?: unknown;
   expectedTotalMMK?: unknown;
 };
+
+/**
+ * Every create-order takes real stock off the shelf for a few minutes, so a
+ * script could otherwise hold the whole catalogue. Per signed-in customer and
+ * per IP; in-memory per server instance (see lib/server/rateLimit.ts), so a
+ * first line of defence. The one-open-checkout rule below is the hard cap.
+ */
+const ORDER_WINDOW_MS = 10 * 60 * 1000;
+const perCustomerLimiter = createRateLimiter({ limit: 5, windowMs: ORDER_WINDOW_MS });
+const perIpLimiter = createRateLimiter({ limit: 20, windowMs: ORDER_WINDOW_MS });
+
+function tooManyAttempts(retryAfterSeconds: number) {
+  const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+  // Worded without "limit": the checkout page turns any error containing it
+  // into the sandbox gateway-limit explanation.
+  return NextResponse.json(
+    {
+      error: `Too many payment attempts. Please wait ${minutes} minute${minutes === 1 ? "" : "s"} and try again.`,
+      code: "too_many_attempts",
+      retryAfterSeconds,
+    },
+    { status: 429, headers: { "Retry-After": String(retryAfterSeconds) } },
+  );
+}
 
 function getMmpay() {
   if (
@@ -189,10 +222,21 @@ export async function POST(req: Request) {
       );
     }
 
+    const ip = getClientIp(req.headers);
+    if (ip) {
+      const byIp = perIpLimiter.check(ip);
+      if (!byIp.allowed) return tooManyAttempts(byIp.retryAfterSeconds);
+    }
+
+    // A verified Firebase ID token (getUidFromAuthHeader -> verifyIdToken);
+    // the customer is always the token's uid, never one from the body.
     const uid = await getUidFromAuthHeader(req.headers.get("authorization"));
     if (!uid) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
+
+    const byCustomer = perCustomerLimiter.check(uid);
+    if (!byCustomer.allowed) return tooManyAttempts(byCustomer.retryAfterSeconds);
 
     const body = ((await req.json().catch(() => null)) ||
       {}) as CreateOrderRequest;
@@ -242,8 +286,10 @@ export async function POST(req: Request) {
       );
     }
 
-    // Free stock held by checkouts nobody is going to pay for, including this
-    // customer's own earlier QR that has run out, before reserving again.
+    // One open QR checkout per customer: give up this customer's previous
+    // unpaid QR order (its stock and coupon) before reserving again, and
+    // release a small batch of anyone's expired reservations on the way, so
+    // abandoned checkouts come back even without the cron. Best-effort.
     try {
       await releaseStaleReservations(adminDb, { customerUid: uid });
     } catch (error) {
@@ -290,11 +336,22 @@ export async function POST(req: Request) {
         orderSource: "web_storefront",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      });
+      }, { customerUid: uid, couponId: coupon?.id || null });
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Stock validation failed";
-      return NextResponse.json({ error: message }, { status: 409 });
+      // Short stock (or an item that no longer matches a variant), a second
+      // QR racing this one, or a coupon another open payment holds: the
+      // customer's answer. Anything else is a server failure and gets the
+      // generic 500 below rather than SDK text.
+      if (isStockShortageError(error)) {
+        return NextResponse.json({ error: error.message }, { status: 409 });
+      }
+      if (isCheckoutConflictError(error)) {
+        return NextResponse.json(
+          { error: error.message, code: error.code },
+          { status: 409 },
+        );
+      }
+      throw error;
     }
 
     // From here on the order holds stock. Any path that ends without a
@@ -348,23 +405,21 @@ export async function POST(req: Request) {
         sdkError.toLowerCase().includes("limit") || 
         sdkError.toLowerCase().includes("quota") ||
         sdkError.toLowerCase().includes("exceeded");
-      
-      let hint = "";
-      let userFriendlyMessage = sdkError;
-      
-      if (isUnauthorized) {
-        hint = " Check MMPAY keys and mode. Use sandbox keys with sandbox mode (MMPAY_MODE=sandbox).";
-      } else if (isLimitFilled) {
-        userFriendlyMessage = "Payment gateway limit reached";
-        hint = " Sandbox accounts have transaction limits. Please contact MyanMyanPay support to increase limits or complete merchant verification. For production use, upgrade to a verified merchant account.";
-      }
+
+      // The gateway's own text and response stay in the server log; the
+      // customer gets a fixed message. "limit" is kept in the limit case
+      // because the checkout page keys its sandbox-limit explanation off it.
+      console.error(`MyanMyanPay rejected order ${orderId}:`, sdkError, {
+        unauthorized: isUnauthorized,
+        payResponse: safePayResponse,
+      });
 
       return NextResponse.json(
         {
-          error: `MyanMyanPay error: ${userFriendlyMessage}${hint}`,
+          error: isLimitFilled
+            ? "MyanMyanPay error: Payment gateway limit reached. Please try again later or choose Cash on Delivery."
+            : "MyanMyanPay could not create this payment. Please try again or choose Cash on Delivery.",
           orderId,
-          payResponse: safePayResponse,
-          details: sdkError, // Include original error for debugging
         },
         { status: 502 },
       );

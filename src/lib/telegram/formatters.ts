@@ -560,7 +560,7 @@ export function formatHelpMessage(): string {
 *Order Commands:*
 /orders \\- View your order history
 /track \\<orderRef\\> \\- Track an order
-/cancel \\<orderRef\\> \\- Cancel an order
+/cancel \\<orderRef\\> \\- Ask the shop to cancel an order
 
 *Account Commands:*
 /profile \\- View your profile

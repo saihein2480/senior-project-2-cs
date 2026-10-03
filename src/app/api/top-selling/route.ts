@@ -49,9 +49,37 @@ interface AggregationSnapshot {
  * scan may run once per instance. Moving to a maintained aggregate document
  * (updated when a sale is written) would remove the scan entirely.
  */
-const AGGREGATION_TTL_MS = 20 * 1000;
+const AGGREGATION_TTL_MS = 60 * 1000;
 let cachedAggregation: AggregationSnapshot | null = null;
 let inFlight: Promise<AggregationSnapshot> | null = null;
+
+/**
+ * `fresh=1` forces a rescan, which any visitor can send. It is honoured at most
+ * once per this interval per instance; requests inside the window are served
+ * from the cache (or join the rescan already running).
+ */
+const FORCED_REFRESH_MIN_INTERVAL_MS = 10 * 1000;
+let lastForcedRefreshAt = 0;
+
+function claimForcedRefresh(): boolean {
+  const now = Date.now();
+  if (now - lastForcedRefreshAt < FORCED_REFRESH_MIN_INTERVAL_MS) return false;
+  lastForcedRefreshAt = now;
+  return true;
+}
+
+/** Only the transaction field the aggregation reads. */
+const TRANSACTION_FIELDS = ["items"] as const;
+
+/** Only the catalogue fields the response is built from. */
+const STOCK_FIELDS = [
+  "shop",
+  "colorVariants",
+  "groupImage",
+  "category",
+  "groupName",
+  "unitPrice",
+] as const;
 
 async function computeAggregation(): Promise<AggregationSnapshot> {
   // Sales are aggregated across ALL transactions rather than filtering them
@@ -64,6 +92,9 @@ async function computeAggregation(): Promise<AggregationSnapshot> {
   const transactionsSnapshot = await adminDb!
     .collection("transactions")
     .where("status", "in", ["completed", "partially_refunded", "refunded"])
+    // Transactions carry customer details, payment metadata and sometimes
+    // base64 images; the ranking only needs the line items.
+    .select(...TRANSACTION_FIELDS)
     .get();
 
   // Aggregate sales per PRODUCT (summing across all of its colour/size
@@ -140,7 +171,11 @@ async function computeAggregation(): Promise<AggregationSnapshot> {
 
   const chunkSnapshots = await Promise.all(
     idChunks.map((batch) =>
-      adminDb!.collection("stocks").where("__name__", "in", batch).get()
+      adminDb!
+        .collection("stocks")
+        .where("__name__", "in", batch)
+        .select(...STOCK_FIELDS)
+        .get()
     )
   );
 
@@ -193,10 +228,18 @@ export async function GET(request: NextRequest) {
 
     const url = new URL(request.url);
     const branch = url.searchParams.get("branch") || "";
-    const limit = Math.min(Number(url.searchParams.get("limit")) || 20, 50);
+    if (branch.length > 128 || branch.includes("/")) {
+      return NextResponse.json({ error: "Invalid branch" }, { status: 400 });
+    }
+    const limit = Math.min(
+      Math.max(Math.floor(Number(url.searchParams.get("limit"))) || 20, 1),
+      50,
+    );
     // Clients set `fresh=1` right after they detect a sale, so the ranking
-    // updates immediately instead of waiting out the cache TTL.
-    const forceFresh = url.searchParams.get("fresh") === "1";
+    // updates immediately instead of waiting out the cache TTL. Throttled per
+    // instance so the parameter cannot be used to force a full scan per request.
+    const forceFresh =
+      url.searchParams.get("fresh") === "1" && claimForcedRefresh();
 
     const { ranked, stocksMap, uniqueProductsSold, computedAt } =
       await getAggregation(forceFresh);
@@ -293,10 +336,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error("Error fetching top-selling products:", error);
     return NextResponse.json(
-      {
-        error: "Failed to fetch top-selling products",
-        details: error instanceof Error ? error.message : String(error),
-      },
+      { error: "Failed to fetch top-selling products" },
       { status: 500 }
     );
   }

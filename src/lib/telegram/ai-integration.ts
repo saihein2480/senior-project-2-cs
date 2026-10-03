@@ -16,6 +16,16 @@ import { isOrderInquiry, findOrderByRefForCustomer } from "../orderSupport";
 import { isSizeRecommendationQuery, extractMeasurements, recommendSize } from "../storeInfo";
 import { formatProduct, formatPrice, escapeMarkdown } from "./formatters";
 import { createProductKeyboard } from "./keyboards";
+import { GROQ_CHAT_MODEL } from "../chat/model";
+
+/**
+ * Completion ceilings. The shared model (lib/chat/model.ts) is a reasoning
+ * model whose reasoning tokens count against `max_tokens`, so the 150-200 used
+ * with the old model could end a reply before any visible text. The prompts
+ * still ask for 2-3 sentences; this is only the ceiling.
+ */
+const CHAT_MAX_TOKENS = 700;
+const RECOMMENDATION_MAX_TOKENS = 500;
 
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
@@ -53,10 +63,15 @@ export async function processWithAI(
     // Check for specific query types first
 
     // 1. Promotion queries
+    // Live promotions, judged the same way checkout prices them. The answer is
+    // plain text, so it is escaped for MarkdownV2 like the other branches.
     const promotionQuery = isPromotionQuery(message);
     if (promotionQuery.isQuery && promotionQuery.queryType) {
-      const response = getPromotionResponse(promotionQuery.queryType);
-      return { text: response };
+      const response = await getPromotionResponse(
+        promotionQuery.queryType,
+        formatPrice,
+      );
+      return { text: escapeMarkdown(response) };
     }
 
     // 2. Order inquiries. An order reference alone proves nothing, so details
@@ -189,9 +204,9 @@ Always be helpful, concise, and encourage shopping.`,
 
     const chatCompletion = await groq.chat.completions.create({
       messages: groqMessages,
-      model: "llama-3.3-70b-versatile",
+      model: GROQ_CHAT_MODEL,
       temperature: 0.7,
-      max_tokens: 200,
+      max_tokens: CHAT_MAX_TOKENS,
     });
 
     const aiResponse = chatCompletion.choices[0]?.message?.content || 
@@ -230,9 +245,9 @@ Keep it brief (2-3 sentences) and specific.`,
           content: `I'm looking for: ${userPreferences}`,
         },
       ],
-      model: "llama-3.3-70b-versatile",
+      model: GROQ_CHAT_MODEL,
       temperature: 0.8,
-      max_tokens: 150,
+      max_tokens: RECOMMENDATION_MAX_TOKENS,
     });
 
     return (

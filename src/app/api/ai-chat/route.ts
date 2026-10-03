@@ -7,25 +7,79 @@ import {
   ToolContext,
   ToolSideEffects,
 } from "../../../lib/chat/tools";
+import { GROQ_CHAT_MODEL } from "../../../lib/chat/model";
+import { createRateLimiter, getClientIp } from "../../../lib/server/rateLimit";
 
 const groq = process.env.GROQ_API_KEY
   ? new Groq({ apiKey: process.env.GROQ_API_KEY })
   : null;
 
-/**
- * Must be a Groq model this account can access AND that supports tool calling.
- * Verified available: openai/gpt-oss-20b, openai/gpt-oss-120b, qwen/qwen3.8-27b.
- * Note llama-3.3-70b-versatile is NOT available and returns 404 model_not_found.
- * Overridable via env so a deprecation needs no code change.
- */
-const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
+/** Shared with the Telegram bot; see lib/chat/model.ts. */
+const MODEL = GROQ_CHAT_MODEL;
 
-/** Safety valve so a confused model cannot loop forever. */
-const MAX_TOOL_ROUNDS = 4;
+/**
+ * Safety valve so a confused model cannot loop forever. Each round is one Groq
+ * call against the account's shared per-minute token budget.
+ */
+const MAX_TOOL_ROUNDS = 3;
+
+/**
+ * Per-instance limits (see lib/server/rateLimit.ts). Every request can cost
+ * several Groq calls from a budget shared by all shoppers, so anonymous
+ * callers, keyed by IP, get less than signed-in customers, keyed by uid.
+ */
+const signedInLimiter = createRateLimiter({ limit: 20, windowMs: 60 * 1000 });
+const anonymousLimiter = createRateLimiter({ limit: 8, windowMs: 60 * 1000 });
+
+/** Input caps. Only the most recent turns are ever sent to the model. */
+const MAX_HISTORY_MESSAGES = 12;
+const RECENT_TURNS_SENT = 6;
+const MAX_MESSAGE_CHARS = 1000;
+const MAX_TOTAL_CHARS = 6000;
+const MAX_BODY_BYTES = 256 * 1024;
+const MAX_CONTEXT_ID_LENGTH = 200;
 
 interface Message {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant";
   content: string;
+}
+
+/**
+ * Keep only well-formed user/assistant turns from the client.
+ *
+ * Any other role is dropped: a client-supplied "system" (or "tool") turn would
+ * otherwise sit next to our own system prompt. Each message is capped, and
+ * older turns are dropped once the total is over budget, newest kept first.
+ */
+function sanitizeMessages(raw: unknown[]): Message[] {
+  const valid: Message[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const { role, content } = entry as { role?: unknown; content?: unknown };
+    if (role !== "user" && role !== "assistant") continue;
+    if (typeof content !== "string") continue;
+    const text = content.trim();
+    if (!text) continue;
+    valid.push({ role, content: text.slice(0, MAX_MESSAGE_CHARS) });
+  }
+
+  const recent = valid.slice(-MAX_HISTORY_MESSAGES);
+  const kept: Message[] = [];
+  let total = 0;
+  for (let i = recent.length - 1; i >= 0; i -= 1) {
+    total += recent[i].content.length;
+    if (total > MAX_TOTAL_CHARS) break;
+    kept.unshift(recent[i]);
+  }
+  return kept;
+}
+
+/** An optional id from the client: a short string without "/", else null. */
+function optionalContextId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const id = value.trim();
+  if (!id || id.length > MAX_CONTEXT_ID_LENGTH || id.includes("/")) return null;
+  return id;
 }
 
 /**
@@ -67,25 +121,70 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { messages, productContext, branch } = await req.json();
-
-    if (!messages || !Array.isArray(messages)) {
-      return NextResponse.json(
-        { error: "Invalid request. Messages array is required." },
-        { status: 400 },
-      );
-    }
-
     // Identity comes from a verified ID token, never from the request body, so a
     // caller cannot read someone else's orders by guessing a uid.
     const customerUid = await getUidFromAuthHeader(
       req.headers.get("authorization"),
     );
 
+    // Rate limit before reading the body or calling the model.
+    const limited = customerUid
+      ? signedInLimiter.check(`uid:${customerUid}`)
+      : anonymousLimiter.check(`ip:${getClientIp(req.headers) || "unknown"}`);
+    if (!limited.allowed) {
+      return NextResponse.json(
+        {
+          error:
+            "You're sending messages a little too quickly. Please wait a moment and try again.",
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": String(limited.retryAfterSeconds) },
+        },
+      );
+    }
+
+    const rawBody = await req.text();
+    if (Buffer.byteLength(rawBody, "utf8") > MAX_BODY_BYTES) {
+      return NextResponse.json(
+        { error: "This conversation is too long. Please start a new chat." },
+        { status: 413 },
+      );
+    }
+
+    let body: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = rawBody ? JSON.parse(rawBody) : null;
+      body =
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : null;
+    } catch {
+      body = null;
+    }
+
+    if (!body || !Array.isArray(body.messages)) {
+      return NextResponse.json(
+        { error: "Invalid request. Messages array is required." },
+        { status: 400 },
+      );
+    }
+
+    const messages = sanitizeMessages(body.messages);
+    if (messages.length === 0) {
+      return NextResponse.json(
+        { error: "Please type a message first." },
+        { status: 400 },
+      );
+    }
+
+    const productContext = optionalContextId(body.productContext);
+    const branch = optionalContextId(body.branch);
+
     const ctx: ToolContext = {
       customerUid,
-      productContext: productContext || null,
-      branch: branch || null,
+      productContext,
+      branch,
     };
 
     const effects: ToolSideEffects = {
@@ -100,11 +199,14 @@ export async function POST(req: NextRequest) {
         content: buildSystemPrompt(!!customerUid, !!productContext),
       },
       // Only recent turns: history is re-sent on every request and counts
-      // against the shared per-minute token budget.
-      ...messages.slice(-6).map((msg: Message) => ({
-        role: msg.role,
-        content: msg.content,
-      })),
+      // against the shared per-minute token budget. Roles are already limited
+      // to user/assistant by sanitizeMessages.
+      ...messages.slice(-RECENT_TURNS_SENT).map(
+        (msg): Groq.Chat.Completions.ChatCompletionMessageParam =>
+          msg.role === "user"
+            ? { role: "user", content: msg.content }
+            : { role: "assistant", content: msg.content },
+      ),
     ];
 
     let reply = "";
@@ -232,10 +334,7 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error("AI Chat error:", error);
     return NextResponse.json(
-      {
-        error: "Failed to process your request. Please try again.",
-        details: error instanceof Error ? error.message : String(error),
-      },
+      { error: "Failed to process your request. Please try again." },
       { status: 500 },
     );
   }

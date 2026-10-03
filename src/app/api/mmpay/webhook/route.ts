@@ -1,12 +1,18 @@
 import { NextResponse } from "next/server";
 import { MMPaySDK } from "mmpay-node-sdk";
+import { FieldValue, type Firestore } from "firebase-admin/firestore";
 import { adminDb } from "../../../../lib/firebase-admin";
 import {
   deductStockForPaidOnlineOrder,
+  isStockShortageError,
   releaseStockReservation,
 } from "../../../../lib/onlineStockService";
 import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid";
-import { normalizeDeliveryFee } from "../../../../lib/deliveryFee";
+import {
+  completePaidOrderExtras,
+  recordOnlineSale,
+  transactionDocIdFor,
+} from "../../../../lib/mmpayPaidOrder";
 import {
   isSettledPaymentStatus,
   orderStatusFor,
@@ -56,233 +62,195 @@ function getMmpay() {
   });
 }
 
-async function createTransactionFromOnlineOrder(payload: MmpayPayload) {
-  if (!adminDb || payload.status !== "SUCCESS") return;
+type CallbackDecision =
+  | { kind: "unknown_order" }
+  | {
+      kind: "already_handled";
+      reason: "already_recorded" | "stock_conflict" | "payment_review";
+      /** The sale exists but the paid announcement never went out. */
+      announcementPending: boolean;
+    }
+  | { kind: "amount_mismatch"; expectedMmk: number; receivedMmk: number }
+  | { kind: "ignored"; reason: string }
+  | { kind: "applied" };
 
-  const orderDocRef = adminDb.collection("onlineOrders").doc(payload.orderId);
-  const orderSnap = await orderDocRef.get();
-  if (!orderSnap.exists) return;
-
-  const order = orderSnap.data() as Record<string, unknown>;
-
-  const transactionId = payload.transactionRefId || payload.orderId;
-  const transactionDocRef = adminDb
+/**
+ * Read the order (and, for SUCCESS, its sales transaction) and decide what this
+ * callback does, writing the order's new state in the same transaction.
+ *
+ * Doing the read and the write together means two deliveries of the same
+ * callback racing each other cannot both act on the same stale state, e.g.
+ * both raise an amount-mismatch notification.
+ */
+async function decideCallback(
+  db: Firestore,
+  payload: MmpayPayload,
+): Promise<CallbackDecision> {
+  const orderRef = db.collection("onlineOrders").doc(payload.orderId);
+  const transactionDocRef = db
     .collection("transactions")
-    .doc(transactionId);
-  const existing = await transactionDocRef.get();
-  if (existing.exists) return;
+    .doc(transactionDocIdFor(payload));
 
-  const product = (order.product || {}) as Record<string, unknown>;
-  const cartItems = Array.isArray(order.cartItems)
-    ? (order.cartItems as Array<Record<string, unknown>>)
-    : [];
+  return db.runTransaction<CallbackDecision>(async (tx) => {
+    const [orderSnap, transactionSnap] = await Promise.all([
+      tx.get(orderRef),
+      payload.status === "SUCCESS" ? tx.get(transactionDocRef) : null,
+    ]);
 
-  const txItems =
-    cartItems.length > 0
-      ? cartItems.map((item, index) => ({
-          id:
-            (item.productId as string | undefined) ||
-            `${payload.orderId}-${index + 1}`,
-          stockId:
-            (item.productId as string | undefined) ||
-            `${payload.orderId}-${index + 1}`,
-          groupName:
-            (item.productName as string | undefined) || "Online Product",
-          unitPrice: Number(item.priceTHB || 0),
-          // The catalogue price when the line carries one. Older orders only
-          // stored the charged price, so fall back to it rather than reporting
-          // a saving that was never recorded.
-          originalPrice: Number(item.originalPriceTHB || item.priceTHB || 0),
-          lineDiscount: Number(item.lineDiscountTHB || 0),
-          promotionId: (item.promotionId as string | undefined) || "",
-          promotionName: (item.promotionName as string | undefined) || "",
-          quantity: Number(item.quantity || 1),
-          selectedColor: (item.color as string | undefined) || "",
-          selectedSize: (item.size as string | undefined) || "",
-          image: (item.image as string | undefined) || "",
-          shop: "online",
-        }))
-      : [
-          {
-            id: (product.productId as string | undefined) || payload.orderId,
-            stockId:
-              (product.productId as string | undefined) || payload.orderId,
-            groupName:
-              (product.productName as string | undefined) || "Online Product",
-            unitPrice: Number(product.priceTHB || 0),
-            originalPrice: Number(
-              product.originalPriceTHB || product.priceTHB || 0,
-            ),
-            lineDiscount: Number(product.lineDiscountTHB || 0),
-            promotionId: (product.promotionId as string | undefined) || "",
-            promotionName: (product.promotionName as string | undefined) || "",
-            quantity: Number(product.quantity || 1),
-            selectedColor: (product.color as string | undefined) || "",
-            selectedSize: (product.size as string | undefined) || "",
-            image: (product.image as string | undefined) || "",
-            shop: "online",
-          },
-        ];
+    if (!orderSnap.exists) return { kind: "unknown_order" };
 
-  // Use stored values from onlineOrders document (calculated at checkout)
-  const subtotal = Number(order.subtotal || 0) || txItems.reduce(
-    (sum, item) =>
-      sum + Number(item.unitPrice || 0) * Number(item.quantity || 0),
-    0,
-  );
-  const tax = Number(order.tax || 0);
-  const discount = Number(order.discount || 0);
-  const couponDiscountTHB = Number(order.couponDiscountTHB || 0);
-  const taxRate = Number(order.taxRate || 0);
-  // Orders placed before delivery fees existed have none, which is 0.
-  const deliveryFee = normalizeDeliveryFee(order.deliveryFee);
-  const total =
-    Number(order.total || 0) ||
-    Math.max(0, subtotal - discount - couponDiscountTHB) + tax + deliveryFee;
+    const currentOrder = (orderSnap.data() || {}) as Record<string, unknown>;
+    const currentPaymentStatus = currentOrder.paymentStatus;
+    const currentStatus = currentOrder.status;
+    const nowIso = new Date().toISOString();
 
-  const orderExchangeRate = Number(order.exchangeRate || 0);
-  const envExchangeRate = Number(process.env.NEXT_PUBLIC_MMK_RATE || 0);
-  const exchangeRate =
-    orderExchangeRate > 0
-      ? orderExchangeRate
-      : Number.isFinite(envExchangeRate) && envExchangeRate > 0
-        ? envExchangeRate
-        : 0;
-  const hasExchangeRate = exchangeRate > 0;
+    if (payload.status === "SUCCESS") {
+      // Repeated SUCCESS deliveries: acknowledge, change nothing.
+      if (transactionSnap?.exists) {
+        return {
+          kind: "already_handled",
+          reason: "already_recorded",
+          announcementPending:
+            String(currentPaymentStatus || "").toUpperCase() === "SUCCESS" &&
+            !currentOrder.paidNotifiedAt,
+        };
+      }
+      if (currentStatus === "stock_conflict" || currentStatus === "payment_review") {
+        return {
+          kind: "already_handled",
+          reason: currentStatus,
+          announcementPending: false,
+        };
+      }
 
-  // `create` fails if the document already exists. MyanMyanPay can deliver the
-  // same SUCCESS twice at once; with a get-then-set both copies could pass the
-  // existence check above and award points and consume the coupon twice.
-  try {
-    await transactionDocRef.create({
-    transactionId,
-    source: "online",
-    onlineOrderId: payload.orderId,
-    customer: {
-      uid: (order.customer as Record<string, unknown> | undefined)?.uid,
-      email: (order.customer as Record<string, unknown> | undefined)?.email,
-      displayName:
-        ((order.customer as Record<string, unknown> | undefined)
-          ?.displayName as string | undefined) || "Online Customer",
-      phone:
-        ((order.customer as Record<string, unknown> | undefined)?.phone as
-          | string
-          | undefined) || "",
-      address:
-        ((order.customer as Record<string, unknown> | undefined)?.address as
-          | string
-          | undefined) || "",
-      customerType: "individual",
-    },
-    items: txItems,
-    subtotal,
-    tax,
-    taxRate,
-    discount,
-    deliveryFee,
-    // Named promotions, copied from the order so the invoice can report which
-    // promotion applied rather than just a smaller number.
-    appliedPromotions: Array.isArray(order.appliedPromotions)
-      ? order.appliedPromotions
-      : [],
-    total,
-    amountPaid: total,
-    change: 0,
-    paymentMethod: (order.paymentMethod as string | undefined) || "scan",
-    timestamp: new Date().toISOString(),
-    createdAt: new Date(),
-    status: "completed",
-    // The POS refund/sales reports group by branch, so online orders have to
-    // carry one too. COD checkout already writes "Online Store"; match it, but
-    // prefer a real branch if the order ever starts recording one.
-    branchName: (order.branchName as string | undefined) || "Online Store",
-    ...(order.shopId ? { shopId: order.shopId as string } : {}),
-    sellingCurrency: "THB",
-    ...(hasExchangeRate ? { exchangeRate } : {}),
-    amountMmk: Number(order.amountMmk || payload.amount || 0),
-    sellingTotal: Number(order.amountMmk || payload.amount || 0),
-    paymentProvider: "MMPAY",
-    orderSource: "web_storefront",
-    customerUid: (order.customer as Record<string, unknown> | undefined)?.uid,
-    // Add coupon information
-    ...(order.couponCode
-      ? {
-          couponCode: order.couponCode,
-          appliedCouponCode: order.couponCode,
-          couponId: order.couponId,
-          couponDiscountTHB,
-        }
-      : {}),
-    paymentMeta: {
-      method: payload.method,
-      vendor: payload.vendor,
-      status: payload.status,
-      condition: payload.condition,
-      transactionRefId: payload.transactionRefId || "",
-    },
-    });
-  } catch (error) {
-    // gRPC ALREADY_EXISTS: another delivery of this callback recorded it.
-    const code = (error as { code?: unknown })?.code;
-    if (code === 6 || code === "already-exists") return;
-    throw error;
-  }
+      // The signature proves MyanMyanPay sent this, not that the customer paid
+      // what the order costs. The QR amount comes from our own server-side
+      // total, so a SUCCESS for any other amount is never treated as payment:
+      // it is parked for the owner to review instead of becoming a sale.
+      if (!isSettledPaymentStatus(currentPaymentStatus)) {
+        const expectedMmk = Math.round(Number(currentOrder.amountMmk));
+        const receivedMmk = Math.round(Number(payload.amount));
 
-  // Award loyalty points for successful payment
-  const customerUid = (order.customer as Record<string, unknown> | undefined)?.uid;
-  if (customerUid && typeof customerUid === 'string') {
-    // Mark coupon as used if one was applied
-    const couponId = order.couponId as string | undefined;
-    const couponCode = order.couponCode as string | undefined;
-    
-    if (couponId && couponCode) {
-      try {
-        const { CouponService } = await import("@/lib/couponService");
-        // eslint-disable-next-line react-hooks/rules-of-hooks -- not a React hook; the `use` prefix only looks like one
-        const couponUsed = await CouponService.useCouponAdmin(
-          adminDb,
-          customerUid,
-          couponId,
-          transactionId
-        );
+        if (
+          !Number.isFinite(expectedMmk) ||
+          !Number.isFinite(receivedMmk) ||
+          expectedMmk <= 0 ||
+          expectedMmk !== receivedMmk
+        ) {
+          tx.set(
+            orderRef,
+            {
+              paymentStatus: "AMOUNT_MISMATCH",
+              status: "payment_review",
+              callbackPayload: payload,
+              amountMismatch: {
+                expectedMmk: Number.isFinite(expectedMmk) ? expectedMmk : null,
+                receivedMmk: Number.isFinite(receivedMmk) ? receivedMmk : null,
+                receivedAt: nowIso,
+              },
+              updatedAt: nowIso,
+            },
+            { merge: true },
+          );
 
-        if (couponUsed) {
-          console.log("Coupon marked as used for MMPay order:", {
-            orderId: payload.orderId,
-            couponId,
-            couponCode,
+          tx.create(db.collection("notifications").doc(), {
+            type: "online_order",
+            title: "Payment needs review",
+            message: `Order #${payload.orderId}: MyanMyanPay reported ${Number.isFinite(receivedMmk) ? receivedMmk.toLocaleString() : "an unknown amount"} MMK, but the order total is ${Number.isFinite(expectedMmk) ? expectedMmk.toLocaleString() : "unknown"} MMK. The order was not marked paid.`,
+            link: "/owner/sales/online-orders",
+            metadata: { orderId: payload.orderId },
+            read: false,
+            createdAt: new Date(),
           });
-        }
-      } catch (couponError) {
-        console.error("Error marking coupon as used for MMPay:", couponError);
-      }
-    }
-    
-    try {
-      const { LoyaltyService } = await import("@/lib/loyaltyService");
-      const loyaltyResult = await LoyaltyService.awardPoints({
-        customerId: customerUid,
-        transactionId,
-        // Same basis as COD: what was paid for goods, not delivery. This used
-        // to be the pre-discount subtotal, so QR orders earned more points.
-        transactionAmount: Math.max(0, total - deliveryFee),
-        source: 'online',
-        description: `Online payment for order ${payload.orderId}`,
-      });
 
-      if (loyaltyResult.success) {
-        console.log("Loyalty points awarded for online payment:", {
-          orderId: payload.orderId,
-          points: loyaltyResult.pointsAwarded,
-          newTotal: loyaltyResult.newTotalPoints,
-          coupons: loyaltyResult.couponsGenerated.length,
-        });
+          return { kind: "amount_mismatch", expectedMmk, receivedMmk };
+        }
       }
-    } catch (loyaltyError) {
-      // Don't fail the transaction if loyalty fails
-      console.error("Error awarding loyalty points for online payment:", loyaltyError);
     }
-  }
+
+    // A late QR expiry / failure must not overwrite a settled order, nor one
+    // parked for review after money moved for the wrong amount.
+    const parkedForReview =
+      currentStatus === "payment_review" &&
+      !isSettledPaymentStatus(payload.status);
+
+    if (parkedForReview || !shouldApplyCallback(currentPaymentStatus, payload.status)) {
+      const reason = parkedForReview
+        ? "Order is awaiting payment review"
+        : `Order already settled as ${currentPaymentStatus}`;
+
+      // Keep the evidence without touching the order's state, so a late QR
+      // expiry is still auditable. `updatedAt` is deliberately left alone: it
+      // drives the owner's ordering, and this event changed nothing.
+      tx.set(
+        orderRef,
+        { ignoredCallback: { payload, reason, receivedAt: nowIso } },
+        { merge: true },
+      );
+      return { kind: "ignored", reason };
+    }
+
+    tx.set(
+      orderRef,
+      {
+        paymentStatus: payload.status,
+        status: orderStatusFor(payload.status),
+        callbackPayload: payload,
+        updatedAt: nowIso,
+      },
+      { merge: true },
+    );
+    return { kind: "applied" };
+  });
+}
+
+/**
+ * Mark a paid order whose stock could not be taken, and tell the owner.
+ *
+ * Runs in a transaction so concurrent deliveries record it, and notify, once.
+ * Returns true when this call recorded it, false when it already was.
+ */
+async function recordStockConflict(
+  db: Firestore,
+  orderId: string,
+  detail: string,
+): Promise<boolean> {
+  const orderRef = db.collection("onlineOrders").doc(orderId);
+
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(orderRef);
+    if (!snap.exists) return false;
+
+    const order = (snap.data() || {}) as Record<string, unknown>;
+    if (order.status === "stock_conflict") return false;
+
+    const nowIso = new Date().toISOString();
+    tx.set(
+      orderRef,
+      {
+        status: "stock_conflict",
+        stockDeductionStatus: "failed",
+        stockDeductionError: detail,
+        stockConflictAt: nowIso,
+        updatedAt: nowIso,
+      },
+      { merge: true },
+    );
+
+    tx.create(db.collection("notifications").doc(), {
+      type: "online_order",
+      title: "Paid order needs attention",
+      message: `Order #${orderId} was paid through MyanMyanPay, but its stock could not be taken (the items may have sold out). Refund the customer, or restock the items and fulfil the order.`,
+      link: "/owner/sales/online-orders",
+      metadata: { orderId },
+      read: false,
+      // Server timestamp, like the paid-order notification: the POS orders
+      // the bell by this field.
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    return true;
+  });
 }
 
 export async function POST(req: Request) {
@@ -359,132 +327,109 @@ export async function POST(req: Request) {
       );
     }
 
-    const orderRef = adminDb.collection("onlineOrders").doc(payload.orderId);
-    const currentSnap = await orderRef.get();
-
-    // A signed callback for an order we never created: record nothing (a
-    // merge-write would create a stray order) but answer 200 so it is not
-    // retried forever.
-    if (!currentSnap.exists) {
-      console.warn(`MMPay callback for unknown order ${payload.orderId}`);
+    // Our order ids never contain "/", so such an id cannot be one of ours.
+    // Answered like any other unknown order: 200, so it is not retried forever.
+    if (payload.orderId.includes("/")) {
+      console.warn(`MMPay callback with malformed orderId ${payload.orderId}`);
       return NextResponse.json({ ok: true, applied: false, reason: "unknown_order" });
     }
 
-    const currentOrder = (currentSnap.data() || {}) as Record<string, unknown>;
-    const currentPaymentStatus = currentOrder.paymentStatus;
+    const db = adminDb;
+    const decision = await decideCallback(db, payload);
 
-    // The signature proves MyanMyanPay sent this, not that the customer paid
-    // what the order costs. The QR amount comes from our own server-side
-    // total, so a SUCCESS for any other amount is never treated as payment:
-    // it is parked for the owner to review instead of becoming a sale.
-    if (
-      payload.status === "SUCCESS" &&
-      !isSettledPaymentStatus(currentPaymentStatus)
-    ) {
-      const expectedMmk = Math.round(Number(currentOrder.amountMmk));
-      const receivedMmk = Math.round(Number(payload.amount));
+    switch (decision.kind) {
+      case "unknown_order":
+        // A signed callback for an order we never created: nothing was
+        // recorded (a merge-write would create a stray order) but answer 200
+        // so it is not retried forever.
+        console.warn(`MMPay callback for unknown order ${payload.orderId}`);
+        return NextResponse.json({ ok: true, applied: false, reason: "unknown_order" });
 
-      if (
-        !Number.isFinite(expectedMmk) ||
-        !Number.isFinite(receivedMmk) ||
-        expectedMmk <= 0 ||
-        expectedMmk !== receivedMmk
-      ) {
-        console.error(
-          `MMPay amount mismatch for ${payload.orderId}: expected ${expectedMmk}, received ${receivedMmk}`,
+      case "already_handled":
+        // A repeated SUCCESS for an order that already has its sale, or that
+        // is parked for the owner. Nothing is rewritten: re-applying it used
+        // to flip a stock conflict back to "paid" on every retry.
+        console.warn(
+          `Ignoring repeated SUCCESS callback for ${payload.orderId}: ${decision.reason}`,
         );
-
-        await orderRef.set(
-          {
-            paymentStatus: "AMOUNT_MISMATCH",
-            status: "payment_review",
-            callbackPayload: payload,
-            amountMismatch: {
-              expectedMmk: Number.isFinite(expectedMmk) ? expectedMmk : null,
-              receivedMmk: Number.isFinite(receivedMmk) ? receivedMmk : null,
-              receivedAt: new Date().toISOString(),
-            },
-            updatedAt: new Date().toISOString(),
-          },
-          { merge: true },
-        );
-
-        try {
-          await adminDb.collection("notifications").add({
-            type: "online_order",
-            title: "Payment needs review",
-            message: `Order #${payload.orderId}: MyanMyanPay reported ${Number.isFinite(receivedMmk) ? receivedMmk.toLocaleString() : "an unknown amount"} MMK, but the order total is ${Number.isFinite(expectedMmk) ? expectedMmk.toLocaleString() : "unknown"} MMK. The order was not marked paid.`,
-            link: "/owner/sales/online-orders",
-            metadata: { orderId: payload.orderId },
-            read: false,
-            createdAt: new Date(),
+        if (decision.reason === "already_recorded") {
+          // An earlier delivery may have stopped between recording the sale
+          // and the coupon / points / cart steps. Each is idempotent (the
+          // points via the `loyaltyAward` marker), so finishing them here
+          // cannot apply anything twice.
+          await completePaidOrderExtras(db, {
+            orderId: payload.orderId,
+            transactionDocId: transactionDocIdFor(payload),
           });
-        } catch (notifError) {
-          console.error("Could not create amount-mismatch notification:", notifError);
         }
+        if (decision.announcementPending) {
+          // An earlier delivery recorded the sale but did not get as far as
+          // telling anyone. Idempotent: does nothing once announced.
+          await announcePaidOnlineOrder(db, {
+            orderId: payload.orderId,
+            fallbackAmount: payload.amount,
+            fallbackPaymentMethod: payload.method || "MMPAY",
+          });
+        }
+        return NextResponse.json({ ok: true, applied: false, reason: decision.reason });
 
+      case "amount_mismatch":
+        console.error(
+          `MMPay amount mismatch for ${payload.orderId}: expected ${decision.expectedMmk}, received ${decision.receivedMmk}`,
+        );
         return NextResponse.json({ ok: true, applied: false, reason: "amount_mismatch" });
-      }
+
+      case "ignored":
+        console.warn(
+          `Ignoring ${payload.status} callback for ${payload.orderId}: ${decision.reason}`,
+        );
+        // Still a 200: the callback was received and understood. Anything else
+        // makes MyanMyanPay retry it indefinitely.
+        return NextResponse.json({ ok: true, applied: false });
+
+      case "applied":
+        break;
     }
-
-    if (!shouldApplyCallback(currentPaymentStatus, payload.status)) {
-      // Keep the evidence without touching the order's state, so a late QR
-      // expiry is still auditable. `updatedAt` is deliberately left alone: it
-      // drives the owner's ordering, and this event changed nothing.
-      console.warn(
-        `Ignoring ${payload.status} callback for ${payload.orderId}: already settled as ${currentPaymentStatus}`,
-      );
-
-      await orderRef.set(
-        {
-          ignoredCallback: {
-            payload,
-            reason: `Order already settled as ${currentPaymentStatus}`,
-            receivedAt: new Date().toISOString(),
-          },
-        },
-        { merge: true },
-      );
-
-      // Still a 200: the callback was received and understood. Anything else
-      // makes MyanMyanPay retry it indefinitely.
-      return NextResponse.json({ ok: true, applied: false });
-    }
-
-    await orderRef.set(
-      {
-        paymentStatus: payload.status,
-        status: orderStatusFor(payload.status),
-        callbackPayload: payload,
-        updatedAt: new Date().toISOString(),
-      },
-      { merge: true },
-    );
 
     if (payload.status === "SUCCESS") {
+      let deduction: Awaited<ReturnType<typeof deductStockForPaidOnlineOrder>>;
       try {
-        await deductStockForPaidOnlineOrder(adminDb, payload.orderId);
+        deduction = await deductStockForPaidOnlineOrder(db, payload.orderId);
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Failed to sync inventory";
+        // Anything other than "the shelf is short" (a Firestore timeout,
+        // contention, ...) is rethrown: the 500 makes MyanMyanPay retry, and
+        // the retry finds the order paid without a sale and tries again.
+        if (!isStockShortageError(error)) throw error;
 
-        await adminDb.collection("onlineOrders").doc(payload.orderId).set(
-          {
-            status: "stock_conflict",
-            stockDeductionStatus: "failed",
-            stockDeductionError: message,
-            updatedAt: new Date().toISOString(),
-          },
-          { merge: true },
+        // Paid, but the stock is gone. Retrying cannot fix that, so record it
+        // once, tell the owner once, and acknowledge. No sale, points or
+        // coupon use until someone resolves it.
+        const firstReport = await recordStockConflict(
+          db,
+          payload.orderId,
+          error.message,
         );
+        console.error(
+          `MMPay order ${payload.orderId} paid but stock could not be taken${firstReport ? "" : " (already recorded)"}:`,
+          error.message,
+        );
+        return NextResponse.json({ ok: true, applied: false, reason: "stock_conflict" });
+      }
 
-        return NextResponse.json({ error: message }, { status: 409 });
+      // The order's payment state changed between our write and the
+      // deduction (e.g. a REFUNDED callback): do not record a sale for it.
+      if (deduction.reason === "payment_not_success") {
+        console.warn(
+          `Not recording a sale for ${payload.orderId}: payment is no longer SUCCESS`,
+        );
+        return NextResponse.json({ ok: true, applied: false, reason: "payment_not_success" });
       }
     }
 
-    // The QR lapsed or the payment failed: give the reserved stock back so
-    // other buyers and the POS can sell it. A later SUCCESS for the same
-    // order takes it again (see deductStockForPaidOnlineOrder).
+    // The QR lapsed or the payment failed: give the reserved stock and the
+    // coupon back so other buyers and the POS can sell it. A later SUCCESS
+    // for the same order takes the stock again (see
+    // deductStockForPaidOnlineOrder) or is recorded as a stock conflict.
     if (payload.status === "FAILED" || payload.status === "EXPIRED") {
       try {
         await releaseStockReservation(
@@ -500,12 +445,18 @@ export async function POST(req: Request) {
       }
     }
 
-    await createTransactionFromOnlineOrder(payload);
-
-    // Announce only once the sale is fully recorded, and only for a payment that
-    // actually succeeded. Shared with the sandbox route so both behave alike.
+    // Only reached for SUCCESS once the stock has been taken (or was already
+    // taken by an earlier delivery): record the sale, then the coupon, the
+    // points (once, guarded by `loyaltyAward`) and the saved cart, then
+    // announce. Shared with the sandbox route so both behave alike.
     if (payload.status === "SUCCESS") {
-      await announcePaidOnlineOrder(adminDb, {
+      const transactionDocId = transactionDocIdFor(payload);
+      await recordOnlineSale(db, payload, { transactionDocId });
+      await completePaidOrderExtras(db, {
+        orderId: payload.orderId,
+        transactionDocId,
+      });
+      await announcePaidOnlineOrder(db, {
         orderId: payload.orderId,
         fallbackAmount: payload.amount,
         fallbackPaymentMethod: payload.method || "MMPAY",
@@ -514,8 +465,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ message: "Callback processed" });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Webhook error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // The detail stays in the server log; MyanMyanPay only needs the status.
+    console.error("MMPay webhook failed:", error);
+    return NextResponse.json({ error: "Webhook processing failed" }, { status: 500 });
   }
 }
 

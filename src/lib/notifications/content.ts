@@ -15,6 +15,7 @@
  * `>` escaped — the same escaping the email bodies already use.
  */
 
+import { formatStoreDate } from "../storeTime";
 import {
   escapeHtml,
   renderEmailLayout,
@@ -91,16 +92,14 @@ function describeDiscount(
   return `${formatPrice(discountValue)} off`;
 }
 
-/** "23 Sep 2026", or "" when the input is blank or unparseable. */
+/**
+ * "23 Sep 2026", or "" when the input is blank or unparseable. In store time
+ * (lib/storeTime.ts): a "YYYY-MM-DD" promotion date is that calendar day,
+ * never shifted to the day before by the server's or reader's time zone.
+ */
 function formatDate(input?: string): string {
   if (!input) return "";
-  const date = new Date(input);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+  return formatStoreDate(input);
 }
 
 /** "23 Sep 2026 - 30 Sep 2026", "until 30 Sep 2026", "from 23 Sep 2026" or "". */

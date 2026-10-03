@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb, getUidFromAuthHeader } from "@/lib/firebase-admin";
-import { FieldValue } from "firebase-admin/firestore";
-import { exceedsDocBudget } from "@/lib/documentBudget";
+import {
+  validateOptionalImage,
+  validateOptionalText,
+  validateTransactionRef,
+} from "@/lib/server/requestValidation";
+import { requestOrderCancellation } from "@/lib/server/cancellationRequest";
 
 /**
  * POST /api/transactions/request-cancel
@@ -11,6 +15,15 @@ import { exceedsDocBudget } from "@/lib/documentBudget";
  * The requesting customer is taken from the ID token only. A `customerUid` in
  * the body (sent by older clients) is ignored; it used to be trusted, so anyone
  * could file a cancellation against another customer's order.
+ *
+ * The checks and the write live in lib/server/cancellationRequest.ts, shared
+ * with the Telegram bot so both refuse and accept the same orders. Responses:
+ *   200 { success, message }   request filed (owner approves it in the POS)
+ *   400 { error }              invalid input, or the order is not cancellable
+ *                              (already cancelled/refunded, request pending,
+ *                              delivered, out for delivery, payment/stock
+ *                              problem, scan/wallet without a QR image)
+ *   401 / 403 / 404 / 413 / 500 as before
  */
 export async function POST(request: NextRequest) {
   try {
@@ -29,12 +42,16 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json().catch(() => null);
-    const { transactionId, reason, qrCodeImage } = body ?? {};
+    const {
+      transactionId: rawTransactionId,
+      reason: rawReason,
+      qrCodeImage: rawQrCodeImage,
+    } = body ?? {};
 
     // Validate required fields
     if (
-      !transactionId ||
-      (typeof transactionId !== "string" && typeof transactionId !== "number")
+      !rawTransactionId ||
+      (typeof rawTransactionId !== "string" && typeof rawTransactionId !== "number")
     ) {
       return NextResponse.json(
         { error: "Missing required fields" },
@@ -42,158 +59,44 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get the transaction
-    const transactionsRef = adminDb.collection("transactions");
-    const snapshot = await transactionsRef
-      .where("transactionId", "==", transactionId)
-      .limit(1)
-      .get();
-
-    if (snapshot.empty) {
-      return NextResponse.json(
-        { error: "Transaction not found" },
-        { status: 404 }
-      );
+    // The QR screenshot is a JPEG data URL from the purchases page (or an
+    // image on the store's own storage host); anything else is refused.
+    const transactionRef = validateTransactionRef(rawTransactionId);
+    if (!transactionRef.ok) {
+      return NextResponse.json({ error: transactionRef.error }, { status: 400 });
+    }
+    const reasonCheck = validateOptionalText(rawReason, "Reason");
+    if (!reasonCheck.ok) {
+      return NextResponse.json({ error: reasonCheck.error }, { status: 400 });
+    }
+    const qrCheck = validateOptionalImage(rawQrCodeImage, "QR code image");
+    if (!qrCheck.ok) {
+      return NextResponse.json({ error: qrCheck.error }, { status: 400 });
     }
 
-    const transactionDoc = snapshot.docs[0];
-    const transaction = transactionDoc.data();
+    const result = await requestOrderCancellation(
+      {
+        uid: customerUid,
+        transactionId: transactionRef.value,
+        reason: reasonCheck.value,
+        qrCodeImage: qrCheck.value,
+        channel: "web",
+      },
+      { db: adminDb },
+    );
 
-    // Verify customer ownership
-    if (transaction.customer?.uid !== customerUid && transaction.customerUid !== customerUid) {
-      return NextResponse.json(
-        { error: "Unauthorized: Transaction does not belong to this customer" },
-        { status: 403 }
-      );
-    }
-
-    // Check if transaction is in a cancellable state. A partial refund means
-    // items were already returned, so the order is past cancelling too.
-    const status = (transaction.status || "").toLowerCase();
-    if (
-      status === "cancelled" ||
-      status === "refunded" ||
-      status === "partially_refunded"
-    ) {
-      return NextResponse.json(
-        { error: "Transaction is already cancelled or refunded" },
-        { status: 400 }
-      );
-    }
-
-    // Check if already has a pending cancellation request
-    if (transaction.cancellationRequest?.status === "pending") {
-      return NextResponse.json(
-        { error: "A cancellation request is already pending" },
-        { status: 400 }
-      );
-    }
-
-    // Check delivery status (can't cancel if already delivered)
-    if (transaction.deliveryStatus === "delivered") {
-      return NextResponse.json(
-        { error: "Cannot cancel delivered orders. Please request a refund instead." },
-        { status: 400 }
-      );
-    }
-
-    // Validate QR code for Scan/Wallet payments
-    const paymentMethod = (transaction.paymentMethod || "").toLowerCase();
-    if ((paymentMethod === "scan" || paymentMethod === "wallet") && !qrCodeImage) {
-      return NextResponse.json(
-        { error: "QR code image is required for Scan/Wallet payment cancellations" },
-        { status: 400 }
-      );
-    }
-
-    // Create cancellation request
-    const cancellationRequest: any = {
-      status: "pending",
-      reason: reason || "Customer requested cancellation",
-      requestedAt: new Date().toISOString(),
-      requestedBy: customerUid,
-      customerEmail: transaction.customer?.email || "",
-      customerName: transaction.customer?.displayName || "",
-    };
-
-    // Add QR code image if provided
-    if (qrCodeImage) {
-      cancellationRequest.qrCodeImage = qrCodeImage;
-    }
-
-    // The embedded QR image can push the document past Firestore's 1MiB limit,
-    // which surfaces as "Property cancellationRequest contains an invalid
-    // nested entity" — meaningless to a customer. The client compresses first,
-    // so this only trips for very large uploads or callers that bypass it.
-    if (exceedsDocBudget(transaction, "cancellationRequest", cancellationRequest)) {
-      return NextResponse.json(
-        {
-          error:
-            "The uploaded image is too large to attach to this order. Please upload a smaller screenshot.",
-        },
-        { status: 413 }
-      );
-    }
-
-    await transactionsRef.doc(transactionDoc.id).update({
-      cancellationRequest,
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-
-    // Create an owner-facing notification so it shows up in the POS
-    // notification bell/page and routes to the cancellation requests page.
-    try {
-      await adminDb.collection("notifications").add({
-        type: "cancellation_request",
-        title: "Order Cancellation Request",
-        message: `Customer requested to cancel order #${transactionId}`,
-        link: "/owner/requests/cancellations",
-        metadata: {
-          transactionId: transactionDoc.id,
-          orderId: transactionId,
-        },
-        read: false,
-        createdAt: FieldValue.serverTimestamp(),
-      });
-    } catch (notifError) {
-      console.error("Error creating owner notification for cancellation request:", notifError);
-      // Don't fail the request if the notification fails to be created
-    }
-
-    // Acknowledge the request to the customer so they are not left wondering
-    // whether it went through. Best-effort; the request is already saved.
-    try {
-      const { notifyCustomer } = await import("@/lib/notifications/dispatch");
-      await notifyCustomer({
-        customerId: customerUid,
-        event: {
-          type: "cancellation_requested",
-          order: {
-            orderRef: String(transactionId),
-            totalAmount: Number(transaction.total || 0),
-            paymentMethod: transaction.paymentMethod || "",
-            paymentStatus: transaction.paymentStatus || "",
-          },
-          reason: typeof reason === "string" ? reason : undefined,
-        },
-      });
-    } catch (notifyError) {
-      console.error("Error acknowledging cancellation request to customer:", notifyError);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: result.status });
     }
 
     return NextResponse.json({
       success: true,
-      message: "Cancellation request submitted successfully. Please wait for owner approval.",
+      message: result.message,
     });
   } catch (error) {
     console.error("Error creating cancellation request:", error);
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to create cancellation request",
-      },
+      { error: "Failed to create cancellation request" },
       { status: 500 }
     );
   }

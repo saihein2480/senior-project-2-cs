@@ -18,8 +18,16 @@ export async function GET(request: NextRequest) {
     }
 
     const url = new URL(request.url);
-    const pageSize = Math.min(Number(url.searchParams.get("limit")) || 20, 50); // Max 50 per request
+    const pageSize = Math.min(
+      Math.max(Math.floor(Number(url.searchParams.get("limit"))) || 20, 1),
+      50,
+    ); // 1..50 per request
     const lastDocId = url.searchParams.get("lastDocId");
+
+    // The cursor is a document id: no "/" (it would address another path).
+    if (lastDocId !== null && (lastDocId.length > 128 || lastDocId.includes("/"))) {
+      return NextResponse.json({ error: "Invalid lastDocId" }, { status: 400 });
+    }
     const filterStatus = url.searchParams.get("status") || "all";
     const filterPaymentStatus = url.searchParams.get("paymentStatus") || "all";
     const dateRange = url.searchParams.get("dateRange") || "all";

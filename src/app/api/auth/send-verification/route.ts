@@ -79,8 +79,11 @@ export async function POST(req: Request) {
     });
 
     if (!result.sent) {
+      // `result.error` can be raw SMTP transport text; sendMail already logged
+      // the failure, so the client only gets a fixed message.
+      console.error("send-verification: email not sent:", result.error);
       return NextResponse.json(
-        { error: result.error || "Failed to send verification email" },
+        { error: "Failed to send verification email. Please try again." },
         { status: 502 },
       );
     }
@@ -93,10 +96,11 @@ export async function POST(req: Request) {
       expiryMinutes: CODE_TTL_MINUTES,
     });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to send verification";
     console.error("send-verification failed:", error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to send verification" },
+      { status: 500 },
+    );
   }
 }
 

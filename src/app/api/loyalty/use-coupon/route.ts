@@ -93,14 +93,14 @@ function errorResponse(error: unknown, fallback: string) {
     );
   }
 
+  // Callers log the error; the raw text is not sent to the client.
   return NextResponse.json(
-    {
-      success: false,
-      error: error instanceof Error ? error.message : fallback,
-    },
+    { success: false, error: fallback },
     { status: 500 },
   );
 }
+
+const MAX_COUPON_ID_LENGTH = 200;
 
 export async function POST(request: NextRequest) {
   try {
@@ -121,6 +121,13 @@ export async function POST(request: NextRequest) {
     if (!couponId) {
       return NextResponse.json(
         { success: false, error: "Coupon ID is required" },
+        { status: 400 }
+      );
+    }
+
+    if (couponId.length > MAX_COUPON_ID_LENGTH) {
+      return NextResponse.json(
+        { success: false, error: "Invalid coupon ID" },
         { status: 400 }
       );
     }
@@ -170,6 +177,13 @@ export async function DELETE(request: NextRequest) {
     if (!couponId) {
       return NextResponse.json(
         { success: false, error: "Coupon ID is required" },
+        { status: 400 }
+      );
+    }
+
+    if (couponId.length > MAX_COUPON_ID_LENGTH) {
+      return NextResponse.json(
+        { success: false, error: "Invalid coupon ID" },
         { status: 400 }
       );
     }

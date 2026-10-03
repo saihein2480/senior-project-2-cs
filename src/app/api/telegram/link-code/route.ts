@@ -82,9 +82,10 @@ export async function POST(req: Request) {
       expiryMinutes: WEB_LINK_TOKEN_TTL_MINUTES,
     });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to create link";
     console.error("telegram/link-code failed:", error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to create link" },
+      { status: 500 },
+    );
   }
 }

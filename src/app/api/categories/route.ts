@@ -40,7 +40,6 @@ export async function GET() {
       {
         success: false,
         error: "Failed to fetch categories",
-        details: error instanceof Error ? error.message : String(error),
         data: [],
       },
       { status: 500 },

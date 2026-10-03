@@ -17,9 +17,16 @@ export type OnlinePromotion = {
   discountType: "percentage" | "fixed";
   discountValue: number;
   maxDiscountTHB?: number;
+  /**
+   * "YYYY-MM-DD" (a store calendar day, as the POS date picker writes) or an
+   * ISO timestamp. Evaluated in the store's time zone; see `lib/storeTime.ts`.
+   */
   startDate?: string;
   endDate?: string;
   isActive: boolean;
+  /** Branch (shop document id) and its name, when the POS recorded them. */
+  shop?: string;
+  branchName?: string;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -58,9 +65,13 @@ export function mapPromotionDoc(
     discountType: data.discountType === "fixed" ? "fixed" : "percentage",
     discountValue: Number(data.discountValue || 0),
     maxDiscountTHB: Number(data.maxDiscountTHB || 0),
-    startDate: String(data.startDate || ""),
-    endDate: String(data.endDate || ""),
+    // A Timestamp used to become "Timestamp(seconds=...)" here, which no date
+    // parser accepts, so the bound was silently dropped.
+    startDate: normalizeDate(data.startDate),
+    endDate: normalizeDate(data.endDate),
     isActive: Boolean(data.isActive),
+    shop: String(data.shop || ""),
+    branchName: String(data.branchName || ""),
     createdAt: normalizeDate(data.createdAt),
     updatedAt: normalizeDate(data.updatedAt),
   };

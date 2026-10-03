@@ -94,10 +94,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error("Error fetching active coupon:", error);
     return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to fetch active coupon",
-      },
+      { success: false, error: "Failed to fetch active coupon" },
       { status: 500 }
     );
   }

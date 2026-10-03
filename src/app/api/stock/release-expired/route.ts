@@ -1,11 +1,13 @@
 /**
  * Release stock reserved by online checkouts that were never paid.
  *
- * Reservations are normally released by MyanMyanPay's FAILED/EXPIRED callback
- * or the next create-order. This route is the backstop for quiet periods: an
- * abandoned checkout would otherwise keep the item unsellable at the POS until
- * the next online customer comes along. Point a scheduler at it every minute
- * or two (Vercel Cron, cron-job.org, a GitHub Action, ...).
+ * Reservations are normally released by MyanMyanPay's FAILED/EXPIRED callback,
+ * by /api/mmpay/order-status once they are past their expiry, or by the next
+ * create-order / create-cod (which sweep the customer's own open QR order plus
+ * a small batch of anyone's expired ones). This route is the backstop for
+ * quiet periods. vercel.json schedules it once a day, the most Vercel's Hobby
+ * plan allows; on Pro, or with an external scheduler (cron-job.org, a GitHub
+ * Action, ...), call it every few minutes.
  *
  * GET or POST /api/stock/release-expired
  *   headers: Authorization: Bearer <CRON_SECRET>
@@ -15,27 +17,18 @@
  */
 
 import { NextResponse } from "next/server";
-import { timingSafeEqual } from "crypto";
 import { adminDb } from "../../../../lib/firebase-admin";
 import { releaseStaleReservations } from "../../../../lib/onlineStockService";
+import { safeEqual } from "../../../../lib/safeEqual";
+
+/** Expired reservations released per call. */
+const CRON_BATCH = 200;
 
 function isAuthorised(req: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-
   const header = req.headers.get("authorization") || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
-  if (!match) return false;
-
-  const a = Buffer.from(match[1], "utf8");
-  const b = Buffer.from(secret, "utf8");
-  if (a.length !== b.length) return false;
-
-  try {
-    return timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
+  // Constant-time, and never true for an unset secret.
+  return !!match && safeEqual(match[1].trim(), process.env.CRON_SECRET);
 }
 
 async function handle(req: Request) {
@@ -58,12 +51,16 @@ async function handle(req: Request) {
   }
 
   try {
-    const result = await releaseStaleReservations(adminDb);
+    const result = await releaseStaleReservations(adminDb, {
+      globalLimit: CRON_BATCH,
+    });
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to release reservations";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("release-expired failed:", error);
+    return NextResponse.json(
+      { error: "Failed to release reservations" },
+      { status: 500 },
+    );
   }
 }
 

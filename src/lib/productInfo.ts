@@ -1,5 +1,6 @@
 import { db } from "./firebase";
-import { collection, getDocs, doc, getDoc } from "firebase/firestore";
+import { doc, getDoc } from "firebase/firestore";
+import { getCatalogDocs, isCatalogConfigured } from "./server/catalogCache";
 
 interface SizeQuantity {
   size: string;
@@ -64,18 +65,20 @@ export async function getProductById(
 export async function findProductByName(
   productName: string
 ): Promise<ProductInfo | null> {
-  if (!db) {
+  if (!isCatalogConfigured()) {
     console.error("❌ Firebase not configured");
     return null;
   }
 
   try {
-    const querySnapshot = await getDocs(collection(db, "stocks"));
+    // Shared per-minute catalogue snapshot (lib/server/catalogCache.ts), in
+    // the same document-id order the full collection read returned.
+    const docs = await getCatalogDocs();
     const searchTerm = productName.toLowerCase().trim();
 
-    for (const doc of querySnapshot.docs) {
-      const data = doc.data();
-      const name = (data.groupName || data.name || "").toLowerCase();
+    for (const doc of docs) {
+      const data = doc.data;
+      const name = String(data.groupName || data.name || "").toLowerCase();
 
       if (name.includes(searchTerm) || searchTerm.includes(name)) {
         return parseProductData(doc.id, data);

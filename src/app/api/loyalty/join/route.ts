@@ -90,10 +90,7 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error("Join membership error:", error);
     return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to join membership",
-      },
+      { success: false, error: "Failed to join membership" },
       { status: 500 }
     );
   }

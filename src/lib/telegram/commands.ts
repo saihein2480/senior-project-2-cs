@@ -25,5 +25,5 @@ export const BOT_COMMANDS: Array<{ command: string; description: string }> = [
   { command: "unlink", description: "Disconnect this Telegram from your account" },
   { command: "promotions", description: "View current promotions" },
   { command: "account", description: "Manage your account" },
-  { command: "cancel", description: "Cancel a pending order" },
+  { command: "cancel", description: "Ask the shop to cancel a pending order" },
 ];
