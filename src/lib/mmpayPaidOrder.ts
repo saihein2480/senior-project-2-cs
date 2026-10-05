@@ -7,7 +7,8 @@
  * idempotent, so the webhook can re-run them when MyanMyanPay repeats a
  * SUCCESS whose first delivery stopped half way:
  *
- * - the transaction is created with `create()` (one per callback id);
+ * - the transaction is created with `create()` (one per order:
+ *   `TXN-<orderId>`, see transactionDocIdFor);
  * - the coupon is consumed through CouponService.useCouponAdmin, which skips a
  *   coupon already marked used;
  * - points go through awardPointsForOnlinePayment, which writes the
@@ -34,10 +35,23 @@ export type PaidOrderPayload = {
 };
 
 /**
- * Id of the sales transaction a SUCCESS callback creates. MyanMyanPay's own
- * reference when it is usable as a document id, otherwise our order id.
+ * Id (document id and `transactionId`) of the sales transaction a paid QR
+ * order creates: `TXN-` + our order id, e.g. `TXN-ONL-1790263939253-QY5O0V`.
+ *
+ * Derived from the order, not the gateway, so the live callback and the
+ * sandbox shortcut name the sale the same way, and every SUCCESS delivery for
+ * one order maps to one sale. MyanMyanPay's own reference is still kept on the
+ * sale as `paymentMeta.transactionRefId`.
  */
-export function transactionDocIdFor(payload: {
+export function transactionDocIdFor(payload: { orderId: string }): string {
+  return `TXN-${payload.orderId}`;
+}
+
+/**
+ * Id the sale was stored under before `transactionDocIdFor` existed:
+ * MyanMyanPay's reference (sandbox: `TEST-<orderId>`), else the order id.
+ */
+function legacyTransactionDocIdFor(payload: {
   orderId: string;
   transactionRefId?: string;
 }): string {
@@ -45,6 +59,32 @@ export function transactionDocIdFor(payload: {
   return typeof ref === "string" && ref && !ref.includes("/")
     ? ref
     : payload.orderId;
+}
+
+/**
+ * The sale document a SUCCESS callback refers to. Orders paid before the id
+ * change already have their sale under the legacy id; a repeated delivery for
+ * one of those must find it there rather than create a second sale under the
+ * new id. No new legacy ids are ever written, so this read can sit outside the
+ * callback's transaction.
+ *
+ * The legacy document only counts when it is this order's sale. Gateway
+ * references are not unique per order (a manually confirmed payment arrived
+ * as `MMPAY_MANUAL`), so under the old scheme a second order with the same
+ * reference found the first order's sale and was never recorded.
+ */
+export async function resolveTransactionDocId(
+  db: Firestore,
+  payload: { orderId: string; transactionRefId?: string },
+): Promise<string> {
+  const current = transactionDocIdFor(payload);
+  const legacy = legacyTransactionDocIdFor(payload);
+  if (legacy === current) return current;
+
+  const legacySnap = await db.collection("transactions").doc(legacy).get();
+  const isThisOrdersSale =
+    legacySnap.exists && legacySnap.get("onlineOrderId") === payload.orderId;
+  return isThisOrdersSale ? legacy : current;
 }
 
 /**

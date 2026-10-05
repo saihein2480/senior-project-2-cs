@@ -25,6 +25,7 @@ import {
   printCustomerInvoice,
   type CustomerInvoice,
 } from "../../../lib/customerInvoice";
+import { PaymentMethodLabel } from "../../../components/PaymentMethodLabel";
 
 type IconProps = {
   size?: number;
@@ -1626,11 +1627,15 @@ function PurchaseDetailsModal({
                   Payment Method
                 </span>
                 <span className="text-right font-medium text-gray-800">
-                {row.paymentMethod === "cash" ? "💵 Cash" : 
-                 row.paymentMethod === "scan" ? "📱 QR Scan" :
-                 row.paymentMethod === "wallet" ? "📱 QR Scan" :
-                 row.paymentMethod === "cod" ? "🚚 Cash on Delivery" :
-                 row.paymentProvider || row.paymentMethod || "-"}
+                  <PaymentMethodLabel
+                    method={row.paymentMethod}
+                    label={
+                      row.paymentMethod === "cash" ? "Cash" :
+                      row.paymentMethod === "scan" || row.paymentMethod === "wallet" ? "QR Scan" :
+                      row.paymentMethod === "cod" ? "Cash on Delivery" :
+                      row.paymentProvider || row.paymentMethod || "-"
+                    }
+                  />
                 </span>
               </div>
               <div className="flex items-start justify-between gap-3">
@@ -2095,8 +2100,15 @@ function CancelRequestModal({
                   <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
                     Payment Method
                   </span>
-                  <span className="text-sm font-medium text-gray-800 capitalize">
-                    {row.paymentMethod === "cash" ? "💵 Cash" : "📱 Scan"}
+                  <span className="text-sm font-medium text-gray-800">
+                    <PaymentMethodLabel
+                      method={row.paymentMethod || "scan"}
+                      label={
+                        row.paymentMethod === "cash" ? "Cash" :
+                        row.paymentMethod === "cod" ? "COD" :
+                        "QR Scan"
+                      }
+                    />
                   </span>
                 </div>
                 <div className="flex justify-between items-center gap-3 pt-2.5 border-t border-dashed border-rose-200">
@@ -2769,6 +2781,8 @@ function PurchaseRow({
     left: number;
   } | null>(null);
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Same breakdown the details modal and the invoice use.
+  const money = getOrderSummary(row);
 
   const toggleDropdown = () => {
     if (dropdownOpen) {
@@ -2883,20 +2897,39 @@ function PurchaseRow({
           )}
         </div>
       </td>
-      {/* Included in the amount; orders from before delivery fees have none. */}
-      <td className="px-4 py-3 text-gray-700">
-        {normalizeDeliveryFee(row.deliveryFee) > 0 ? (
-          `฿ ${normalizeDeliveryFee(row.deliveryFee).toFixed(2)}`
+      {/* Included in the amount, with the rate charged at checkout. */}
+      <td className="px-4 py-3 whitespace-nowrap text-gray-700">
+        {money.tax > 0 ? (
+          <>
+            ฿ {money.tax.toFixed(2)}
+            {money.taxPercent > 0 && (
+              <span className="ml-1 text-xs text-gray-400">
+                ({formatRatePercent(money.taxPercent)}%)
+              </span>
+            )}
+          </>
         ) : (
           <span className="text-gray-400">-</span>
         )}
       </td>
+      {/* Included in the amount; orders from before delivery fees have none. */}
       <td className="px-4 py-3 text-gray-700">
-        {row.paymentMethod === "cash" ? "💵 Cash" :
-         row.paymentMethod === "scan" ? "📱 QR Scan" :
-         row.paymentMethod === "wallet" ? "👛 Wallet" :
-         row.paymentMethod === "cod" ? "🚚 COD" :
-         row.paymentProvider || row.paymentMethod || "-"}
+        {money.deliveryFee > 0 ? (
+          `฿ ${money.deliveryFee.toFixed(2)}`
+        ) : (
+          <span className="text-gray-400">-</span>
+        )}
+      </td>
+      <td className="px-4 py-3 text-sm text-gray-900">
+        <PaymentMethodLabel
+          method={row.paymentMethod}
+          label={
+            row.paymentMethod === "cash" ? "Cash" :
+            row.paymentMethod === "scan" || row.paymentMethod === "wallet" ? "QR Scan" :
+            row.paymentMethod === "cod" ? "COD" :
+            row.paymentProvider || row.paymentMethod || "-"
+          }
+        />
       </td>
       <td className="px-4 py-3">
         <span
@@ -3011,6 +3044,9 @@ function PurchaseCard({
   onRequestRefund: (row: Txn) => void;
   onViewRefundDetails: (row: Txn) => void;
 }) {
+  // Same breakdown the details modal and the invoice use.
+  const money = getOrderSummary(row);
+
   // Check if order can be cancelled (pending/packaging, not cancelled, no pending request)
   const canCancel =
     (displayStatus === "pending" || displayStatus === "packaging") &&
@@ -3134,12 +3170,29 @@ function PurchaseCard({
         </div>
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+            Tax
+          </p>
+          <p className="text-gray-800">
+            {money.tax > 0 ? (
+              <>
+                ฿ {money.tax.toFixed(2)}
+                {money.taxPercent > 0 && (
+                  <span className="ml-1 text-xs text-gray-400">
+                    ({formatRatePercent(money.taxPercent)}%)
+                  </span>
+                )}
+              </>
+            ) : (
+              "-"
+            )}
+          </p>
+        </div>
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
             Delivery Fee
           </p>
           <p className="text-gray-800">
-            {normalizeDeliveryFee(row.deliveryFee) > 0
-              ? `฿ ${normalizeDeliveryFee(row.deliveryFee).toFixed(2)}`
-              : "-"}
+            {money.deliveryFee > 0 ? `฿ ${money.deliveryFee.toFixed(2)}` : "-"}
           </p>
         </div>
         <div>
@@ -3147,11 +3200,15 @@ function PurchaseCard({
             Payment Method
           </p>
           <p className="text-gray-800">
-            {row.paymentMethod === "cash" ? "💵 Cash" :
-             row.paymentMethod === "scan" ? "📱 QR Scan" :
-             row.paymentMethod === "wallet" ? "📱 QR Scan" :
-             row.paymentMethod === "cod" ? "🚚 COD" :
-             row.paymentProvider || row.paymentMethod || "-"}
+            <PaymentMethodLabel
+              method={row.paymentMethod}
+              label={
+                row.paymentMethod === "cash" ? "Cash" :
+                row.paymentMethod === "scan" || row.paymentMethod === "wallet" ? "QR Scan" :
+                row.paymentMethod === "cod" ? "COD" :
+                row.paymentProvider || row.paymentMethod || "-"
+              }
+            />
           </p>
         </div>
         <div>
@@ -4173,6 +4230,7 @@ export default function PurchaseHistoryPage() {
             <tr className="text-[11px] font-semibold uppercase tracking-wide text-rose-600">
               <th className="px-4 py-3.5">Order ID</th>
               <th className="px-4 py-3.5">Amount (THB / MMK)</th>
+              <th className="px-4 py-3.5">Tax</th>
               <th className="px-4 py-3.5">Delivery Fee</th>
               <th className="px-4 py-3.5">Payment Method</th>
               <th className="px-4 py-3.5">Payment Status</th>
@@ -4185,7 +4243,7 @@ export default function PurchaseHistoryPage() {
           <tbody>
             {sortedFilteredRows.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-4 py-12 text-center">
+                <td colSpan={10} className="px-4 py-12 text-center">
                   <span className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
                     <svg
                       className="h-6 w-6 text-rose-400"

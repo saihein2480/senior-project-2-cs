@@ -11,6 +11,7 @@ import { announcePaidOnlineOrder } from "../../../../lib/notifications/orderPaid
 import {
   completePaidOrderExtras,
   recordOnlineSale,
+  resolveTransactionDocId,
   transactionDocIdFor,
 } from "../../../../lib/mmpayPaidOrder";
 import {
@@ -85,11 +86,10 @@ type CallbackDecision =
 async function decideCallback(
   db: Firestore,
   payload: MmpayPayload,
+  transactionDocId: string,
 ): Promise<CallbackDecision> {
   const orderRef = db.collection("onlineOrders").doc(payload.orderId);
-  const transactionDocRef = db
-    .collection("transactions")
-    .doc(transactionDocIdFor(payload));
+  const transactionDocRef = db.collection("transactions").doc(transactionDocId);
 
   return db.runTransaction<CallbackDecision>(async (tx) => {
     const [orderSnap, transactionSnap] = await Promise.all([
@@ -335,7 +335,14 @@ export async function POST(req: Request) {
     }
 
     const db = adminDb;
-    const decision = await decideCallback(db, payload);
+    // The sale this callback refers to: `TXN-<orderId>`, or the legacy id for
+    // an order whose sale was recorded before that scheme (see
+    // resolveTransactionDocId). Only SUCCESS touches the sale.
+    const transactionDocId =
+      payload.status === "SUCCESS"
+        ? await resolveTransactionDocId(db, payload)
+        : transactionDocIdFor(payload);
+    const decision = await decideCallback(db, payload, transactionDocId);
 
     switch (decision.kind) {
       case "unknown_order":
@@ -359,7 +366,7 @@ export async function POST(req: Request) {
           // cannot apply anything twice.
           await completePaidOrderExtras(db, {
             orderId: payload.orderId,
-            transactionDocId: transactionDocIdFor(payload),
+            transactionDocId,
           });
         }
         if (decision.announcementPending) {
@@ -450,7 +457,6 @@ export async function POST(req: Request) {
     // points (once, guarded by `loyaltyAward`) and the saved cart, then
     // announce. Shared with the sandbox route so both behave alike.
     if (payload.status === "SUCCESS") {
-      const transactionDocId = transactionDocIdFor(payload);
       await recordOnlineSale(db, payload, { transactionDocId });
       await completePaidOrderExtras(db, {
         orderId: payload.orderId,

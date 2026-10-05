@@ -9,6 +9,7 @@ import { isSettledPaymentStatus } from "../../../../lib/mmpayCallback";
 import {
   completePaidOrderExtras,
   recordOnlineSale,
+  transactionDocIdFor,
 } from "../../../../lib/mmpayPaidOrder";
 
 /**
@@ -158,14 +159,17 @@ export async function POST(req: Request) {
     }
 
     // The same records the live callback writes: the sale, then the coupon,
-    // the points (once, guarded by `loyaltyAward`) and the saved cart.
+    // the points (once, guarded by `loyaltyAward`) and the saved cart. The
+    // sale is `TXN-<orderId>` like a live one; the fake gateway reference
+    // above only goes into `paymentMeta.transactionRefId`.
+    const transactionDocId = transactionDocIdFor(payload);
     await recordOnlineSale(adminDb, payload, {
-      transactionDocId: payload.transactionRefId,
+      transactionDocId,
       paymentMetaExtra: { testCompleted: true },
     });
     await completePaidOrderExtras(adminDb, {
       orderId,
-      transactionDocId: payload.transactionRefId,
+      transactionDocId,
     });
 
     // Same announcement the live callback makes: the owner's POS bell entry plus
@@ -180,6 +184,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       message: "Test payment marked as SUCCESS",
       orderId,
+      transactionId: transactionDocId,
       transactionRefId: payload.transactionRefId,
     });
   } catch (error) {
