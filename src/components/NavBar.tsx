@@ -29,6 +29,7 @@ function NavBarContent() {
   const [showBestSellersCategories, setShowBestSellersCategories] =
     useState(false);
   const [showViewAllCategories, setShowViewAllCategories] = useState(false);
+  const [showSalesCategories, setShowSalesCategories] = useState(false);
   const [isMember, setIsMember] = useState(false);
   const [membershipLoading, setMembershipLoading] = useState(false);
   const router = useRouter();
@@ -162,6 +163,7 @@ function NavBarContent() {
       p.startsWith("/view-all") ||
       p.startsWith("/new-arrivals") ||
       p.startsWith("/best-sellers") ||
+      p.startsWith("/sales") ||
       p.startsWith("/product/")
     );
   };
@@ -335,6 +337,8 @@ function NavBarContent() {
       setShowNewArrivalsCategories(true);
     } else if (pathname === "/best-sellers") {
       setShowBestSellersCategories(true);
+    } else if (pathname === "/sales") {
+      setShowSalesCategories(true);
     }
   }, [pathname]);
 
@@ -822,6 +826,16 @@ function NavBarContent() {
               >
                 {t("best_sellers")}
               </Link>
+              <Link
+                href={buildUrlWithBranch("/sales")}
+                className={`text-xs font-semibold tracking-widest uppercase transition-colors ${
+                  isActive("/sales")
+                    ? "text-pink-700 underline decoration-pink-300 underline-offset-4 decoration-2"
+                    : "text-pink-600 hover:text-pink-700"
+                }`}
+              >
+                {t("sales")}
+              </Link>
             </div>
           </div>
 
@@ -1292,6 +1306,69 @@ function NavBarContent() {
                         }}
                         className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
                           isActive("/best-sellers") && selectedCategory === cat
+                            ? "text-rose-600 font-medium"
+                            : "text-gray-500 hover:text-gray-800"
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Sales with collapsible categories */}
+              <div className="border-b border-gray-100">
+                <button
+                  onClick={() => setShowSalesCategories((s) => !s)}
+                  aria-expanded={showSalesCategories}
+                  className={`flex items-center justify-between gap-3 w-full py-3.5 text-base md:text-lg transition-colors ${
+                    isActive("/sales")
+                      ? "text-rose-500"
+                      : "text-gray-900 hover:text-rose-500"
+                  }`}
+                >
+                  <span>{t("sales")}</span>
+                  <svg
+                    className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform duration-200 ${showSalesCategories ? "rotate-90" : ""}`}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M9 5l7 7-7 7"
+                    />
+                  </svg>
+                </button>
+
+                {/* Category filters for Sales */}
+                {showSalesCategories && (
+                  <div className="pb-3 space-y-0.5">
+                    <button
+                      onClick={() => {
+                        handleCategoryClick("all", "/sales");
+                        setMenuOpen(false);
+                      }}
+                      className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
+                        isActive("/sales") && selectedCategory === "all"
+                          ? "text-rose-600 font-medium"
+                          : "text-gray-500 hover:text-gray-800"
+                      }`}
+                    >
+                      All Products
+                    </button>
+                    {categories.map((cat) => (
+                      <button
+                        key={cat}
+                        onClick={() => {
+                          handleCategoryClick(cat, "/sales");
+                          setMenuOpen(false);
+                        }}
+                        className={`block w-full text-left py-2.5 pl-3 text-sm transition-colors ${
+                          isActive("/sales") && selectedCategory === cat
                             ? "text-rose-600 font-medium"
                             : "text-gray-500 hover:text-gray-800"
                         }`}

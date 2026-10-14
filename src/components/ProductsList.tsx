@@ -11,6 +11,8 @@ import { useOnlinePromotions } from "../hooks/useOnlinePromotions";
 import {
   applyBestPromotionToLine,
   getDiscountPercent,
+  isPromotionActiveNow,
+  isPromotionApplicable,
 } from "../lib/onlinePromotion";
 import { useCurrency, formatPrice } from "../hooks/useCurrency";
 import { productImageProps } from "../lib/productImage";
@@ -41,8 +43,11 @@ export default function ProductsList({
   topSellingQuantities = {},
   sortByTopSelling = false,
   topSellingLoading = false,
+  showOnlyOnSale = false,
 }: {
   showOnlyNew?: boolean;
+  /** Restrict the grid to products with an active online promotion. */
+  showOnlyOnSale?: boolean;
   itemsPerPageDefault?: number;
   hideFilters?: boolean;
   showLoadMoreButton?: boolean;
@@ -93,7 +98,29 @@ export default function ProductsList({
     error: queryError,
   } = useProducts();
   const { rate: mmkRate } = useCurrencyRate();
-  const { data: onlinePromotions = [] } = useOnlinePromotions();
+  const { data: onlinePromotions = [], isLoading: promotionsLoading } =
+    useOnlinePromotions();
+
+  // Products that currently have a deal, for the Sales listing. Uses the same
+  // active/applicable rules as checkout so the page never advertises a
+  // promotion that would not actually be honoured. Variant-scoped offers count
+  // too: the product is on sale, the shopper just picks the colour on the
+  // product page.
+  const onSaleProductIds = React.useMemo(() => {
+    const ids = new Set<string>();
+    if (!showOnlyOnSale) return ids;
+    const now = Date.now();
+    for (const promo of onlinePromotions) {
+      if (
+        promo.productId &&
+        isPromotionApplicable(promo) &&
+        isPromotionActiveNow(promo, now)
+      ) {
+        ids.add(promo.productId);
+      }
+    }
+    return ids;
+  }, [onlinePromotions, showOnlyOnSale]);
   const { data: shopsData = [], isLoading: shopsLoading } = useShops();
 
   const [error, setError] = useState<string | null>(null);
@@ -286,6 +313,7 @@ export default function ProductsList({
           if (!hasSize) return false;
         }
         if (showOnlyNew && !(p as Product).isNew) return false;
+        if (showOnlyOnSale && !onSaleProductIds.has(p.id)) return false;
         // Best sellers is the only listing that hides sold-out products
         // entirely. Every other listing keeps them visible but pushes them to
         // the end of the grid (see the sorting step below).
@@ -445,6 +473,7 @@ export default function ProductsList({
   const resultsSettling =
     loading ||
     (sortByTopSelling && topSellingLoading) ||
+    (showOnlyOnSale && promotionsLoading) ||
     (!!filterBranch && shopsLoading);
   useEffect(() => {
     if (resultsSettling) return;
@@ -477,7 +506,13 @@ export default function ProductsList({
 
   // Best sellers also has to wait for the sales ranking, otherwise the grid
   // would briefly render as "empty" before the ranking arrives.
-  if (loading || (sortByTopSelling && topSellingLoading))
+  // The Sales listing likewise waits for promotions, or it would flash
+  // "no sales" before they load.
+  if (
+    loading ||
+    (sortByTopSelling && topSellingLoading) ||
+    (showOnlyOnSale && promotionsLoading)
+  )
     return (
       <div className="bg-white">
         <div className="max-w-6xl mx-auto px-4 py-8">
@@ -510,6 +545,26 @@ export default function ProductsList({
     return <div className="p-8">No products found.</div>;
 
   const effectiveQuery = (localQuery || urlQuery || "").trim();
+  // Sales: no product at this branch has a live promotion right now. Checked
+  // before the generic "no matches" messages, which would wrongly suggest the
+  // shopper's own filters were to blame.
+  if (
+    showOnlyOnSale &&
+    !effectiveQuery &&
+    filterCategory === "all" &&
+    filteredProducts.length === 0
+  ) {
+    return (
+      <div className="max-w-4xl mx-auto p-8 text-center">
+        <div className="text-lg md:text-xl font-medium text-gray-700">
+          No sales right now
+        </div>
+        <div className="mt-3 text-sm text-gray-500">
+          Check back soon for new deals at this branch.
+        </div>
+      </div>
+    );
+  }
   if (effectiveQuery && filteredProducts.length === 0) {
     return (
       <div className="max-w-4xl mx-auto p-8 text-center">
