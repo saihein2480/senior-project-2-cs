@@ -2760,6 +2760,92 @@ function RefundRequestModal({
   );
 }
 
+/**
+ * Chips for any cancellation / return / refund request on the order.
+ *
+ * Shared by the desktop table row and the mobile card so both report a
+ * request identically.
+ */
+function RequestChips({
+  row,
+  displayStatus,
+  className = "",
+}: {
+  row: Txn;
+  displayStatus: PurchaseOrderStatus;
+  className?: string;
+}) {
+  const cancellation = row.cancellationRequest?.status;
+  const refund = (row.refundRequest?.status || "").toLowerCase();
+  // A request on a delivered order is a return; on a cancelled one, a refund.
+  const noun = displayStatus === "delivered" ? "Return" : "Refund";
+
+  const chips: Array<{ label: string; tone: string }> = [];
+  if (cancellation === "pending") {
+    chips.push({ label: "Cancellation Pending", tone: "bg-amber-100 text-amber-800" });
+  } else if (cancellation === "approved") {
+    chips.push({ label: "✓ Cancellation Approved", tone: "bg-green-100 text-green-800" });
+  } else if (cancellation === "rejected") {
+    chips.push({ label: "✗ Cancellation Rejected", tone: "bg-red-100 text-red-800" });
+  }
+  // "completed" is what the POS writes once returned goods pass inspection, so
+  // it reads as approved; "completed_no_refund" means nothing was refunded.
+  if (refund === "pending") {
+    chips.push({ label: `${noun} Pending`, tone: "bg-blue-100 text-blue-800" });
+  } else if (refund === "approved" || refund === "completed") {
+    chips.push({ label: `✓ ${noun} Approved`, tone: "bg-green-100 text-green-800" });
+  } else if (refund === "rejected" || refund === "completed_no_refund") {
+    chips.push({ label: `✗ ${noun} Rejected`, tone: "bg-red-100 text-red-800" });
+  }
+
+  if (chips.length === 0) return null;
+
+  return (
+    <div className={`flex flex-wrap gap-1 ${className}`}>
+      {chips.map((chip) => (
+        <span
+          key={chip.label}
+          className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ${chip.tone}`}
+        >
+          {chip.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** "Oct 14, 2026" and "3:42 PM" as separate lines for the table. */
+function formatOrderDate(timestamp?: string) {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    day: date.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }),
+    time: date.toLocaleTimeString(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+  };
+}
+
+/** First item's name plus how many more, and the total unit count. */
+function summarizeItems(items: TxnItem[] = []) {
+  const units = items.reduce(
+    (sum, item) => sum + Math.max(1, Number(item.quantity) || 1),
+    0,
+  );
+  const first = items[0]?.groupName || "Item";
+  const more = items.length - 1;
+  return {
+    title: more > 0 ? `${first} +${more} more` : first,
+    units,
+  };
+}
+
 function PurchaseRow({
   row,
   displayStatus,
@@ -2781,8 +2867,6 @@ function PurchaseRow({
     left: number;
   } | null>(null);
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
-  // Same breakdown the details modal and the invoice use.
-  const money = getOrderSummary(row);
 
   const toggleDropdown = () => {
     if (dropdownOpen) {
@@ -2832,137 +2916,112 @@ function PurchaseRow({
     // Cancelled paid orders without cancellation refund
     (displayStatus === "cancelled" && isPaidOrder && !hasCancellationRefund && row.refundRequest?.status !== "pending");
 
-  // Show request status
-  const hasPendingCancellation = row.cancellationRequest?.status === "pending";
-  const hasPendingRefund = row.refundRequest?.status === "pending";
-  const hasApprovedCancellation = row.cancellationRequest?.status === "approved";
-  const hasRejectedCancellation = row.cancellationRequest?.status === "rejected";
-  // "completed" is what the POS writes once returned goods pass inspection, so
-  // it belongs with "approved" here — testing for "approved" alone made the chip
-  // vanish at the exact moment the return succeeded.
-  const hasApprovedRefund = ["approved", "completed"].includes(
-    (row.refundRequest?.status || "").toLowerCase(),
-  );
-  const hasRejectedRefund = ["rejected", "completed_no_refund"].includes(
-    (row.refundRequest?.status || "").toLowerCase(),
-  );
-
   // Check if order has completed refunds
   const hasCompletedRefunds = row.refunds && row.refunds.some(r => r.status === "completed");
   const hasCompletedCancellationRefund = row.cancellationRefund?.status === "completed";
   const hasAnyCompletedRefund = hasCompletedRefunds || hasCompletedCancellationRefund;
 
+  // "View" has its own button, so the overflow menu only appears when there is
+  // something else to do with the order.
+  const hasMenuActions = !!(hasAnyCompletedRefund || canCancel || canRefund);
+
+  const orderDate = formatOrderDate(row.timestamp);
+  const itemSummary = summarizeItems(row.items);
+  const mmkTotal = Number(row.amountMmk || row.sellingTotal || 0);
+
   return (
-    <tr className="border-t border-rose-50 hover:bg-rose-50/40 transition-colors">
-      <td className="px-4 py-3 font-semibold text-gray-900">
-        {row.onlineOrderId || row.transactionId || row.id}
-        {hasPendingCancellation && (
-          <span className="ml-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
-            Cancellation Pending
-          </span>
-        )}
-        {hasApprovedCancellation && (
-          <span className="ml-2 inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
-            ✓ Cancellation Approved
-          </span>
-        )}
-        {hasRejectedCancellation && (
-          <span className="ml-2 inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
-            ✗ Cancellation Rejected
-          </span>
-        )}
-        {hasPendingRefund && (
-          <span className="ml-2 inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
-            {displayStatus === "delivered" ? "Return Pending" : "Refund Pending"}
-          </span>
-        )}
-        {hasApprovedRefund && (
-          <span className="ml-2 inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
-            ✓ {displayStatus === "delivered" ? "Return Approved" : "Refund Approved"}
-          </span>
-        )}
-        {hasRejectedRefund && (
-          <span className="ml-2 inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
-            ✗ {displayStatus === "delivered" ? "Return Rejected" : "Refund Rejected"}
-          </span>
+    <tr className="align-middle transition-colors hover:bg-rose-50/40">
+      {/* Order: reference with the date underneath */}
+      <td className="px-5 py-4">
+        <p className="font-semibold text-gray-900">
+          {row.onlineOrderId || row.transactionId || row.id}
+        </p>
+        <p className="mt-0.5 whitespace-nowrap text-xs text-gray-500">
+          {orderDate ? `${orderDate.day} · ${orderDate.time}` : "-"}
+        </p>
+      </td>
+
+      {/* Items */}
+      <td className="max-w-[16rem] px-5 py-4">
+        <p className="truncate text-gray-800" title={itemSummary.title}>
+          {itemSummary.title}
+        </p>
+        <p className="mt-0.5 text-xs text-gray-500">
+          {itemSummary.units} {itemSummary.units === 1 ? "item" : "items"}
+        </p>
+      </td>
+
+      {/* Total. Tax and delivery are included; the breakdown lives in
+          View Details. */}
+      <td className="whitespace-nowrap px-5 py-4 text-right">
+        <p className="font-semibold text-gray-900">
+          ฿ {Number(row.total || 0).toFixed(2)}
+        </p>
+        {mmkTotal > 0 && (
+          <p className="mt-0.5 text-xs text-gray-500">
+            Ks {mmkTotal.toLocaleString()}
+          </p>
         )}
       </td>
-      <td className="px-4 py-3 text-gray-700">
-        <div className="flex flex-col gap-0.5">
-          <span className="font-medium">฿ {Number(row.total || 0).toFixed(2)}</span>
-          {(row.amountMmk || row.sellingTotal) && (
-            <span className="text-xs text-gray-500">
-              Ks {Number(row.amountMmk || row.sellingTotal || 0).toLocaleString()}
-            </span>
-          )}
-        </div>
-      </td>
-      {/* Included in the amount, with the rate charged at checkout. */}
-      <td className="px-4 py-3 whitespace-nowrap text-gray-700">
-        {money.tax > 0 ? (
-          <>
-            ฿ {money.tax.toFixed(2)}
-            {money.taxPercent > 0 && (
-              <span className="ml-1 text-xs text-gray-400">
-                ({formatRatePercent(money.taxPercent)}%)
-              </span>
-            )}
-          </>
-        ) : (
-          <span className="text-gray-400">-</span>
-        )}
-      </td>
-      {/* Included in the amount; orders from before delivery fees have none. */}
-      <td className="px-4 py-3 text-gray-700">
-        {money.deliveryFee > 0 ? (
-          `฿ ${money.deliveryFee.toFixed(2)}`
-        ) : (
-          <span className="text-gray-400">-</span>
-        )}
-      </td>
-      <td className="px-4 py-3 text-sm text-gray-900">
+
+      {/* Payment: method with its status underneath */}
+      <td className="px-5 py-4">
         <PaymentMethodLabel
           method={row.paymentMethod}
-          label={
-            row.paymentMethod === "cash" ? "Cash" :
-            row.paymentMethod === "scan" || row.paymentMethod === "wallet" ? "QR Scan" :
-            row.paymentMethod === "cod" ? "COD" :
-            row.paymentProvider || row.paymentMethod || "-"
-          }
+          label={getPaymentMethodLabel(row)}
+          className="text-gray-800"
         />
+        <div className="mt-1.5">
+          <span
+            className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${getPaymentBadgeClass(
+              normalizePaymentStatus(row.status, row.paymentStatus),
+            )}`}
+          >
+            {getPaymentStatusLabel(row.status, row.paymentStatus)}
+          </span>
+        </div>
       </td>
-      <td className="px-4 py-3">
+
+      {/* Order status with any open request underneath */}
+      <td className="px-5 py-4">
         <span
-          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${getPaymentBadgeClass(
-            normalizePaymentStatus(row.status, row.paymentStatus),
-          )}`}
-        >
-          {getPaymentStatusLabel(row.status, row.paymentStatus)}
-        </span>
-      </td>
-      <td className="px-4 py-3">
-        <span
-          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize ${getStatusBadgeClass(
+          className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize ${getStatusBadgeClass(
             displayStatus,
           )}`}
         >
           {getPurchaseOrderStatusLabel(displayStatus)}
         </span>
+        <RequestChips
+          row={row}
+          displayStatus={displayStatus}
+          className="mt-1.5"
+        />
       </td>
-      <td className="px-4 py-3 text-gray-600">
-        {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
-      </td>
-      <td className="px-4 py-3 text-gray-700">
-        {row.transactionId || row.id || "-"}
-      </td>
-      <td className="px-4 py-3 text-right relative">
-        <button
-          ref={actionButtonRef}
-          onClick={toggleDropdown}
-          className="p-1.5 rounded-full text-gray-400 hover:bg-rose-100 hover:text-rose-600 transition-colors"
-        >
-          <MoreVertical size={20} />
-        </button>
+
+      <td className="px-5 py-4">
+        <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={() => onViewDetails(row)}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-rose-200 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-50"
+          >
+            <Eye size={14} /> View
+          </button>
+          {hasMenuActions ? (
+            <button
+              ref={actionButtonRef}
+              onClick={toggleDropdown}
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={dropdownOpen}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-rose-100 hover:text-rose-600"
+            >
+              <MoreVertical size={18} />
+            </button>
+          ) : (
+            // Keeps the View buttons lined up down the column.
+            <span className="inline-block h-8 w-8" aria-hidden />
+          )}
+        </div>
 
         {dropdownOpen && (
           <>
@@ -2977,18 +3036,9 @@ function PurchaseRow({
                 left: menuPosition?.left ?? 8,
               }}
             >
-              <button
-                className="w-full text-left px-4 py-2.5 text-sm font-medium hover:bg-rose-50 flex items-center gap-2 text-gray-700 transition-colors"
-                onClick={() => {
-                  setDropdownOpen(false);
-                  onViewDetails(row);
-                }}
-              >
-                <Eye size={16} className="text-rose-500" /> View Details
-              </button>
               {hasAnyCompletedRefund && (
                 <button
-                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-emerald-50 flex items-center gap-2 text-emerald-600 transition-colors border-t border-gray-100"
+                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-emerald-50 flex items-center gap-2 text-emerald-600 transition-colors border-t border-gray-100 first:border-t-0"
                   onClick={() => {
                     setDropdownOpen(false);
                     onViewRefundDetails(row);
@@ -2999,7 +3049,7 @@ function PurchaseRow({
               )}
               {canCancel && (
                 <button
-                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-red-50 flex items-center gap-2 text-red-600 transition-colors border-t border-gray-100"
+                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-red-50 flex items-center gap-2 text-red-600 transition-colors border-t border-gray-100 first:border-t-0"
                   onClick={() => {
                     setDropdownOpen(false);
                     onRequestCancel(row);
@@ -3010,7 +3060,7 @@ function PurchaseRow({
               )}
               {canRefund && (
                 <button
-                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2 text-blue-600 transition-colors border-t border-gray-100"
+                  className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2 text-blue-600 transition-colors border-t border-gray-100 first:border-t-0"
                   onClick={() => {
                     setDropdownOpen(false);
                     onRequestRefund(row);
@@ -4224,26 +4274,26 @@ export default function PurchaseHistoryPage() {
         )}
       </div>
 
+      {/* Desktop table. Kept to the columns a shopper scans for; tax,
+          delivery fee and the transaction ID are in View Details. */}
       <div className="mt-6 hidden overflow-x-auto overflow-y-visible rounded-2xl border border-rose-100 bg-white shadow-sm md:block">
         <table className="min-w-full text-sm">
-          <thead className="bg-gradient-to-r from-rose-50 to-pink-50 text-left">
-            <tr className="text-[11px] font-semibold uppercase tracking-wide text-rose-600">
-              <th className="px-4 py-3.5">Order ID</th>
-              <th className="px-4 py-3.5">Amount (THB / MMK)</th>
-              <th className="px-4 py-3.5">Tax</th>
-              <th className="px-4 py-3.5">Delivery Fee</th>
-              <th className="px-4 py-3.5">Payment Method</th>
-              <th className="px-4 py-3.5">Payment Status</th>
-              <th className="px-4 py-3.5">Order Status</th>
-              <th className="px-4 py-3.5">Date</th>
-              <th className="px-4 py-3.5">Transaction ID</th>
-              <th className="px-4 py-3.5 text-right">Actions</th>
+          <thead className="border-b border-rose-100 bg-rose-50/50 text-left">
+            <tr className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+              <th scope="col" className="px-5 py-3">Order</th>
+              <th scope="col" className="px-5 py-3">Items</th>
+              <th scope="col" className="px-5 py-3 text-right">Total</th>
+              <th scope="col" className="px-5 py-3">Payment</th>
+              <th scope="col" className="px-5 py-3">Status</th>
+              <th scope="col" className="px-5 py-3 text-right">
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-rose-50">
             {sortedFilteredRows.length === 0 ? (
               <tr>
-                <td colSpan={10} className="px-4 py-12 text-center">
+                <td colSpan={6} className="px-4 py-12 text-center">
                   <span className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-rose-50 to-pink-50">
                     <svg
                       className="h-6 w-6 text-rose-400"
